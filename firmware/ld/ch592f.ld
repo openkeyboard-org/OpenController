@@ -180,7 +180,7 @@ SECTIONS
         PROVIDE( _ebss = .);
     } >RAM AT>FLASH
 
-    ASSERT(_ebss <= 0x20005800, "BSS collides with diag scratch at 0x20005800")
+    ASSERT(_ebss <= _diag_scratch_start, "BSS collides with the diag scratch window")
 
     PROVIDE( _end = _ebss);
     PROVIDE( end = . );
@@ -207,8 +207,10 @@ SECTIONS
         PROVIDE( _diag_safe_end = . );
     } >RAM
 
-    ASSERT(_diag_safe_start == 0x20005820, "diag counters must start at 0x20005820")
-    ASSERT(_diag_safe_end <= 0x20005A00, ".diag_safe overflows the 0x200 diag window")
+    ASSERT(_diag_safe_start == _diag_scratch_end,
+           "diag counters must start right after the asm scratch window")
+    ASSERT(_diag_safe_end <= _diag_scratch_start + 0x200,
+           ".diag_safe overflows the 0x200 diag window")
 
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
@@ -220,8 +222,8 @@ SECTIONS
     } >RAM
 
     ASSERT(_diag_safe_end <= _susrstack, ".diag_safe overflows into the stack region")
-    ASSERT(_eusrstack == 0x200067F0,
-           "stack top must sit just below the OpenBoot boot-request word")
+    ASSERT(_eusrstack == OC_BOOTREQ_ADDR,
+           "stack top must sit just below the OpenBoot boot-request word (memory.ld)")
     ASSERT(ORIGIN(FLASH) == OC_SLOT_A_BASE || ORIGIN(FLASH) == OC_SLOT_B_BASE,
            "app must link at one of OpenBoot's slot bases (see memory.ld)")
     ASSERT(_kbd_id_start == ORIGIN(FLASH) + 0x20,
@@ -232,5 +234,5 @@ SECTIONS
 
     /* Image length for the identity header: end of the last loadable flash
      * byte (the .data initializers), relative to the slot base. */
-    _kbd_image_len = (LOADADDR(.data) + SIZEOF(.data) + 3 & ~3) - ORIGIN(FLASH);
+    _kbd_image_len = ((LOADADDR(.data) + SIZEOF(.data) + 3) & ~3) - ORIGIN(FLASH);
 }

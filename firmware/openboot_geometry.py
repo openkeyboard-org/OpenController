@@ -50,8 +50,15 @@ def run_make(openboot: Path, args: list[str], goal: str) -> str:
     """
     cmd = ["make", "--no-print-directory", "-C", str(openboot / "firmware")]
     cmd += args + [goal]
-    proc = subprocess.run(
-        cmd, capture_output=True, text=True, env={"PATH": _path(), "MAKEFLAGS": ""})
+    try:
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120,
+            env={"PATH": _path(), "MAKEFLAGS": ""})
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"`make {goal}` hung for {exc.timeout:.0f}s in the OpenBoot "
+            "submodule; a stalled parse would otherwise hang the parent "
+            "build with no diagnostic") from exc
     if proc.returncode != 0:
         raise RuntimeError(
             f"`make {goal}` failed in the OpenBoot submodule "
@@ -84,7 +91,7 @@ def geometry(openboot: Path,
     if not image:
         raise RuntimeError("print-image-path produced nothing")
     # The caller splits this line on whitespace, so a path containing any
-    # would silently truncate every field after it. Refuse rather than emit
+    # whitespace would silently truncate every field after it. Refuse rather than emit
     # something the Makefile would misparse into a wrong slot size.
     if len(image.split()) != 1:
         raise RuntimeError(f"bootloader image path contains whitespace: {image!r}")
@@ -145,6 +152,15 @@ def geometry(openboot: Path,
     if record > erase:
         raise RuntimeError(
             f"record 0x{record:X} does not fit its erase block 0x{erase:X}")
+    # openboot_app.c derives the record address as BASE + SIZE - ERASE_BLOCK;
+    # if base or size is not erase-block aligned, that address misses the
+    # block boundary and the first COMMIT erases image bytes instead.
+    if base % erase:
+        raise RuntimeError(
+            f"slot A base 0x{base:X} is not aligned to the erase block 0x{erase:X}")
+    if size % erase:
+        raise RuntimeError(
+            f"slot size 0x{size:X} is not a multiple of the erase block 0x{erase:X}")
     return base, size, size - erase, record, image, cfg["OB_SLOT_B_BASE"]
 
 

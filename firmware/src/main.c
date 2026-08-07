@@ -149,14 +149,13 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 /* Enter-bootloader service, one step per Main_Circulation pass (mirrors the
  * OpenDongle IAP_Service split: the UART dispatch only LATCHES, this acts).
  *
- *   FLUSH_BOND — post a pending deferred bond save, then let
- *                TMOS_SystemProcess() run it on the next pass (an A6 81
- *                arriving right after a fresh pair must not lose the bond:
- *                RF_Disconnect() clears the pending flag);
- *   QUIESCE    — RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
- *   DRAIN      — wait for the frame's 61 0D 0A ACK to physically leave the
- *                UART (bounded ~20 ms wall clock: a host not draining must
- *                not block the update);
+ *   QUIESCE — RF_FlushBondSave() writes a pending deferred bond save
+ *             synchronously (an A6 81 right after a fresh pair must not
+ *             lose the bond; RF_Disconnect() clears the pending flag), then
+ *             RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
+ *   DRAIN   — wait for the frame's 61 0D 0A ACK to physically leave the
+ *             UART (bounded ~20 ms wall clock: a host not draining must
+ *             not block the update);
  * then mask global IRQs (CSR 0x800, same idiom as rf_task's critical
  * sections — nothing may re-arm the radio past this point) and enter the
  * bootloader via openboot_request_update() (writes OB_BOOTREQ_MAGIC to the
@@ -172,12 +171,9 @@ static void OpenBoot_Service(void)
             return;
         }
         RF_FlushBondSave();
-        svc_state = 1;
-        return;                 /* TMOS_SystemProcess runs the save next pass */
-    case 1:
         RF_Disconnect();
         svc_start = SYS_GetSysTickCnt();
-        svc_state = 2;
+        svc_state = 1;
         return;
     default:
         if (!KeyboardUart_TxIdle()
@@ -218,13 +214,14 @@ int main(void)
     KeyboardUart_SetFrameCallback(handle_uart_frame);
     BOOT_PHASE(0xA2);
 
-    /* Normalize OpenBoot-inherited SysTick state. The bootloader leaves
-     * SysTick free-running (its idle-timeout clock); CH59x_BLEInit's
-     * SysTick_Config enables the SysTick IRQ one line before PFIC disables
-     * it, and a pending count-flag inherited from the bootloader fires in
-     * that window, vectoring into the startup's weak infinite-loop handler
-     * (bench-diagnosed: boot phase parked at the pre-BLEInit marker). Stop
-     * the counter and drop any pending state before the HAL touches it. */
+    /* Clear OpenBoot-inherited SysTick PENDING state. The bootloader uses
+     * SysTick for its idle timeout and stops the counter before jumping
+     * here (ob_jump_app), but stopping does not clear an already-latched
+     * count-flag or the PFIC pending bit. CH59x_BLEInit's SysTick_Config
+     * enables the SysTick IRQ one line before PFIC disables it, and the
+     * inherited pending state fires in that window, vectoring into the
+     * startup's weak infinite-loop handler (bench-diagnosed: boot phase
+     * parked at the pre-BLEInit marker; this clear cures it). */
     SysTick->CTLR = 0;
     SysTick->SR = 0;
     PFIC_ClearPendingIRQ(SysTick_IRQn);

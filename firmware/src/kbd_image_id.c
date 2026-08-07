@@ -21,16 +21,16 @@ extern const char _kbd_image_len[];
 const kbd_image_id_t
 __attribute__((section(".kbd_id"), used, aligned(4)))
 kbd_image_id = {
-    { KBD_IMAGE_ID_MAGIC0, KBD_IMAGE_ID_MAGIC1,
-      KBD_IMAGE_ID_MAGIC2, KBD_IMAGE_ID_MAGIC3 },
-    KBD_IMAGE_ID_FORMAT,
-    KBD_CHIP_FAMILY_ID,
-    KBD_IMAGE_KIND_APP,
-    KBD_IMAGE_ID_LEN,
-    OPENBOOT_SLOT_BASE,
-    (uint32_t)(uintptr_t)_kbd_image_len,
-    0u,
-    0u,
-    0u,
-    0u,
+    .magic         = { KBD_IMAGE_ID_MAGIC0, KBD_IMAGE_ID_MAGIC1,
+                       KBD_IMAGE_ID_MAGIC2, KBD_IMAGE_ID_MAGIC3 },
+    .format_ver    = KBD_IMAGE_ID_FORMAT,
+    .family        = KBD_CHIP_FAMILY_ID,
+    .image_kind    = KBD_IMAGE_KIND_APP,
+    .header_len    = KBD_IMAGE_ID_LEN,
+    .base          = OPENBOOT_SLOT_BASE,
+    .image_len     = (uint32_t)(uintptr_t)_kbd_image_len,
+    .image_crc32   = 0u,
+    .build_id      = 0u,
+    .flags         = 0u,
+    .extension_len = 0u,
 };

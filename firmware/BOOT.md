@@ -55,12 +55,14 @@ device parked there (boot request, or no bootable slot... none) auto-boots
 the newest bootable slot after 10 s unless a HELLO arrives first (the first
 successful HELLO disables the timeout for that power cycle — fail-stay).
 
-**SysTick handoff:** OpenBoot leaves SysTick free-running (its idle-timeout
-clock). `main.c` stops the counter and clears pending state before
-`CH59x_BLEInit()` — the HAL enables the SysTick IRQ one line before
-disabling it in PFIC, and an inherited pending count-flag fires in that
-window into the startup's weak infinite-loop handler (bench-diagnosed wedge;
-do not remove the normalization).
+**SysTick handoff:** OpenBoot uses SysTick for its idle timeout and stops
+the counter before jumping to the app (`ob_jump_app`) — but stopping does
+not clear an already-latched count-flag or the PFIC pending bit. `main.c`
+clears that pending state before `CH59x_BLEInit()`: the HAL enables the
+SysTick IRQ one line before disabling it in PFIC, and the inherited pending
+state fires in that window into the startup's weak infinite-loop handler
+(bench-diagnosed wedge; do not remove the clear). Upstream candidate:
+OpenBoot could clear SR/PFIC pending at handoff.
 
 ## Entering the bootloader
 

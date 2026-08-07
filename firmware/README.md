@@ -30,12 +30,14 @@ Embedded GCC12/bin`; override it for your install.
 
 ## Build
 
-Prerequisites: GNU Make >= 4.3, `git submodule update --init --recursive`
+Prerequisites: GNU Make >= 4.3, Python 3 (slot-geometry derivation; plus
+`pyserial` for `make update`), `git submodule update --init --recursive`
 (the OpenBoot bootloader and its SDK pins), and a Rust toolchain for the
 `openboot` CLI (updates/bundles only).
 
 ```bash
-make [SLOT=A|B]   # build/ch592f-slot<S>/opencontroller_ch592f.{elf,hex,bin}
+make              # slot A -> build/ch592f-slotA/opencontroller_ch592f.{elf,hex,bin}
+make SLOT=B       # slot B -> build/ch592f-slotB/...
 make bundle       # both slots -> build/opencontroller-ch592f.obb
 make factory      # blessed whole-chip image (bootloader + slot A + record)
 make clean
