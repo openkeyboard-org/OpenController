@@ -203,16 +203,38 @@ void Main_Circulation(void)
     }
 }
 
+/* Boot-phase sentinel at 0x20005800, continuing the startup's 0xC0..0xC5
+ * series (see startup_CH592_phased.S): 0xA0.. marks main()'s init phases so
+ * a wedge is SWD-attributable without a debugger. */
+#define BOOT_PHASE(x)  (*(volatile uint8_t *)0x20005800 = (uint8_t)(x))
+
 int main(void)
 {
+    BOOT_PHASE(0xA0);
     SetSysClock(CLK_SOURCE_PLL_60MHz);
+    BOOT_PHASE(0xA1);
 
     KeyboardUart_Init();
     KeyboardUart_SetFrameCallback(handle_uart_frame);
+    BOOT_PHASE(0xA2);
+
+    /* Normalize OpenBoot-inherited SysTick state. The bootloader leaves
+     * SysTick free-running (its idle-timeout clock); CH59x_BLEInit's
+     * SysTick_Config enables the SysTick IRQ one line before PFIC disables
+     * it, and a pending count-flag inherited from the bootloader fires in
+     * that window, vectoring into the startup's weak infinite-loop handler
+     * (bench-diagnosed: boot phase parked at the pre-BLEInit marker). Stop
+     * the counter and drop any pending state before the HAL touches it. */
+    SysTick->CTLR = 0;
+    SysTick->SR = 0;
+    PFIC_ClearPendingIRQ(SysTick_IRQn);
 
     CH59x_BLEInit();
+    BOOT_PHASE(0xA3);
     HAL_Init();
+    BOOT_PHASE(0xA4);
     RF_RoleInit();
+    BOOT_PHASE(0xA5);
 
     /* No manual PFIC_EnableIRQ(BLEB_IRQn)/PFIC_EnableIRQ(BLEL_IRQn) here: the BLE
      * library's BLE_IPCoreInit already writes the IRQ 20/21 enables, so the
@@ -225,11 +247,13 @@ int main(void)
      * BB_IRQLibFunction in hardware (see the Makefile SCHED_SRC note). */
 
     RF_TaskInit();
+    BOOT_PHASE(0xA6);
     if (RF_HasBond()) {
         transport_is_2g4 = 1;
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x35);
     }
     watchdog_init();
+    BOOT_PHASE(0xA7);
     Main_Circulation();
 }

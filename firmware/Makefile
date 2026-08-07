@@ -533,8 +533,17 @@ update: bundle
 	    echo "ERROR: $$f has ODG2 family 0x$$fam, expected 0xb2 (OpenController keyboard)" >&2; \
 	    exit 1; }; \
 	done
+#	Ask the running application to enter the bootloader (A6 81 = stock OTA
+#	mode), then ride out the ~2 s of post-reset UART turbulence before the
+#	first HELLO - the CLI's fast retries all land inside it otherwise
+#	(bench-measured: HELLO fails at t<2 s, succeeds from ~2.3 s). If the
+#	device is already in the bootloader the A6 81 bytes are SOF-hunt noise
+#	and the settle is harmless.
+	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
+#	No separate `boot` step: the flash flow ends with BOOT itself
+#	("boot after: yes"), so the device is already running the new image
+#	when this returns - a trailing boot would HELLO an application.
 	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" flash "$(BUNDLE_BIN)" --force
-	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" boot
 
 # Probe the keyboard-side CH592F.
 # minichlink selects the probe with `-l <serial>`, which MUST be the last arg.
