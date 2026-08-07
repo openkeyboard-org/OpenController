@@ -1418,6 +1418,19 @@ void RF_Disconnect(void)
     RF_Shut();
 }
 
+/* Post the deferred bond save NOW if one is pending. Normally the save event
+ * fires on the first caught connected poll; a firmware-update request landing
+ * in that window would otherwise lose the fresh bond, because RF_Disconnect()
+ * clears bond_save_pending. Callers must let TMOS_SystemProcess() run once
+ * after this before disconnecting, so the posted event actually executes. */
+void RF_FlushBondSave(void)
+{
+    if (bond_save_pending) {
+        bond_save_pending = 0;
+        rf_set_event_atomic(RF_EVT_SAVE_BOND);
+    }
+}
+
 void RF_ClearBond(void)
 {
     rf_clear_bond_ram();

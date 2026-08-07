@@ -12,6 +12,7 @@
 #include "HAL.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#include "openboot_app.h"
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 
@@ -20,6 +21,9 @@ const uint8_t MacAddr[6] = {0xbd, 0xc3, 0xab, 0x10, 0x53, 0x5c};
 #endif
 
 static uint8_t transport_is_2g4;
+
+/* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
+static volatile uint8_t openboot_entry_pending;
 
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
  * Main_Circulation. Reset-only -- the WWDG interrupt is left disabled because the
@@ -126,11 +130,63 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         break;
 
     case 0x70: /* version: stock firmwareB often ACKs only */
-    case 0x81: /* OTA/BLE-IAP mode */
+        break;
+
+    case 0x81: /* OTA mode -> enter the OpenBoot bootloader.
+                * Latch only; OpenBoot_Service() acts from the main loop so
+                * the frame's ACK is queued first and RF teardown never nests
+                * inside frame dispatch. Single-shot is fail-safe here: with a
+                * blessed image, a spurious trigger costs ~10 s off-air and
+                * the bootloader's idle timeout boots the app back. */
+        openboot_entry_pending = 1;
         break;
 
     default:
         break;
+    }
+}
+
+/* Enter-bootloader service, one step per Main_Circulation pass (mirrors the
+ * OpenDongle IAP_Service split: the UART dispatch only LATCHES, this acts).
+ *
+ *   FLUSH_BOND — post a pending deferred bond save, then let
+ *                TMOS_SystemProcess() run it on the next pass (an A6 81
+ *                arriving right after a fresh pair must not lose the bond:
+ *                RF_Disconnect() clears the pending flag);
+ *   QUIESCE    — RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
+ *   DRAIN      — wait for the frame's 61 0D 0A ACK to physically leave the
+ *                UART (bounded ~20 ms wall clock: a host not draining must
+ *                not block the update);
+ * then mask global IRQs (CSR 0x800, same idiom as rf_task's critical
+ * sections — nothing may re-arm the radio past this point) and enter the
+ * bootloader via openboot_request_update() (writes OB_BOOTREQ_MAGIC to the
+ * reserved top-of-RAM word and software-resets; noreturn). */
+static void OpenBoot_Service(void)
+{
+    static uint8_t  svc_state;
+    static uint32_t svc_start;
+
+    switch (svc_state) {
+    case 0:
+        if (!openboot_entry_pending) {
+            return;
+        }
+        RF_FlushBondSave();
+        svc_state = 1;
+        return;                 /* TMOS_SystemProcess runs the save next pass */
+    case 1:
+        RF_Disconnect();
+        svc_start = SYS_GetSysTickCnt();
+        svc_state = 2;
+        return;
+    default:
+        if (!KeyboardUart_TxIdle()
+                && (uint32_t)(SYS_GetSysTickCnt() - svc_start)
+                       < (GetSysClock() / 50u)) {   /* ~20 ms */
+            return;
+        }
+        __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
+        openboot_request_update();  /* noreturn */
     }
 }
 
@@ -142,6 +198,7 @@ void Main_Circulation(void)
         TMOS_SystemProcess();
         RF_ConnectedTick();
         KeyboardUart_Poll();
+        OpenBoot_Service();
         WATCHDOG_FEED();
     }
 }

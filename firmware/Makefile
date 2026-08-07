@@ -4,6 +4,11 @@
 # OpenController keyboard wireless-module firmware — CH592F
 # Target: WCH CH592F (QingKe RISC-V4F, 60MHz, 448KB flash, 26KB SRAM)
 #
+# The application runs under OpenBoot (third_party/openboot): bootloader at
+# [0, 0x2000), two A/B application slots, per-slot boot records. Each build
+# targets ONE slot (SLOT=A|B); releases ship both builds as one .obb bundle.
+# See BOOT.md for the flash map and update flows.
+#
 # REQUIRED toolchain:
 #
 #   MounRiver/WCH GCC12:
@@ -26,6 +31,15 @@
 #   MRS   + INT_SOFT=1: 0 bytes changed (DEAD)
 #   MRS   + INT_SOFT=0: 20 bytes changed (FULLY ALIVE)
 #   WCH prebuilt RF_PHY.hex (reference): 13 bytes changed
+
+# Grouped targets (&:) need GNU Make >= 4.3; older make silently races the
+# factory rule instead of failing.
+ifneq ($(shell printf '4.3\n%s\n' '$(MAKE_VERSION)' | sort -V -C && echo ok),ok)
+$(error GNU Make 4.3 or newer is required; this is $(MAKE_VERSION))
+endif
+.DELETE_ON_ERROR:
+
+PYTHON := /usr/bin/python3 -I
 
 # SDK path (relative to this Makefile): the vendored WeActStudio SDK subset.
 # Layout mirrors the WeAct example tree; see vendor/README.md for provenance.
@@ -58,10 +72,65 @@ LD     := $(PREFIX)gcc
 OBJCOPY:= $(PREFIX)objcopy
 SIZE   := $(PREFIX)size
 
+# ---------------------------------------------------------------------------
+# OpenBoot integration
+# ---------------------------------------------------------------------------
+OPENBOOT := $(abspath ../third_party/openboot)
+OPENBOOT_BOARD := opencontroller-ch592
+# The OpenBoot revision this build is pinned to. Declared rather than read from
+# the submodule so it is a deterministic parse-time value, and asserted against
+# the actual checkout by check-deps and again by the factory rule (manifest).
+OPENBOOT_REVISION := c8ddc2f80dd126ebe20b3d0065951c16476a9f58
+# Same GCC12 toolchain for app and bootloader (no two-toolchain split), but
+# keep the hard gate below - upstream's own compiler check is advisory.
+OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
+OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
+
+# OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
+# copied here. openboot_app.c derives its boot-record address from
+# SLOT_BASE + SLOT_SIZE, so a local copy that drifted from the bootloader's
+# own build would silently point one slot away. openboot_geometry.py also
+# cross-checks slot contiguity and app-region containment.
+OPENBOOT_GEOM := $(shell $(PYTHON) openboot_geometry.py \
+    --openboot "$(OPENBOOT)" --chip ch592 --transport uart \
+    --board $(OPENBOOT_BOARD))
+ifneq ($(words $(OPENBOOT_GEOM)),6)
+$(error cannot read OpenBoot slot geometry - run: git submodule update --init --recursive)
+endif
+OPENBOOT_SLOT_A_BASE := $(word 1,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_SIZE   := $(word 2,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_CAP    := $(word 3,$(OPENBOOT_GEOM))
+OPENBOOT_RECORD_SZ   := $(word 4,$(OPENBOOT_GEOM))
+OPENBOOT_SRC_BIN     := $(word 5,$(OPENBOOT_GEOM))
+OPENBOOT_SLOT_B_BASE := $(word 6,$(OPENBOOT_GEOM))
+
+# Which slot this build targets. OpenBoot alternates its write target after
+# every COMMIT, so a release needs BOTH builds: an update is refused unless
+# the image's base equals the device's current write_base. Objects are
+# compiled per slot rather than linked twice from one set, because the slot
+# base reaches the compiler (openboot_app.c and kbd_image_id.c use it).
+SLOT ?= A
+ifeq ($(SLOT),A)
+OPENBOOT_SLOT_BASE := $(OPENBOOT_SLOT_A_BASE)
+else ifeq ($(SLOT),B)
+OPENBOOT_SLOT_BASE := $(OPENBOOT_SLOT_B_BASE)
+else
+$(error SLOT must be A or B, got '$(SLOT)')
+endif
+
 # Project
 TARGET := opencontroller_ch592f
-BUILD  := build
-FLASHABLE := $(BUILD)/$(TARGET)_flashable.bin
+BUILD  := build/ch592f-slot$(SLOT)
+MEMORY_LD := $(BUILD)/memory.ld
+
+SLOT_A_BIN := build/ch592f-slotA/$(TARGET).bin
+SLOT_B_BIN := build/ch592f-slotB/$(TARGET).bin
+BUNDLE_BIN := build/opencontroller-ch592f.obb
+
+OPENBOOT_FACTORY_BIN := $(patsubst %.bin,%-factory.bin,$(OPENBOOT_SRC_BIN))
+OPENBOOT_MANIFEST := $(patsubst %.bin,%.manifest,$(OPENBOOT_SRC_BIN))
+FACTORY_BIN := $(BUILD)/$(TARGET)-factory.bin
+FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
 
 # Architecture flags
 ARCH   := -march=rv32imac_zicsr_zifencei -mabi=ilp32
@@ -73,6 +142,9 @@ CFLAGS += -std=gnu99
 CFLAGS += -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += -fno-common
+CFLAGS += -DOPENBOOT_CHIP_CH59X
+CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
+CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 
 # Per-build overrides go through EXTRA_CFLAGS. Use `make EXTRA_CFLAGS=...`
 # not `make CFLAGS+=...`; the latter clobbers ARCH.
@@ -116,8 +188,9 @@ ifneq ($(INT_SOFT),0)
 $(error INT_SOFT=$(INT_SOFT) is disabled for OpenController; use WCH GCC12 with INT_SOFT=0)
 endif
 
-# Linker flags
-LDFLAGS := $(ARCH) -T ld/ch592f.ld
+# Linker flags. -L $(BUILD) resolves ld/ch592f.ld's `INCLUDE memory.ld`
+# against the per-slot generated MEMORY block.
+LDFLAGS := $(ARCH) -T ld/ch592f.ld -L $(BUILD)
 LDFLAGS += -nostartfiles
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,--print-memory-usage
@@ -130,12 +203,16 @@ INCLUDES += -I $(BLE_LIB_DIR)
 INCLUDES += -I $(SDK_BLE_DIR)/HAL/include
 INCLUDES += -I $(SDK_SRC_DIR)/StdPeriphDriver/inc
 INCLUDES += -I $(SDK_SRC_DIR)/RVMSIS
+INCLUDES += -I $(OPENBOOT)/firmware/app
 
 # Source files - our application
-# This is the keyboard-side wireless module, so USB device + IAP are omitted.
+# This is the keyboard-side wireless module: no USB device. Firmware updates
+# go through OpenBoot (A6 81 -> openboot_request_update; see BOOT.md).
 APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
+APP_SRC += src/kbd_image_id.c
+APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 
 # Source files - SDK startup
 STARTUP_SRC := src/startup_CH592_phased.S
@@ -199,8 +276,9 @@ OBJS   := $(C_OBJS) $(S_OBJS)
 
 # Rebuild objects when command-line build flags change. Bench work relies on
 # macros such as STOCK_SEED_BOND and RF_TURNAROUND_COUNT; without a flag stamp,
-# make can reuse stale objects when only those values change.
-CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" | sha256sum | cut -d' ' -f1)
+# make can reuse stale objects when only those values change. SLOT and the
+# OpenBoot pin are part of the fingerprint: both reach the compiled bytes.
+CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" | sha256sum | cut -d' ' -f1)
 CONFIG_STAMP := $(BUILD)/.config-$(CONFIG_FINGERPRINT)
 
 # VPATH for source file lookup
@@ -209,20 +287,23 @@ VPATH += $(SDK_BLE_DIR)/HAL
 VPATH += $(SDK_SRC_DIR)/StdPeriphDriver
 VPATH += $(SDK_SRC_DIR)/RVMSIS
 VPATH += $(BLE_LIB_DIR)
+VPATH += $(OPENBOOT)/firmware/app
 
-# Maximum app size — see link.ld. Anything larger overlaps the IAP staging
-# region at 0x37000 (wiped on every flash) or the stage-1 code at 0x6D000
-# (brickable). Keep below this or revisit the flash map.
-APP_MAX_BYTES := 221184
+# Maximum app size: the OpenBoot slot CAPACITY (slot size minus the 4 KB
+# OBR2 record block). Derived from the submodule, never a literal.
+APP_MAX_BYTES := $(OPENBOOT_SLOT_CAP)
 
 MINICHLINK ?= minichlink
 GDB        := $(PREFIX)gdb
 # WCH-LinkE probe serial. Empty selects whatever single probe is attached;
-# set KBD_PROBE=<serial> when multiple probes are connected.
+# set KBD_PROBE=<serial> when multiple probes are connected. Destructive
+# targets (flash-factory) refuse to run without it.
 KBD_PROBE ?=
 PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
-.PHONY: all clean size size-check info gdbserver debug flash-app flash-bare
+.PHONY: all clean size size-check info gdbserver debug factory flash-factory \
+        bundle update check-deps check-openboot-toolchain check-factory-slot \
+        openboot-image openboot-test FORCE
 
 all: $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size size-check
 
@@ -231,7 +312,25 @@ $(CONFIG_STAMP): | $(BUILD)
 
 $(OBJS): $(CONFIG_STAMP)
 
-$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld
+# The MEMORY block, generated per slot so ld/ch592f.ld holds no literal
+# addresses. FORCE plus a content guard: it re-evaluates on every build (the
+# geometry can move when the submodule pin does) but only rewrites the file
+# when the bytes actually change, so an unchanged slot does not relink.
+$(MEMORY_LD): FORCE | $(BUILD)
+	@{ echo "/* Generated by firmware/Makefile for slot $(SLOT). DO NOT EDIT. */"; \
+	   echo "MEMORY"; \
+	   echo "{"; \
+	   echo "    FLASH (rx)  : ORIGIN = $(OPENBOOT_SLOT_BASE), LENGTH = $(OPENBOOT_SLOT_CAP)"; \
+	   echo "    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 0x67F0"; \
+	   echo "}"; \
+	   echo "OC_SLOT_A_BASE = $(OPENBOOT_SLOT_A_BASE);"; \
+	   echo "OC_SLOT_B_BASE = $(OPENBOOT_SLOT_B_BASE);"; \
+	 } > "$@.tmp"
+	@if cmp -s "$@.tmp" "$@"; then rm -f "$@.tmp"; else mv -f "$@.tmp" "$@"; fi
+
+FORCE:
+
+$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld $(MEMORY_LD)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
 
 $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
@@ -239,9 +338,6 @@ $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf
 
 $(BUILD)/$(TARGET).bin: $(BUILD)/$(TARGET).elf
 	$(OBJCOPY) -O binary $< $@
-
-$(FLASHABLE): $(BUILD)/$(TARGET).bin | $(BUILD)
-	{ perl -e 'print "\x6f\x10\x00\x00", "\xff" x 4092'; cat $<; } > $@
 
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(CFLAGS) $(INCLUDES) -c $< -o $@
@@ -256,34 +352,194 @@ size: $(BUILD)/$(TARGET).elf
 	$(SIZE) $<
 
 size-check: $(BUILD)/$(TARGET).bin
-	@sz=$$(stat -c%s $<); \
-	 pct=$$(( sz * 100 / $(APP_MAX_BYTES) )); \
-	 if [ $$sz -gt $(APP_MAX_BYTES) ]; then \
-	    echo "ERROR: firmware is $$sz B, exceeds $(APP_MAX_BYTES) B budget ($$pct%)."; \
-	    echo "       see link.ld comment — growing past this overlaps the IAP"; \
-	    echo "       staging region or the vendor stage-1 code."; \
+	@sz=$$(stat -c%s $<); max=$$(( $(APP_MAX_BYTES) )); \
+	 pct=$$(( sz * 100 / max )); \
+	 if [ $$sz -gt $$max ]; then \
+	    echo "ERROR: firmware is $$sz B, exceeds the $$max B slot capacity."; \
+	    echo "       The top 4 KB block of each slot belongs to OpenBoot's"; \
+	    echo "       OBR2 boot record; an image reaching into it is destroyed"; \
+	    echo "       by the first COMMIT."; \
 	    exit 1; \
 	 else \
-	    echo "  firmware: $$sz / $(APP_MAX_BYTES) B ($$pct% of app-flash budget)"; \
+	    echo "  firmware: $$sz / $$max B ($$pct% of slot capacity, slot $(SLOT))"; \
 	 fi
+
+# ---------------------------------------------------------------------------
+# Dependency / toolchain gates
+# ---------------------------------------------------------------------------
+# Assert the OpenBoot submodule IS the pinned revision and its worktree is
+# clean. --skip-toolchain because verifying a SHA must not require GCC12 to
+# be installed. (The WCH SDK is vendored in-tree - see vendor/README.md - so
+# there is no SDK-revision half to this check.)
+check-deps:
+	$(PYTHON) $(OPENBOOT)/firmware/check_dependencies.py \
+	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
+
+# OpenBoot's own compiler gate is ADVISORY: a mismatch warns and continues.
+# GCC15 is bench-unvalidated for the bootloader (upstream measured erratic
+# idle auto-boot at 1.5-4.8 s against a configured 10 s, and 4/32 failed
+# software-reset returns on CH572). Keep a HARD gate on the paths that build
+# the bootloader. Override only to reproduce that investigation:
+#   make ... OPENBOOT_ALLOW_UNVALIDATED_GCC=1
+check-openboot-toolchain:
+	@if [ "$(OPENBOOT_ALLOW_UNVALIDATED_GCC)" = "1" ]; then \
+	  echo "openboot toolchain: check bypassed (OPENBOOT_ALLOW_UNVALIDATED_GCC=1)"; \
+	  exit 0; \
+	fi; \
+	gcc=""; \
+	for p in riscv-wch-elf-gcc riscv32-wch-elf-gcc; do \
+	  if [ -x "$(OPENBOOT_TOOLCHAIN)/$$p" ]; then \
+	    gcc="$(OPENBOOT_TOOLCHAIN)/$$p"; break; \
+	  fi; \
+	done; \
+	test -n "$$gcc" || { \
+	  echo "no riscv-wch-elf-gcc or riscv32-wch-elf-gcc under OPENBOOT_TOOLCHAIN='$(OPENBOOT_TOOLCHAIN)'" >&2; \
+	  exit 1; }; \
+	major=$$("$$gcc" -dumpversion | cut -d. -f1); \
+	test "$$major" = "12" || { \
+	  echo "OpenBoot must be built with GCC 12; $$gcc is GCC $$major" >&2; \
+	  echo "  Point OPENBOOT_TOOLCHAIN at a GCC12 bin directory, or set" >&2; \
+	  echo "  OPENBOOT_ALLOW_UNVALIDATED_GCC=1 to reproduce the GCC15" >&2; \
+	  echo "  investigation deliberately." >&2; \
+	  exit 1; }; \
+	echo "openboot toolchain: GCC $$major ($$gcc)"
+
+# Standalone bootloader image (SWD recovery / inspection).
+openboot-image: check-openboot-toolchain
+	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=uart \
+	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" image
+
+# OpenBoot's own gates at the pinned revision (protocol consts, host-native
+# core tests, Rust fmt/clippy/tests) - run before moving the pin.
+openboot-test:
+	+$(MAKE) -C $(OPENBOOT)/firmware test
+	cd $(OPENBOOT)/tools && cargo fmt --check && \
+	    cargo clippy --all-targets -- -D warnings && cargo test
+
+# ---------------------------------------------------------------------------
+# Factory image (bootloader + blessed slot-A app), whole-chip @0
+# ---------------------------------------------------------------------------
+# Factory composition lives in OpenBoot: the image is
+#   bootloader || 0x00 pad || app || zeros || slot A's OBR2 boot record
+# so a blank part boots the application on FIRST POWER-ON with no host and no
+# `openboot bless`. The 0x00 pad matters: programming 0xFF programs nothing
+# on CH5xx, so an 0xFF pad would never land and the readback compare below
+# would fail across it. Never recompose this locally.
+#
+# check-factory-slot sits on the composing rule itself, not just the phony
+# target: asking for the factory .bin directly must not compose a slot-B app
+# into a slot-A image.
+check-factory-slot:
+	@test "$(SLOT)" = "A" || { \
+	  echo "factory images compose the SLOT=A build only (the blessed record describes slot A); use 'make bundle' for updates" >&2; \
+	  exit 1; }
+
+$(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
+        | $(BUILD) check-openboot-toolchain check-factory-slot
+	+$(MAKE) -C $(OPENBOOT)/firmware CHIP=ch592 TRANSPORT=uart \
+	    BOARD=$(OPENBOOT_BOARD) MRS_TOOLCHAIN="$(OPENBOOT_TOOLCHAIN)" \
+	    FACTORY_BLESS=1 APP="$(abspath $(BUILD)/$(TARGET).bin)" factory
+#	The manifest is written by the same OpenBoot build that produced these
+#	bytes; checking it here (not only in check-deps) closes the parallel-make
+#	hole where check-deps finishes after the submodule was read.
+	@rev=$$(sed -n 's/^openboot_revision=//p' "$(OPENBOOT_MANIFEST)"); \
+	 dirty=$$(sed -n 's/^openboot_dirty=//p' "$(OPENBOOT_MANIFEST)"); \
+	 test "$$rev" = "$(OPENBOOT_REVISION)" || { \
+	   echo "OpenBoot built from $$rev, expected $(OPENBOOT_REVISION)" >&2; exit 1; }; \
+	 test "$$dirty" = "0" || { \
+	   echo "OpenBoot worktree is dirty; the image is not the pinned revision's bytes" >&2; \
+	   exit 1; }
+#	Size is a cheap, decisive check that the blessed record is present:
+#	slot base + slot capacity + one record. A short image means FACTORY_BLESS
+#	did not take effect and the unit would sit dead in the bootloader.
+	@want=$$(( $(OPENBOOT_SLOT_A_BASE) + $(OPENBOOT_SLOT_CAP) + $(OPENBOOT_RECORD_SZ) )); \
+	 got=$$(stat -c%s "$(OPENBOOT_FACTORY_BIN)"); \
+	 test "$$got" -eq "$$want" || { \
+	   echo "factory image is $$got B, expected $$want B (blessed record missing?)" >&2; \
+	   exit 1; }
+	@cp "$(OPENBOOT_FACTORY_BIN)" "$(FACTORY_BIN)"
+	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
+	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
+
+factory: $(FACTORY_BIN)
+
+# Whole-chip factory install over SWD. Erases the code flash (NOT DataFlash:
+# the KBD2 bond at physical 0x74000 survives -E), writes the factory image at
+# 0, verifies by READBACK (minichlink ignores its own CH5xx erase/write return
+# values and its verify is disabled), then does a REAL power cycle: -b reboots
+# out of halt without re-running the boot path, so it would prove nothing
+# about first-power-on behavior.
+flash-factory: factory
+	@command -v "$(MINICHLINK)" >/dev/null 2>&1 || { \
+	  echo "minichlink not found: $(MINICHLINK)" >&2; exit 1; }
+	@test -n "$(strip $(KBD_PROBE))" || { \
+	  echo "set KBD_PROBE=<probe serial> - flash-factory refuses to guess the target (a multi-probe bench includes devices that must never be written)" >&2; \
+	  exit 1; }
+	"$(MINICHLINK)" -kt -C linke $(PROBE_ARG)
+	"$(MINICHLINK)" -E -C linke $(PROBE_ARG)
+	"$(MINICHLINK)" -C linke -w "$(abspath $(FACTORY_BIN))" 0 $(PROBE_ARG)
+	"$(MINICHLINK)" -C linke -r "$(BUILD)/.flash-readback.bin" 0 $$(stat -c%s "$(FACTORY_BIN)") $(PROBE_ARG)
+	cmp "$(BUILD)/.flash-readback.bin" "$(FACTORY_BIN)"
+#	The 2.4G bond ("KBD2" at physical 0x74000) survives -E. A shipped unit
+#	must not carry a test fixture's pairing identity; a development/bench
+#	reflash keeps it deliberately via ALLOW_BONDED_FLASH=1 (compared against
+#	exactly "1" so a scripted =0 fails safe). Clear it over UART (A6 52
+#	unpair) if needed - never write CH592 DataFlash over SWD.
+	"$(MINICHLINK)" -C linke -r "$(BUILD)/.flash-bond.bin" 0x74000 4 $(PROBE_ARG)
+	@if head -c 4 "$(BUILD)/.flash-bond.bin" | od -An -tx1 | grep -qi "4b 42 44 32"; then \
+	  if [ "$(strip $(ALLOW_BONDED_FLASH))" = "1" ]; then \
+	    echo "WARNING: KBD2 bond survives at 0x74000 (-E does not reach DataFlash); continuing (ALLOW_BONDED_FLASH=1)" >&2; \
+	  else \
+	    echo "ERROR: a KBD2 bond survives at 0x74000 - this unit still carries a pairing identity." >&2; \
+	    echo "       Clear it over UART (A6 52 unpair), or pass ALLOW_BONDED_FLASH=1 to reflash" >&2; \
+	    echo "       a development unit deliberately." >&2; \
+	    exit 1; \
+	  fi; fi
+	@echo "factory image read back OK"
+	"$(MINICHLINK)" -kt -C linke $(PROBE_ARG)
+	"$(MINICHLINK)" -k3 -C linke $(PROBE_ARG)
+	@echo "NOTE: image is factory-blessed (slot A record included) - the unit"
+	@echo "      boots the application on first power-on; no bless step."
+
+# ---------------------------------------------------------------------------
+# A/B update bundle + bench OBP update over UART
+# ---------------------------------------------------------------------------
+# Both slots plus the bundle. Recursive because SLOT selects the object tree,
+# the link base, and the -D values, so the two builds cannot share a pass.
+bundle:
+	+$(MAKE) SLOT=A $(SLOT_A_BIN)
+	+$(MAKE) SLOT=B $(SLOT_B_BIN)
+	@test -x "$(OPENBOOT_CLI)" || { \
+	  echo "build the OpenBoot CLI first: cargo build --release --manifest-path $(OPENBOOT)/tools/Cargo.toml" >&2; \
+	  exit 1; }
+	"$(OPENBOOT_CLI)" bundle create -o "$(BUNDLE_BIN)" --chip ch592 \
+	    "$(SLOT_A_BIN)@$(OPENBOOT_SLOT_A_BASE)" \
+	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
+	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
+
+# Bench OBP update over the WCH-LinkE CDC wired to PB12/PB13. Opening the
+# port resets the target into OpenBoot's 10 s idle window; the CLI's HELLO
+# then holds it (fail-stay). Both bundle members are family-checked (ODG2
+# family 0xB2 at image offset 0x25) before anything talks to the device:
+# OpenBoot's COMMIT attests only length+CRC, so this is the only guard
+# against cross-flashing a dongle CH592 image on a shared bench.
+OB_PORT ?=
+update: bundle
+	@test -n "$(strip $(OB_PORT))" || { \
+	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
+	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \
+	  fam=$$(od -An -tx1 -j $$(( 0x25 )) -N1 "$$f" | tr -d ' '); \
+	  test "$$fam" = "b2" || { \
+	    echo "ERROR: $$f has ODG2 family 0x$$fam, expected 0xb2 (OpenController keyboard)" >&2; \
+	    exit 1; }; \
+	done
+	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" flash "$(BUNDLE_BIN)" --force
+	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" boot
 
 # Probe the keyboard-side CH592F.
 # minichlink selects the probe with `-l <serial>`, which MUST be the last arg.
 info:
 	$(MINICHLINK) -i $(PROBE_ARG)
-
-# Flash only the app slot. The vendor 0x0000..0x0fff stage-1/trampoline must
-# already be present on the target (stock-compatible boot chain layout).
-flash-app: $(BUILD)/$(TARGET).bin
-	$(MINICHLINK) -w $< 0x1000 $(PROBE_ARG)
-	$(MINICHLINK) -b $(PROBE_ARG)
-
-# Flash a bare CH592F fixture that has no vendor boot chain installed.
-# The first page contains a 4-byte `jal x0, 0x1000` trampoline and erased
-# padding; the app remains linked and placed at 0x1000.
-flash-bare: $(FLASHABLE)
-	$(MINICHLINK) -w $< 0x0 $(PROBE_ARG)
-	$(MINICHLINK) -b $(PROBE_ARG)
 
 # -G "must be last", and so does -l; select the probe via the env var instead.
 gdbserver:
@@ -297,4 +553,4 @@ debug: $(BUILD)/$(TARGET).elf
 	    -ex "b main"
 
 clean:
-	rm -rf $(BUILD)
+	rm -rf build

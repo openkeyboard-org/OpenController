@@ -15,6 +15,7 @@ void RF_TaskInit(void);
 uint8_t RF_Select2G4(void);
 void RF_EnterPairing(void);
 void RF_Disconnect(void);
+void RF_FlushBondSave(void);
 void RF_ClearBond(void);
 uint8_t RF_HasBond(void);
 
