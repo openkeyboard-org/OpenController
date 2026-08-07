@@ -129,6 +129,12 @@ static uint8_t expected_for_header(uint8_t b)
     case 0xA1:
         return 10;
     case 0xA9:
+        /* BLE device-name frames are FIXED 21 bytes on the wire: the host
+         * pads [A9][len][name...][chk] out to 21 regardless of len (stock
+         * host behavior, bench-validated). The checksum sits at 2+len
+         * inside the padded frame — see frame_is_valid(). Do not switch
+         * this to len-derived framing; unread padding would desync the
+         * parser against real hosts. */
         return 21;
     default:
         return 0;

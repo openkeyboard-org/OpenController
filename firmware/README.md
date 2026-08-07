@@ -78,8 +78,9 @@ only for A/B experiments):
 
 Bench-only interop probes (`STOCK_SUPPRESS_RESPONSES`,
 `STOCK_PARK_AFTER_CATCH`, `STOCK_SEED_BOND`, …) default off via `#ifndef`
-fallbacks in `src/rf_task.c` and are enabled with
-`make EXTRA_CFLAGS=-DSTOCK_...=1`.
+fallbacks in `src/rf_task.c`. Enable one with, for example,
+`make EXTRA_CFLAGS="-DSTOCK_SUPPRESS_RESPONSES=1"`; pass multiple `-D`
+options inside the quoted `EXTRA_CFLAGS` value to enable several at once.
 
 The BLE library defaults to the vendored V1.4.2 triple; other versions are
 drop-in directories selected with `make BLE_LIB_DIR=...`.
@@ -87,7 +88,8 @@ drop-in directories selected with `make BLE_LIB_DIR=...`.
 ## Layout and licensing
 
 - `src/`, `ld/`, `Makefile`, `docs/` — first-party, Apache-2.0
-  (see `LICENSE`).
+  (see `LICENSE`), **except** `src/startup_CH592_phased.S`, a WCH-derived
+  startup fork that remains under WCH's notice (see `NOTICE`).
 - `vendor/` — WCH SDK subset and BLE library, **not** Apache-2.0; see
   `NOTICE` and `vendor/README.md` for terms, provenance, and checksums.
 - `docs/TMOS_REVIEW.md` — SDK-alignment review; the written rationale for

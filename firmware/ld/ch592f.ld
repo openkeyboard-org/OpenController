@@ -190,6 +190,9 @@ SECTIONS
         PROVIDE( _diag_safe_end = . );
     } >RAM
 
+    ASSERT(_diag_safe_end <= ORIGIN(RAM) + LENGTH(RAM) - __stack_size,
+           ".diag_safe overflows into the stack region")
+
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
         PROVIDE( _heap_end = . );

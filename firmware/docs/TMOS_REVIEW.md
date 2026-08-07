@@ -74,7 +74,7 @@ justified; the opportunity there is to **document the invariants**, not to "fix"
 > this firmware's basic-mode path") was **wrong**; see the RESOLUTION banner at the top. The BB
 > interrupt is serviced by the library's hardware fast-vector, the trampoline was dead code, and
 > it has been removed. The analysis below is retained to show how the investigation progressed.
-
+>
 > *"The `.S` file for the interrupt trampoline is suspicious — I cannot imagine the SDK is not
 > doing this for us somehow."*
 
@@ -109,7 +109,7 @@ The stock `RF_PHY` example builds with `RF_AUTO_MODE_EXAM = 1`, i.e.
 In that configuration **`BB_IRQHandler` is never overridden** — it stays the weak `j 1b` stub in
 `startup_CH592.S:45,76` and is simply never used. *This is the "the SDK does it for you" case.*
 
-### Why this firmware needs BB anyway
+### Why this firmware needs BB anyway *(historical — conclusion later overturned; see §2 banner)*
 This firmware does **not** use AUTO mode. To mirror the stock proprietary protocol it configures
 **basic-mode continuous raw RX**:
 
@@ -186,7 +186,7 @@ void BB_IRQHandler(void) {
 | `rfConfig_t` zeroed via `tmos_memset`, then `RF_Config` (AA / CRCInit / rfStatusCB / RxMaxlen) | `rf_task.c:480` (`rf_configure`) | `RF_PHY.c:250–268` | ✅ matches |
 | **ISR handler written as idiomatic C `__INTERRUPT __HIGH_CODE`** (`TMR0_IRQHandler`) | `rf_task.c:685` | SDK `__INTERRUPT` idiom | ✅ — *and the template for fixing BB* |
 | RF status callback defers heavy work to TMOS events; no blocking in the ISR | `rf_task.c:245` (`RF_2G4StatusCallBack`) | SDK callback pattern | ✅ good discipline |
-| Startup CSR setup: `0xbc0=0x1f`, `0x804=0x3` (HPE + nesting), `mstatus=0x88`, `mtvec|3` | `startup_CH592_phased.S:219–230` | byte-identical to stock `startup_CH592.S` | ✅ faithful |
+| Startup CSR setup: `0xbc0=0x1f`, `0x804=0x3` (HPE + nesting), `mstatus=0x88`, `mtvec\|3` | `startup_CH592_phased.S:219–230` | byte-identical to stock `startup_CH592.S` | ✅ faithful |
 | Interrupt critical section correctly masks/restores global IRQ state (saves prior `0x88` bits, not an unconditional re-enable) | `rf_task.c:213,219` | mirrors `core_riscv.h` `__risc_v_disable_irq/__enable_irq` | ✅ correct |
 
 ---
@@ -248,7 +248,8 @@ startup and a reset-on-fault policy (a spinning fault handler in the field just 
 needed at all. `src/bb_irq_trampoline.S` was removed (VTF services BB); the manual PFIC enables
 were *also* removed (re-validated under OpenOCD as NOT required — the "required by v1.4.2" reading
 was a minichlink-reset artifact); connected HID delivery validated on both libs. See the
-RESOLUTION banner at the top.**
+RESOLUTION banner at the top. The sub-items below are the original
+recommendation text, retained for history — neither is an open task.**
 - **(a) Investigate first.** The SDK's LWNS example does basic-mode raw RX with no BB handler (§2
   caveat). Diff this firmware's `CH59x_BLEInit`/`HAL_Init` path, BLE-lib version, and
   `PFIC_EnableIRQ(BLEB_IRQn)` usage against LWNS to find *why* BB is required here. If it is a
@@ -293,6 +294,6 @@ the per-operation RF reconfigure cost (D5).
 **Relationship to prior reviews:** this review is orthogonal to `CODE_REVIEW_2026-06-29.md`
 (application logic R1–R13, mostly resolved) and `STOCK_DIFFERENCES.md` (binary-level divergences). The items
 here concern *SDK/TMOS alignment* and were not separately tracked there; D1/P1 (the trampoline)
-is the new, highest-value finding.
+was the highest-value finding of this review and has since been resolved (trampoline removed).
 
 **Status:** recommendations only — no code modified by this review.

@@ -20,5 +20,6 @@ toolchain, build, and flashing instructions.
 
 - Firmware and tools software: [Apache License 2.0](./firmware/LICENSE).
 - Hardware designs: [CERN Open Hardware Licence Version 2 - Weakly Reciprocal](./hardware/LICENSE).
-- `firmware/vendor/` contains third-party WCH/WeActStudio code under its own
-  terms — see [firmware/NOTICE](./firmware/NOTICE).
+- `firmware/vendor/` and the WCH-derived startup file
+  `firmware/src/startup_CH592_phased.S` contain third-party WCH/WeActStudio
+  code under its own terms — see [firmware/NOTICE](./firmware/NOTICE).
