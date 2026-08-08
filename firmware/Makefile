@@ -83,7 +83,7 @@ OPENBOOT_BOARD := opencontroller-ch592
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := c8ddc2f80dd126ebe20b3d0065951c16476a9f58
+OPENBOOT_REVISION := 60a100d13a3a4751dcb7b2b46db368485e05c17f
 # Same GCC12 toolchain for app and bootloader (no two-toolchain split), but
 # keep the hard gate below - upstream's own compiler check is advisory.
 OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
