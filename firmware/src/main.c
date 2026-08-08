@@ -12,6 +12,7 @@
 #include "HAL.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#include "openboot_app.h"
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 
@@ -20,6 +21,9 @@ const uint8_t MacAddr[6] = {0xbd, 0xc3, 0xab, 0x10, 0x53, 0x5c};
 #endif
 
 static uint8_t transport_is_2g4;
+
+/* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
+static volatile uint8_t openboot_entry_pending;
 
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
  * Main_Circulation. Reset-only -- the WWDG interrupt is left disabled because the
@@ -126,11 +130,59 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         break;
 
     case 0x70: /* version: stock firmwareB often ACKs only */
-    case 0x81: /* OTA/BLE-IAP mode */
+        break;
+
+    case 0x81: /* OTA mode -> enter the OpenBoot bootloader.
+                * Latch only; OpenBoot_Service() acts from the main loop so
+                * the frame's ACK is queued first and RF teardown never nests
+                * inside frame dispatch. Single-shot is fail-safe here: with a
+                * blessed image, a spurious trigger costs ~10 s off-air and
+                * the bootloader's idle timeout boots the app back. */
+        openboot_entry_pending = 1;
         break;
 
     default:
         break;
+    }
+}
+
+/* Enter-bootloader service, one step per Main_Circulation pass (mirrors the
+ * OpenDongle IAP_Service split: the UART dispatch only LATCHES, this acts).
+ *
+ *   QUIESCE — RF_FlushBondSave() writes a pending deferred bond save
+ *             synchronously (an A6 81 right after a fresh pair must not
+ *             lose the bond; RF_Disconnect() clears the pending flag), then
+ *             RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
+ *   DRAIN   — wait for the frame's 61 0D 0A ACK to physically leave the
+ *             UART (bounded ~20 ms wall clock: a host not draining must
+ *             not block the update);
+ * then mask global IRQs (CSR 0x800, same idiom as rf_task's critical
+ * sections — nothing may re-arm the radio past this point) and enter the
+ * bootloader via openboot_request_update() (writes OB_BOOTREQ_MAGIC to the
+ * reserved top-of-RAM word and software-resets; noreturn). */
+static void OpenBoot_Service(void)
+{
+    static uint8_t  svc_state;
+    static uint32_t svc_start;
+
+    switch (svc_state) {
+    case 0:
+        if (!openboot_entry_pending) {
+            return;
+        }
+        RF_FlushBondSave();
+        RF_Disconnect();
+        svc_start = SYS_GetSysTickCnt();
+        svc_state = 1;
+        return;
+    default:
+        if (!KeyboardUart_TxIdle()
+                && (uint32_t)(SYS_GetSysTickCnt() - svc_start)
+                       < (GetSysClock() / 50u)) {   /* ~20 ms */
+            return;
+        }
+        __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
+        openboot_request_update();  /* noreturn */
     }
 }
 
@@ -142,20 +194,44 @@ void Main_Circulation(void)
         TMOS_SystemProcess();
         RF_ConnectedTick();
         KeyboardUart_Poll();
+        OpenBoot_Service();
         WATCHDOG_FEED();
     }
 }
 
+/* Boot-phase sentinel at 0x20005800, continuing the startup's 0xC0..0xC5
+ * series (see startup_CH592_phased.S): 0xA0.. marks main()'s init phases so
+ * a wedge is SWD-attributable without a debugger. */
+#define BOOT_PHASE(x)  (*(volatile uint8_t *)0x20005800 = (uint8_t)(x))
+
 int main(void)
 {
+    BOOT_PHASE(0xA0);
     SetSysClock(CLK_SOURCE_PLL_60MHz);
+    BOOT_PHASE(0xA1);
 
     KeyboardUart_Init();
     KeyboardUart_SetFrameCallback(handle_uart_frame);
+    BOOT_PHASE(0xA2);
+
+    /* Clear OpenBoot-inherited SysTick PENDING state. The bootloader uses
+     * SysTick for its idle timeout and stops the counter before jumping
+     * here (ob_jump_app), but stopping does not clear an already-latched
+     * count-flag or the PFIC pending bit. CH59x_BLEInit's SysTick_Config
+     * enables the SysTick IRQ one line before PFIC disables it, and the
+     * inherited pending state fires in that window, vectoring into the
+     * startup's weak infinite-loop handler (bench-diagnosed: boot phase
+     * parked at the pre-BLEInit marker; this clear cures it). */
+    SysTick->CTLR = 0;
+    SysTick->SR = 0;
+    PFIC_ClearPendingIRQ(SysTick_IRQn);
 
     CH59x_BLEInit();
+    BOOT_PHASE(0xA3);
     HAL_Init();
+    BOOT_PHASE(0xA4);
     RF_RoleInit();
+    BOOT_PHASE(0xA5);
 
     /* No manual PFIC_EnableIRQ(BLEB_IRQn)/PFIC_EnableIRQ(BLEL_IRQn) here: the BLE
      * library's BLE_IPCoreInit already writes the IRQ 20/21 enables, so the
@@ -168,11 +244,13 @@ int main(void)
      * BB_IRQLibFunction in hardware (see the Makefile SCHED_SRC note). */
 
     RF_TaskInit();
+    BOOT_PHASE(0xA6);
     if (RF_HasBond()) {
         transport_is_2g4 = 1;
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x35);
     }
     watchdog_init();
+    BOOT_PHASE(0xA7);
     Main_Circulation();
 }

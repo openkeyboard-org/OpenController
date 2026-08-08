@@ -261,3 +261,8 @@ void KeyboardUart_Poll(void)
         check_uart_line_status();
     }
 }
+
+uint8_t KeyboardUart_TxIdle(void)
+{
+    return (R8_UART1_TFC == 0) && (R8_UART1_LSR & RB_LSR_TX_ALL_EMP);
+}

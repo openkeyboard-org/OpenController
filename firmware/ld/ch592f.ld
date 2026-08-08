@@ -4,31 +4,29 @@
  * OpenController keyboard wireless-module firmware linker script (CH592F).
  * Based on CH592 SDK Link.ld
  *
- * Flash base 0x1000 preserves the 4 KB vendor stage-1 TRAMPOLINE
- * at 0x0000-0x0FFF (which jumps to real stage-1 at 0x6D000).
+ * The application runs under OpenBoot (third_party/openboot), which owns
+ * flash [0x0000, 0x2000) and boots one of two equal A/B slots:
  *
- * FLASH length is capped at 216 KB (ends at 0x36FFF). Anything above
- * that overlaps the vendor's flash layout and is destructive:
- *   0x37000 - 0x6CFFF : IAP staging region. Wiped on every IAP flash;
- *                       app code placed here disappears silently.
- *   0x6D000 - 0x6FFFF : Vendor stage-1 code. Overlapping this BRICKS
- *                       the boot path - the chip cannot boot and
- *                       recovery needs SWD + wchisp via BOOT pin.
- * Keeping the limit at 0x36FFF lets the replacement firmware coexist
- * with the stock stage-1 + IAP flow. See the flash-map section of
- * ../README.md for details.
+ *   slot A image 0x02000..0x37FFF   OBR2 boot record 0x38000..0x38FFF
+ *   slot B image 0x39000..0x6EFFF   OBR2 boot record 0x6F000..0x6FFFF
+ *
+ * The MEMORY block is generated per slot into $(BUILD)/memory.ld (see
+ * firmware/Makefile) so this file holds no literal addresses. FLASH LENGTH
+ * is the slot CAPACITY (slot size minus the 4 KB record block): an image
+ * linked into the record block would boot once and then be destroyed by the
+ * first COMMIT, which erases that block to write the new record.
+ *
+ * RAM LENGTH is 0x67F0, not 26K: OpenBoot's boot-request mailbox occupies
+ * the top 16 bytes of SRAM (0x200067F0), written by openboot_request_update()
+ * and consumed by the bootloader after the soft reset. See firmware/BOOT.md.
  */
+
+INCLUDE memory.ld
 
 ENTRY( _start )
 
 __stack_size = 2048;
 PROVIDE( _stack_size = __stack_size );
-
-MEMORY
-{
-    FLASH (rx)  : ORIGIN = 0x00001000, LENGTH = 216K
-    RAM   (xrw) : ORIGIN = 0x20000000, LENGTH = 26K
-}
 
 SECTIONS
 {
@@ -40,6 +38,19 @@ SECTIONS
         . = ALIGN(4);
         _einit = .;
     } >FLASH AT>FLASH
+
+    /* 32-byte ODG2-format identity header (family 0xB2 = OpenController
+     * keyboard CH592) at image offset 0x20, host-readable from the .bin
+     * without symbols. See src/kbd_image_id.c. */
+    /* No AT> here: the LMA must follow the VMA jump to ORIGIN+0x20, or the
+     * header's load address stays glued right after .init and the bytes land
+     * at file offset 0x04 in the .bin. */
+    .kbd_id ORIGIN(FLASH) + 0x20 :
+    {
+        _kbd_id_start = .;
+        KEEP(*(.kbd_id))
+        _kbd_id_end = .;
+    } >FLASH
 
     .highcodelalign :
     {
@@ -169,18 +180,24 @@ SECTIONS
         PROVIDE( _ebss = .);
     } >RAM AT>FLASH
 
-    ASSERT(_ebss <= 0x20005800, "BSS collides with diag scratch")
+    ASSERT(_ebss <= _diag_scratch_start, "BSS collides with the diag scratch window")
 
     PROVIDE( _end = _ebss);
     PROVIDE( end = . );
 
-    /* Fixed-address diagnostic counters. Placed in the SRAM gap between
-     * _ebss and the stack so they survive both BLE-library BSS/MEM_BUF
-     * overruns (below) and ISR stack growth (above). Pinned at
-     * SRAM_END - stack_size - 0x200 so the address is stable across
-     * rebuilds; any rf_task / main symbol in section ".diag_safe" lands
-     * here, readable directly via SWD without symbol lookup. */
-    .diag_safe ORIGIN(RAM) + LENGTH(RAM) - __stack_size - 0x200 (NOLOAD) :
+    /* Fixed-address diagnostic window, pinned ABSOLUTELY so bench SWD
+     * addresses never move with the memory map:
+     *   [0x20005800, 0x20005820)  asm-owned scratch: boot phase sentinel
+     *       (startup_CH592_phased.S) and fault latches (fault_handler.S) -
+     *       those files hard-code these addresses.
+     *   [0x20005820, 0x20005A00)  .diag_safe counters (rf_task/main),
+     *       readable via SWD without symbol lookup.
+     * NOTE: pre-OpenBoot builds placed .diag_safe at 0x20005E00; bench
+     * scripts reading counters by absolute address must re-derive them. */
+    _diag_scratch_start = 0x20005800;
+    _diag_scratch_end   = 0x20005820;
+
+    .diag_safe 0x20005820 (NOLOAD) :
     {
         . = ALIGN(4);
         PROVIDE( _diag_safe_start = . );
@@ -190,8 +207,10 @@ SECTIONS
         PROVIDE( _diag_safe_end = . );
     } >RAM
 
-    ASSERT(_diag_safe_end <= ORIGIN(RAM) + LENGTH(RAM) - __stack_size,
-           ".diag_safe overflows into the stack region")
+    ASSERT(_diag_safe_start == _diag_scratch_end,
+           "diag counters must start right after the asm scratch window")
+    ASSERT(_diag_safe_end <= _diag_scratch_start + 0x200,
+           ".diag_safe overflows the 0x200 diag window")
 
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
@@ -201,4 +220,24 @@ SECTIONS
         . = . + __stack_size;
         PROVIDE( _eusrstack = .);
     } >RAM
+
+    ASSERT(_diag_safe_end <= _susrstack, ".diag_safe overflows into the stack region")
+    ASSERT(_eusrstack == OC_BOOTREQ_ADDR,
+           "stack top must sit just below the OpenBoot boot-request word (memory.ld)")
+    ASSERT(ORIGIN(FLASH) == OC_SLOT_A_BASE || ORIGIN(FLASH) == OC_SLOT_B_BASE,
+           "app must link at one of OpenBoot's slot bases (see memory.ld)")
+    ASSERT(_kbd_id_start == ORIGIN(FLASH) + 0x20,
+           "identity header must sit at image offset 0x20")
+    ASSERT(LOADADDR(.kbd_id) == ORIGIN(FLASH) + 0x20,
+           "identity header LMA must equal its VMA - the .bin offset follows the")
+    /* ^ load address, not the VMA; this script mixes AT>FLASH and non-AT
+     * sections, and an LMA regression here was hit once during bring-up
+     * (header bytes landed at file offset 0x04). */
+    ASSERT(_kbd_id_end - _kbd_id_start == 0x20,
+           "identity header must be exactly 32 bytes")
+    ASSERT(_einit <= _kbd_id_start, ".init overruns the identity header")
+
+    /* Image length for the identity header: end of the last loadable flash
+     * byte (the .data initializers), relative to the slot base. */
+    _kbd_image_len = ((LOADADDR(.data) + SIZEOF(.data) + 3) & ~3) - ORIGIN(FLASH);
 }

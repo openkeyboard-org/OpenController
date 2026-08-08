@@ -18,4 +18,8 @@ void KeyboardUart_SendStatus(uint8_t sub);
 void KeyboardUart_SendBattery(uint8_t percent);
 void KeyboardUart_SendLed(uint8_t led_mask);
 
+/* Nonzero when the TX FIFO is empty AND the transmitter shift register has
+ * drained - i.e. every queued byte has physically left the wire. */
+uint8_t KeyboardUart_TxIdle(void);
+
 #endif

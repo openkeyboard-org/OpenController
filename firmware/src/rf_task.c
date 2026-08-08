@@ -1418,6 +1418,22 @@ void RF_Disconnect(void)
     RF_Shut();
 }
 
+/* Perform the deferred bond save NOW if one is pending. Normally the save
+ * runs as a TMOS event posted on the first caught connected poll; a
+ * firmware-update request landing in that window would otherwise lose the
+ * fresh bond, because RF_Disconnect() clears bond_save_pending. The write is
+ * done SYNCHRONOUSLY here rather than by posting RF_EVT_SAVE_BOND: TMOS
+ * services one event per scheduler pass, so a posted event can still be
+ * queued - and lost - when the update path resets the chip. Main-loop
+ * context only (same context the TMOS handler runs in). */
+void RF_FlushBondSave(void)
+{
+    if (bond_save_pending) {
+        bond_save_pending = 0;
+        rf_save_bond_to_flash();
+    }
+}
+
 void RF_ClearBond(void)
 {
     rf_clear_bond_ram();

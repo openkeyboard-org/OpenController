@@ -30,31 +30,37 @@ Embedded GCC12/bin`; override it for your install.
 
 ## Build
 
+Prerequisites: GNU Make >= 4.3, Python 3 (slot-geometry derivation; plus
+`pyserial` for `make update`), `git submodule update --init --recursive`
+(the OpenBoot bootloader and its SDK pins), and a Rust toolchain for the
+`openboot` CLI (updates/bundles only).
+
 ```bash
-make            # build/opencontroller_ch592f.{elf,hex,bin} + size check
+make              # slot A -> build/ch592f-slotA/opencontroller_ch592f.{elf,hex,bin}
+make SLOT=B       # slot B -> build/ch592f-slotB/...
+make bundle       # both slots -> build/opencontroller-ch592f.obb
+make factory      # blessed whole-chip image (bootloader + slot A + record)
 make clean
 ```
 
-The size check enforces the 216 KB app budget (see flash map below).
+The size check enforces the 216 KiB slot capacity (see BOOT.md).
 
-## Flash map and flashing
+## Boot chain and flashing
 
-The app is linked at flash offset `0x1000`, preserving a 4 KB stage-1
-trampoline page at `0x0000..0x0FFF`. The linker caps the app at 216 KB
-(`0x36FFF`) because the regions above it are owned by the stock-compatible
-boot chain:
+The application runs under the [OpenBoot](https://github.com/openkeyboard-org/OpenBoot)
+A/B bootloader: OpenBoot owns flash `0x0000..0x1FFF`, the app links at a
+slot base (`0x2000` / `0x39000`), and updates travel over the module's own
+UART via the OBP protocol. **`firmware/BOOT.md` is the authoritative
+reference** — flash/RAM maps, `A6 81` bootloader entry, update and factory
+flows, and recovery/revert procedures.
 
-- `0x37000..0x6CFFF` — IAP staging region, wiped on every IAP flash;
-- `0x6D000..0x6FFFF` — stage-1 code; overwriting it bricks the boot path.
+```bash
+make flash-factory KBD_PROBE=<serial>   # whole-chip factory install via SWD
+make update OB_PORT=/dev/serial/by-id/<probe-cdc>   # A/B update over UART
+```
 
 Flashing uses [minichlink](https://github.com/cnlohr/ch32fun) (from
 `PATH`, or `make MINICHLINK=/path/to/minichlink`) with a WCH-LinkE probe.
-`KBD_PROBE=<serial>` selects a probe when several are attached.
-
-```bash
-make flash-app                  # app slot only; boot chain must be present
-make flash-bare                 # bare fixture: trampoline page + app
-```
 
 For source-level debugging prefer the WCH/MounRiver fork of OpenOCD
 (mainline OpenOCD lacks the `wlinke` adapter and `sdi` transport; pass
