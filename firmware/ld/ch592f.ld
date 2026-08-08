@@ -228,6 +228,11 @@ SECTIONS
            "app must link at one of OpenBoot's slot bases (see memory.ld)")
     ASSERT(_kbd_id_start == ORIGIN(FLASH) + 0x20,
            "identity header must sit at image offset 0x20")
+    ASSERT(LOADADDR(.kbd_id) == ORIGIN(FLASH) + 0x20,
+           "identity header LMA must equal its VMA - the .bin offset follows the")
+    /* ^ load address, not the VMA; this script mixes AT>FLASH and non-AT
+     * sections, and an LMA regression here was hit once during bring-up
+     * (header bytes landed at file offset 0x04). */
     ASSERT(_kbd_id_end - _kbd_id_start == 0x20,
            "identity header must be exactly 32 bytes")
     ASSERT(_einit <= _kbd_id_start, ".init overruns the identity header")

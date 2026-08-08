@@ -302,7 +302,13 @@ OBJS   := $(C_OBJS) $(S_OBJS)
 # macros such as STOCK_SEED_BOND and RF_TURNAROUND_COUNT; without a flag stamp,
 # make can reuse stale objects when only those values change. SLOT and the
 # OpenBoot pin are part of the fingerprint: both reach the compiled bytes.
-CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(MRS_TOOLCHAIN)/$(CC)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
+# Compiler identity for the fingerprint. $(CC) may be overridden to an
+# absolute path or wrapper (contains a slash): use it as-is then. Otherwise
+# resolve it against MRS_TOOLCHAIN explicitly - whether make's exported PATH
+# prepend reaches $(shell) is version-dependent, and a bare invocation could
+# silently fingerprint a different compiler than the build uses.
+CC_FOR_VERSION := $(if $(findstring /,$(CC)),$(CC),$(MRS_TOOLCHAIN)/$(CC))
+CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
 CONFIG_STAMP := $(BUILD)/.config-$(CONFIG_FINGERPRINT)
 
 # VPATH for source file lookup
