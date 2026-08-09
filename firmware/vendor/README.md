@@ -30,7 +30,8 @@ Byte-identical to the triple shipped in the openwch CH592 EVT tree
 this directory, selected at build time via `make BLE_LIB_DIR=...`.
 
 The library is compiled with WCH's `WCH-Interrupt-fast` (HPE) semantics and
-requires the MounRiver/WCH GCC12 toolchain — see `../README.md`.
+requires a MounRiver/WCH toolchain (GCC15 default, GCC12 supported) — see
+`../README.md`.
 
 ## Checksums (sha256)
 

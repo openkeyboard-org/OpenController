@@ -12,21 +12,41 @@ against both OpenDongle and a stock production receiver (fresh pair, bonded
 reconnect, HID delivery, reset recovery). BLE HID/OTA, deep sleep, and real
 battery reporting are follow-up work.
 
-## Toolchain (hard requirement)
+> **Bench note — testing reset recovery:** reset the keyboard physically
+> (power cycle or the board's reset button), never through the debug probe.
+> Probe-mediated resets — minichlink SDI resets/halts, or the CDC DTR reset
+> that fires whenever the host opens the probe's serial port — perturb the
+> chip and can show a spurious recovery failure (receiver left half-open,
+> keyboard never rejoins) plus a TMOS misaligned-load fault under halt/read.
+> This is a measurement artifact, not a firmware defect: a 1000-cycle
+> randomized warm-reset soak with a clean USB-HID oracle recovered 999/1000
+> (~2.3 s reconnect). See `BOOT.md` (Known limits) for the full history.
 
-Building requires the **MounRiver/WCH GCC12** toolchain
-(`riscv-wch-elf-gcc` 12.2.0). The closed-source CH59x BLE library is
-compiled with WCH's `WCH-Interrupt-fast` (HPE) interrupt semantics; with
-mainline GCC or `INT_SOFT=1` the link succeeds but the image is silently
-dead (no IRQs delivered). The Makefile enforces `INT_SOFT=0` and documents
-the bench matrix behind this.
+## Toolchain (a WCH fork of GCC is a hard requirement)
 
-```bash
-make MRS_TOOLCHAIN="/path/to/MounRiver/RISC-V Embedded GCC12/bin"
-```
+Building requires a **MounRiver/WCH** toolchain. Two are supported:
+
+- **WCH GCC15** (`riscv32-wch-elf-gcc` 15.2.0) — the default.
+- **WCH GCC12** (`riscv-wch-elf-gcc` 12.2.0) — supported alternate:
+
+  ```bash
+  make MRS_TOOLCHAIN="/path/to/MounRiver/RISC-V Embedded GCC12/bin"
+  ```
 
 `MRS_TOOLCHAIN` defaults to `$HOME/Development/Mounriver/Toolchain/RISC-V
-Embedded GCC12/bin`; override it for your install.
+Embedded GCC15/bin`; override it for your install. The tool prefix
+(`riscv-wch-elf-` vs `riscv32-wch-elf-`; MounRiver renamed it at GCC15) is
+probed automatically, so `MRS_TOOLCHAIN` alone switches toolchains.
+
+The WCH fork matters: the closed-source CH59x BLE library is compiled with
+WCH's `WCH-Interrupt-fast` (HPE) interrupt semantics; with mainline GCC or
+`INT_SOFT=1` the link succeeds but the image is silently dead (no IRQs
+delivered). The Makefile enforces `INT_SOFT=0` and documents the bench
+matrix behind this.
+
+The OpenBoot **bootloader** builds stay pinned to GCC12 regardless of
+`MRS_TOOLCHAIN` (upstream measured erratic GCC15 bootloader behavior;
+`OPENBOOT_TOOLCHAIN` + a hard gate in the Makefile enforce this).
 
 ## Build
 
