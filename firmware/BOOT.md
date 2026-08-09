@@ -123,6 +123,13 @@ application is up.
   out of scope for the bench bring-up; the transport and framing are ready.
 - The post-reset UART turbulence window deserves an upstream look
   (OpenBoot's UART init after a soft reset from a 60 MHz application).
-- Keyboard-reset link recovery fails against v0.96.x receivers (EV10
-  reacquire regression, receiver-side, predates OpenBoot — tracked in
-  OpenDongle).
+- Keyboard-reset link recovery: bring-up believed this failed against v0.96.x
+  receivers (an "EV10 reacquire" regression). That deterministic failure was
+  traced to a **debugger-measurement artifact** — reproducing/reading it over
+  minichlink (SDI reset + `-r` halt/resume) induces a TMOS misaligned-load
+  fault that does not occur in normal operation (see `docs/TMOS_REVIEW.md`).
+  Clean USB-HID validation on the production build — a 1000-reset randomized
+  warm-reset soak (SDI + true power-cycle, dwells to 15 s) — recovered
+  **999/1000** with a ~2.34 s reconnect; the lone failure was a rare
+  marginal-delivery blip that still reached CONNECTED, not a link-recovery
+  failure. No deterministic reset-recovery defect remains.

@@ -9,28 +9,38 @@
 # targets ONE slot (SLOT=A|B); releases ship both builds as one .obb bundle.
 # See BOOT.md for the flash map and update flows.
 #
-# REQUIRED toolchain:
+# TOOLCHAIN — a WCH fork of GCC is REQUIRED (see below); two are supported:
 #
-#   MounRiver/WCH GCC12:
-#     riscv-wch-elf-gcc 12.2.0 / riscv-wch-elf-gdb 12.1
-#     (override the install location with MRS_TOOLCHAIN=<path>)
+#   Default:   MounRiver/WCH GCC15 (riscv32-wch-elf-gcc 15.2.0)
+#   Alternate: MounRiver/WCH GCC12 (riscv-wch-elf-gcc 12.2.0), selected with
+#     make MRS_TOOLCHAIN="$$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin"
 #
-# The Makefile defaults to that toolchain and INT_SOFT=0. Override only for
-# explicit compiler A/B work; mainline-GCC builds are not bench-validated
-# protocol evidence.
+# The tool prefix is probed per install (MounRiver renamed riscv-wch-elf-* to
+# riscv32-wch-elf-* at GCC15), so MRS_TOOLCHAIN alone switches compilers. The
+# BOOTLOADER is pinned to GCC12 separately — see OPENBOOT_TOOLCHAIN below.
 #
-# The CH59x BLE library (LIBCH59xBLE.a) is compiled with WCH's custom
+# A WCH toolchain and INT_SOFT=0 are load-bearing, not preference. The CH59x
+# BLE library (LIBCH59xBLE.a) is compiled with WCH's custom
 # `WCH-Interrupt-fast` attribute and requires it. Mainline GCC (xPack)
 # with INT_SOFT=1 produces a binary that wedges silently — no IRQs
-# delivered, chip alive but inert. The pinned WCH GCC12 toolchain (which
-# supports the WCH attribute natively) produces a working binary. Bench-proven
-# four-way matrix:
+# delivered, chip alive but inert. A WCH toolchain (which supports the
+# attribute natively) produces a working binary. Bench-proven four-way
+# matrix (2026-05, WCH GCC12 vs mainline xPack):
 #
 #   xPack + INT_SOFT=1: 0 bytes changed in 3s (DEAD)
 #   xPack + INT_SOFT=0: 4 bytes changed (xPack silently falls back)
 #   MRS   + INT_SOFT=1: 0 bytes changed (DEAD)
 #   MRS   + INT_SOFT=0: 20 bytes changed (FULLY ALIVE)
 #   WCH prebuilt RF_PHY.hex (reference): 13 bytes changed
+#
+# WCH GCC15 bench status (2026-08-09, vs CH570 OpenDongle @0.96.16): full
+# matrix PASS — A/B OBP update flash, blessed boot, UART protocol, fresh
+# 2.4G pair, USB HID delivery to the host, bonded reconnect after dongle
+# reboot (~11 s via the bootloader idle window) and after a dongle rail
+# power-cycle (2.2 s). Probe-mediated keyboard resets showed a recovery
+# failure IDENTICALLY under GCC15 and a same-source GCC12 control — that is
+# the known minichlink bench artifact (see README.md), not a toolchain
+# effect; physical warm resets recover (999/1000 soak, BOOT.md).
 
 # Grouped targets (&:) need GNU Make >= 4.3; older make silently races the
 # factory rule instead of failing.
@@ -64,11 +74,34 @@ SDK_SRC_DIR := $(SDK)
 # docs/TMOS_REVIEW.md.
 BLE_LIB_DIR ?= vendor/wch-ble-lib-v1.4.2
 
-# Toolchain
-MRS_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin
+# Toolchain. Default: WCH GCC15. Supported alternate: WCH GCC12 —
+#   make MRS_TOOLCHAIN="$$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin"
+MRS_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC15/bin
 export PATH := $(MRS_TOOLCHAIN):$(PATH)
 
-PREFIX ?= riscv-wch-elf-
+# MounRiver renamed the tool prefix at GCC15: riscv-wch-elf-* became
+# riscv32-wch-elf-*. Probe the install instead of hardcoding one prefix, so
+# MRS_TOOLCHAIN alone selects either toolchain (OpenBoot runs the same probe).
+# Only enforced when a goal actually needs the application compiler: clean,
+# check-deps (whose contract says verifying a SHA must not require a
+# toolchain), the OpenBoot-only targets (they use OPENBOOT_TOOLCHAIN, gated
+# separately), and the minichlink-only probe helpers must all work on a
+# checkout with no app toolchain installed.
+TOOL_PREFIXES := riscv32-wch-elf- riscv-wch-elf-
+PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
+    if [ -x "$(MRS_TOOLCHAIN)/$${p}gcc" ]; then printf '%s' "$$p"; break; fi; done)
+NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
+                   openboot-image openboot-test info gdbserver
+NEED_TOOLCHAIN := 1
+ifneq ($(MAKECMDGOALS),)
+ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
+NEED_TOOLCHAIN := 0
+endif
+endif
+ifeq ($(NEED_TOOLCHAIN)$(strip $(PREFIX)),1)
+$(error no WCH compiler under MRS_TOOLCHAIN="$(MRS_TOOLCHAIN)" — expected riscv32-wch-elf-gcc (GCC15) or riscv-wch-elf-gcc (GCC12))
+endif
+
 CC     := $(PREFIX)gcc
 AS     := $(PREFIX)gcc
 LD     := $(PREFIX)gcc
@@ -84,9 +117,13 @@ OPENBOOT_BOARD := opencontroller-ch592
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
 OPENBOOT_REVISION := 60a100d13a3a4751dcb7b2b46db368485e05c17f
-# Same GCC12 toolchain for app and bootloader (no two-toolchain split), but
-# keep the hard gate below - upstream's own compiler check is advisory.
-OPENBOOT_TOOLCHAIN ?= $(MRS_TOOLCHAIN)
+# The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
+# the app defaults to GCC15. Upstream measured erratic GCC15 bootloader
+# behavior (see check-openboot-toolchain), so this defaults to the validated
+# GCC12 install independently of MRS_TOOLCHAIN, and the hard gate below keeps
+# enforcing GCC12 on every path that builds the bootloader (upstream's own
+# compiler check is advisory).
+OPENBOOT_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin
 OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
 
 # OpenBoot's A/B slot geometry, read out of the pinned submodule rather than
@@ -209,7 +246,7 @@ CFLAGS += -DSTOCK_CONNECT_IDX_BIAS=$(STOCK_CONNECT_IDX_BIAS)
 # WCH-Interrupt-fast/HPE semantics; do not emit a firmware image otherwise.
 INT_SOFT ?= 0
 ifneq ($(INT_SOFT),0)
-$(error INT_SOFT=$(INT_SOFT) is disabled for OpenController; use WCH GCC12 with INT_SOFT=0)
+$(error INT_SOFT=$(INT_SOFT) is disabled for OpenController; use a WCH toolchain (GCC15 default, GCC12 alternate) with INT_SOFT=0)
 endif
 
 # Linker flags. -L $(BUILD) resolves ld/ch592f.ld's `INCLUDE memory.ld`
@@ -337,7 +374,13 @@ PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
 all: $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size size-check
 
+# Exactly one stamp may exist: returning to a config used EARLIER left its old
+# stamp in place, older than objects built under another config since — make
+# then judged those foreign objects up to date and relinked them unmodified
+# (bit us switching GCC15 -> GCC12 -> GCC15). Deleting rival stamps makes any
+# config switch recreate the stamp, newer than every object.
 $(CONFIG_STAMP): | $(BUILD)
+	@rm -f $(BUILD)/.config-*
 	@touch $@
 
 $(OBJS): $(CONFIG_STAMP)
