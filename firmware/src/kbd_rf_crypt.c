@@ -1,0 +1,435 @@
+/* SPDX-License-Identifier: Apache-2.0
+ * Copyright 2026 OpenController contributors
+ *
+ * AES-128-CCM link encryption -- see kbd_rf_crypt.h for the wire format, the
+ * counter discipline, and the reentrancy contract.
+ *
+ * The CCM primitives below are a deliberate mirror of OpenDongle's
+ * `firmware/common/src/rf_crypt.c` (branch `em-rf-ccm-rx-decrypt`). They have
+ * no design freedom: the receiver recomputes exactly these bytes, so any
+ * divergence shows up as a link that pairs and then drops every frame on the
+ * MAC check. Both sides are graded against OpenDongle's tests/ccm_ref.py.
+ */
+
+#include "kbd_rf_crypt.h"
+
+#include "hal_aes.h"
+
+/* ------------------------------------------------------------------ state */
+
+static uint8_t  crypt_key_ready;
+static uint8_t  crypt_session_ready;
+static uint32_t crypt_session_id;
+static uint32_t crypt_tx_ctr;        /* last counter CONSUMED; next is +1 */
+
+/* Engine ownership. RV32IMAC has the A extension, so the GCC atomic builtins
+ * lower to amoswap.w -- a genuine test-and-set, not a read-then-write an
+ * interrupt can land inside. */
+static volatile uint8_t crypt_engine_busy;
+
+/* seal_begin() -> seal_finish() carry state. */
+static uint8_t  seal_pending;
+static uint8_t  seal_tag;
+static uint8_t  seal_body_len;
+static uint32_t seal_ctr;
+static uint8_t  seal_plain[KBD_CRYPT_MAX_BODY];  /* MAC is over plaintext */
+static uint8_t  seal_cipher[KBD_CRYPT_MAX_BODY];
+static uint8_t  seal_x1[16];                     /* E(B0) */
+static uint8_t  seal_s0[16];                     /* tag mask */
+
+/* ---------------------------------------------------------------- helpers */
+
+static void xor16(uint8_t *acc, const uint8_t *v)
+{
+    uint8_t i;
+    for (i = 0; i < 16u; i++) {
+        acc[i] ^= v[i];
+    }
+}
+
+/* CCM flags byte for the CBC-MAC B0 block: Adata | ((M-2)/2)<<3 | (L-1).
+ * M=8, L=2 -> 0x59 with AAD present. */
+static uint8_t ccm_b0_flags(uint8_t have_aad)
+{
+    return (uint8_t)((have_aad ? 0x40u : 0x00u) | (((8u - 2u) / 2u) << 3) | (2u - 1u));
+}
+
+static void build_nonce(uint8_t nonce[13], uint32_t session_id,
+                        uint8_t direction, uint32_t counter)
+{
+    nonce[0]  = (uint8_t)session_id;
+    nonce[1]  = (uint8_t)(session_id >> 8);
+    nonce[2]  = (uint8_t)(session_id >> 16);
+    nonce[3]  = (uint8_t)(session_id >> 24);
+    nonce[4]  = direction;
+    nonce[5]  = (uint8_t)counter;
+    nonce[6]  = (uint8_t)(counter >> 8);
+    nonce[7]  = (uint8_t)(counter >> 16);
+    nonce[8]  = (uint8_t)(counter >> 24);
+    nonce[9]  = 0u;
+    nonce[10] = 0u;
+    nonce[11] = 0u;
+    nonce[12] = 0u;
+}
+
+/* CTR keystream block A_i for counter index i (L=2). */
+static hal_aes_status_t ctr_block(const uint8_t nonce[13], uint16_t i, uint8_t out[16])
+{
+    uint8_t a[16];
+    uint8_t k;
+    a[0] = (uint8_t)(2u - 1u);           /* counter-block flags: L'=L-1 */
+    for (k = 0; k < 13u; k++) {
+        a[1 + k] = nonce[k];
+    }
+    a[14] = (uint8_t)(i >> 8);
+    a[15] = (uint8_t)i;
+    return hal_aes_encrypt_block(a, out);
+}
+
+/* First CBC-MAC block: B0 = flags || nonce || l(m), big-endian length. */
+static hal_aes_status_t cbc_mac_b0(const uint8_t nonce[13], uint8_t aad_len,
+                                   uint8_t msg_len, uint8_t x_out[16])
+{
+    uint8_t blk[16];
+    uint8_t i;
+
+    blk[0] = ccm_b0_flags(aad_len != 0u);
+    for (i = 0; i < 13u; i++) {
+        blk[1 + i] = nonce[i];
+    }
+    blk[14] = (uint8_t)(msg_len >> 8);
+    blk[15] = (uint8_t)msg_len;
+    return hal_aes_encrypt_block(blk, x_out);
+}
+
+/* AAD block: 2-byte big-endian length prefix, then AAD, zero-padded.
+ * aad_len <= 14 so it is always exactly one block. */
+static hal_aes_status_t cbc_mac_aad(uint8_t x[16], const uint8_t *aad, uint8_t aad_len)
+{
+    uint8_t blk[16];
+    uint8_t i;
+
+    for (i = 0; i < 16u; i++) {
+        blk[i] = 0u;
+    }
+    blk[0] = (uint8_t)(aad_len >> 8);
+    blk[1] = (uint8_t)aad_len;
+    for (i = 0; i < aad_len; i++) {
+        blk[2 + i] = aad[i];
+    }
+    xor16(x, blk);
+    return hal_aes_encrypt_block(x, x);
+}
+
+/* Message block: zero-padded. A zero-length message contributes NO block --
+ * load-bearing for the empty-payload session frame. */
+static hal_aes_status_t cbc_mac_msg(uint8_t x[16], const uint8_t *msg, uint8_t msg_len)
+{
+    uint8_t blk[16];
+    uint8_t i;
+
+    if (msg_len == 0u) {
+        return HAL_AES_OK;
+    }
+    for (i = 0; i < 16u; i++) {
+        blk[i] = 0u;
+    }
+    for (i = 0; i < msg_len; i++) {
+        blk[i] = msg[i];
+    }
+    xor16(x, blk);
+    return hal_aes_encrypt_block(x, x);
+}
+
+/* ---------------------------------------------------------------- lifecycle */
+
+void kbd_crypt_init(void)
+{
+    hal_aes_init();
+}
+
+void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES])
+{
+    hal_aes_set_key(key);
+    crypt_key_ready = 1u;
+    /* A new key voids any session: the old session_id/counter pair says nothing
+     * about replay under a different key. */
+    crypt_session_ready = 0u;
+    crypt_session_id = 0u;
+    crypt_tx_ctr = 0u;
+    seal_pending = 0u;
+}
+
+void kbd_crypt_adopt_session(uint32_t session_id)
+{
+    crypt_session_id = session_id;
+    crypt_tx_ctr = 0u;         /* first transmitted counter is 1 */
+    crypt_session_ready = 1u;
+    seal_pending = 0u;         /* any half-built frame belongs to the old session */
+}
+
+void kbd_crypt_end_session(void)
+{
+    crypt_session_ready = 0u;
+    crypt_session_id = 0u;
+    crypt_tx_ctr = 0u;
+    seal_pending = 0u;
+}
+
+void kbd_crypt_clear(void)
+{
+    static const uint8_t zero_key[KBD_CRYPT_KEY_BYTES] = { 0 };
+    uint8_t i;
+
+    hal_aes_set_key(zero_key);   /* zeroize the installed schedule */
+    crypt_key_ready = 0u;
+    crypt_session_ready = 0u;
+    crypt_session_id = 0u;
+    crypt_tx_ctr = 0u;
+    seal_pending = 0u;
+    for (i = 0; i < KBD_CRYPT_MAX_BODY; i++) {
+        seal_plain[i] = 0u;
+        seal_cipher[i] = 0u;
+    }
+    for (i = 0; i < 16u; i++) {
+        seal_x1[i] = 0u;
+        seal_s0[i] = 0u;
+    }
+}
+
+int kbd_crypt_active(void)
+{
+    return (crypt_key_ready != 0u) && (crypt_session_ready != 0u);
+}
+
+int kbd_crypt_keyed(void)
+{
+    return crypt_key_ready != 0u;
+}
+
+uint32_t kbd_crypt_session_id(void)
+{
+    return crypt_session_id;
+}
+
+/* ------------------------------------------------------ engine serialization */
+
+int kbd_crypt_try_claim(void)
+{
+    return __atomic_exchange_n(&crypt_engine_busy, 1u, __ATOMIC_ACQUIRE) == 0u;
+}
+
+void kbd_crypt_release(void)
+{
+    __atomic_store_n(&crypt_engine_busy, 0u, __ATOMIC_RELEASE);
+}
+
+/* ------------------------------------------------------------------ shapes */
+
+uint8_t kbd_crypt_encrypted_body_len(uint8_t tag, uint8_t len)
+{
+    if (tag == KBD_CRYPT_TAG_BOOT_KBD && len == KBD_CRYPT_LEN_BOOT_KBD) {
+        return 8u;
+    }
+    if (tag == KBD_CRYPT_TAG_CONSUMER && len == KBD_CRYPT_LEN_CONSUMER) {
+        return 2u;
+    }
+    if (tag == KBD_CRYPT_TAG_MOUSE && len == KBD_CRYPT_LEN_MOUSE) {
+        return 5u;
+    }
+    return 0u;
+}
+
+/* Body length this firmware will seal for a given tag, else 0. The inverse of
+ * the table above, keyed on the tag alone. */
+static uint8_t seal_body_len_for_tag(uint8_t tag)
+{
+    if (tag == KBD_CRYPT_TAG_BOOT_KBD) {
+        return 8u;
+    }
+    if (tag == KBD_CRYPT_TAG_CONSUMER) {
+        return 2u;
+    }
+    if (tag == KBD_CRYPT_TAG_MOUSE) {
+        return 5u;
+    }
+    return 0u;
+}
+
+/* ---------------------------------------------------------------- transmit */
+
+kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t tag,
+                                        const uint8_t *body, uint8_t body_len)
+{
+    uint8_t nonce[13];
+    uint8_t s1[16];
+    uint8_t i;
+
+    if (!kbd_crypt_active()) {
+        return KBD_CRYPT_INACTIVE;
+    }
+    if (body == 0 || body_len == 0u || body_len > KBD_CRYPT_MAX_BODY ||
+        seal_body_len_for_tag(tag) != body_len) {
+        return KBD_CRYPT_SHAPE;
+    }
+    /* Counter 0 is reserved and the space must never wrap: a repeated counter
+     * under one session is nonce reuse. Refuse instead, and let the caller
+     * force a re-key. At one frame per 875 us poll this is ~43 days of
+     * continuous transmission, so it is a guard, not a scheduled event. */
+    if (crypt_tx_ctr == 0xFFFFFFFFu) {
+        return KBD_CRYPT_EXHAUSTED;
+    }
+
+    seal_ctr = crypt_tx_ctr + 1u;
+    build_nonce(nonce, crypt_session_id, KBD_CRYPT_DIR_KB_TO_DONGLE, seal_ctr);
+
+    /* S_0 masks the tag; S_1 is the payload keystream (bodies are <= 8 bytes,
+     * so exactly one keystream block and only its first body_len bytes used). */
+    if (ctr_block(nonce, 0u, seal_s0) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+    if (ctr_block(nonce, 1u, s1) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+    /* B0 depends only on the nonce and the message length -- not on ctrl -- so
+     * the first CBC-MAC block is precomputable here. */
+    if (cbc_mac_b0(nonce, 2u, body_len, seal_x1) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+
+    for (i = 0; i < body_len; i++) {
+        seal_plain[i] = body[i];
+        seal_cipher[i] = (uint8_t)(body[i] ^ s1[i]);
+    }
+
+    seal_tag = tag;
+    seal_body_len = body_len;
+    /* The counter is consumed HERE, not at finish(): a begin() whose finish()
+     * never happens must burn its value rather than let a later frame reuse it.
+     * Gaps are fine -- the receiver only requires strictly increasing. */
+    crypt_tx_ctr = seal_ctr;
+    seal_pending = 1u;
+    return KBD_CRYPT_OK;
+}
+
+kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
+                                         uint8_t *out, uint8_t *out_len)
+{
+    uint8_t aad[2];
+    uint8_t x[16];
+    uint8_t i;
+    uint8_t n;
+
+    if (!seal_pending) {
+        return KBD_CRYPT_SHAPE;
+    }
+    if (out == 0 || out_len == 0) {
+        return KBD_CRYPT_SHAPE;
+    }
+
+    /* Consume the pending frame up front: whatever happens below, this counter
+     * value is spent and must not be finished twice. */
+    seal_pending = 0u;
+    n = seal_body_len;
+
+    for (i = 0; i < 16u; i++) {
+        x[i] = seal_x1[i];
+    }
+    aad[0] = ctrl;
+    aad[1] = seal_tag;
+    if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+    if (cbc_mac_msg(x, seal_plain, n) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+
+    out[0] = ctrl;
+    out[1] = seal_tag;
+    out[2] = (uint8_t)seal_ctr;
+    out[3] = (uint8_t)(seal_ctr >> 8);
+    out[4] = (uint8_t)(seal_ctr >> 16);
+    out[5] = (uint8_t)(seal_ctr >> 24);
+    for (i = 0; i < n; i++) {
+        out[6 + i] = seal_cipher[i];
+    }
+    for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+        out[6 + n + i] = (uint8_t)(x[i] ^ seal_s0[i]);
+    }
+    *out_len = (uint8_t)(n + KBD_CRYPT_FRAME_OVERHEAD);
+    return KBD_CRYPT_OK;
+}
+
+int kbd_crypt_seal_pending(void)
+{
+    return seal_pending != 0u;
+}
+
+kbd_crypt_status_t kbd_crypt_seal(uint8_t ctrl, uint8_t tag,
+                                  const uint8_t *body, uint8_t body_len,
+                                  uint8_t *out, uint8_t *out_len)
+{
+    kbd_crypt_status_t st = kbd_crypt_seal_begin(tag, body, body_len);
+    if (st != KBD_CRYPT_OK) {
+        return st;
+    }
+    return kbd_crypt_seal_finish(ctrl, out, out_len);
+}
+
+/* ----------------------------------------------------------------- receive */
+
+kbd_crypt_status_t kbd_crypt_verify_session(const uint8_t *frame, uint8_t len,
+                                            uint32_t *out_session_id)
+{
+    uint8_t nonce[13];
+    uint8_t aad[2];
+    uint8_t x[16];
+    uint8_t s0[16];
+    uint32_t sid;
+    uint8_t diff = 0u;
+    uint8_t i;
+
+    if (frame == 0 || out_session_id == 0) {
+        return KBD_CRYPT_SHAPE;
+    }
+    if (len != KBD_CRYPT_LEN_SESSION || frame[1] != KBD_CRYPT_TAG_SESSION) {
+        return KBD_CRYPT_SHAPE;
+    }
+    /* Only the key is required. The session being authenticated is the one
+     * carried in this frame, so there is nothing to check it against yet. */
+    if (!crypt_key_ready) {
+        return KBD_CRYPT_INACTIVE;
+    }
+
+    sid = (uint32_t)frame[2] | ((uint32_t)frame[3] << 8) |
+          ((uint32_t)frame[4] << 16) | ((uint32_t)frame[5] << 24);
+
+    /* Direction 0x02, counter 0: disjoint from every kb->dongle data nonce
+     * (different direction byte) and unique across sessions (session_id). */
+    build_nonce(nonce, sid, KBD_CRYPT_DIR_DONGLE_TO_KB, 0u);
+    aad[0] = frame[0];
+    aad[1] = KBD_CRYPT_TAG_SESSION;
+
+    if (cbc_mac_b0(nonce, 2u, 0u, x) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+    if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+    /* Empty payload: no message block, per the CCM construction above. */
+    if (ctr_block(nonce, 0u, s0) != HAL_AES_OK) {
+        return KBD_CRYPT_FAULT_ENGINE;
+    }
+
+    /* Accumulate rather than early-exit, so the comparison does not leak how
+     * many bytes matched. */
+    for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+        diff |= (uint8_t)((x[i] ^ s0[i]) ^ frame[6 + i]);
+    }
+    if (diff != 0u) {
+        return KBD_CRYPT_MAC;
+    }
+
+    *out_session_id = sid;
+    return KBD_CRYPT_OK;
+}

@@ -241,6 +241,18 @@ CFLAGS += -DSTOCK_CONNECT_IDX_BIAS=$(STOCK_CONNECT_IDX_BIAS)
 # Additional bench-only interop probes (STOCK_SUPPRESS_RESPONSES,
 # STOCK_PARK_AFTER_CATCH, STOCK_SEED_BOND, ...) default off via #ifndef
 # fallbacks in src/rf_task.c; enable with EXTRA_CFLAGS=-DSTOCK_...=1.
+#
+# AES-128-CCM link encryption of the keyboard->dongle HID uplink. OFF by
+# default: a plaintext build must stay byte-identical to the validated stock
+# image, and encryption is useless until the receiver also runs a build that
+# decrypts it (OpenDongle's rf_crypt). `make KBD_RF_CRYPT=1` to build it in.
+#
+# The crypto sources are gated at the source-list level below rather than only
+# by #if, so an OFF build compiles nothing extra at all. Flipping this changes
+# CFLAGS, which changes CONFIG_FINGERPRINT, which forces a full rebuild - so an
+# A/B of the two images can never compare stale objects.
+KBD_RF_CRYPT ?= 0
+CFLAGS += -DKBD_RF_CRYPT=$(KBD_RF_CRYPT)
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
 # WCH-Interrupt-fast/HPE semantics; do not emit a firmware image otherwise.
@@ -274,6 +286,11 @@ APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
 APP_SRC += src/kbd_image_id.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
+# Link encryption (see KBD_RF_CRYPT above). Compiled only when enabled.
+ifeq ($(KBD_RF_CRYPT),1)
+APP_SRC += src/hal_aes_ch592.c
+APP_SRC += src/kbd_rf_crypt.c
+endif
 
 # Source files - SDK startup
 STARTUP_SRC := src/startup_CH592_phased.S
