@@ -28,16 +28,24 @@
  * / kbd_crypt_seal_finish() for the split that keeps the AES work out of the
  * 100 us response turnaround.
  *
- * COUNTER DISCIPLINE. The counter is per-session, starts at 1 (0 is reserved
- * and the receiver rejects it), and MUST strictly increase -- the receiver
- * keeps a high-water mark and drops anything at or below it. It increments per
- * TRANSMISSION, not per report: the link retransmits an unchanged report
- * several times (HID_RESEND_COUNT) and each retransmission may carry a
- * different ctrl, so reusing one counter across them would authenticate
+ * COUNTER DISCIPLINE -- two rules, both load-bearing for nonce uniqueness.
+ *
+ * It increments per TRANSMISSION, not per report. The link retransmits an
+ * unchanged report several times (HID_RESEND_COUNT) and each retransmission may
+ * carry a different ctrl, so reusing one counter across them would authenticate
  * different AAD under one nonce -- a real CCM nonce-reuse weakening, since both
  * tags share S_0 and their XOR leaks the MAC difference. A retransmission after
  * a lost frame still validates, because the receiver's high-water mark only
  * advances on a frame that verified.
+ *
+ * It is MONOTONIC FOR THE LIFETIME OF THE KEY, not per session: adopting a
+ * session does NOT restart it. Restarting would make nonce uniqueness rest on
+ * session_id never repeating, which it does -- both in normal operation (the
+ * receiver re-announces one session up to 8 times, and a later announcement can
+ * land after we have already transmitted under it) and under replay (a session
+ * frame carries no freshness, so a recorded one stays valid forever). See
+ * kbd_crypt_adopt_session() for the full argument. The counter starts at 1 for
+ * a freshly installed key; 0 is reserved and the receiver rejects it.
  *
  * CONTEXT. hal_aes is NOT reentrant (one shared engine, module state), so the
  * caller must serialize main-loop and ISR-path use of this module -- see
@@ -99,8 +107,9 @@ void kbd_crypt_init(void);
  * session: a new key means the old session_id/counter pair is meaningless. */
 void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES]);
 
-/* Adopt a session_id and restart the TX counter at 1. Call ONLY after
- * kbd_crypt_verify_session() has authenticated the frame that carried it. */
+/* Adopt a session_id. Call ONLY after kbd_crypt_verify_session() has
+ * authenticated the frame that carried it. Does NOT reset the TX counter --
+ * see the counter discipline above and the argument at the definition. */
 void kbd_crypt_adopt_session(uint32_t session_id);
 
 /* Drop the session but keep the key (e.g. on link loss): seals fail with

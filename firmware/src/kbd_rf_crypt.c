@@ -162,8 +162,44 @@ void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES])
 
 void kbd_crypt_adopt_session(uint32_t session_id)
 {
+    /* THE COUNTER IS NOT RESET HERE. It is monotonic for the lifetime of the
+     * installed key, across every session adopted under it. That is a
+     * deliberate departure from the obvious "restart at 1 per session", and it
+     * is what keeps the nonce unique.
+     *
+     * The nonce is session_id || direction || counter. Restarting the counter
+     * makes nonce uniqueness depend entirely on session_id never repeating,
+     * and it does repeat, in two ways:
+     *
+     *  1. WITHOUT ANY ATTACKER. The receiver announces one session up to
+     *     RF_CRYPT_ANNOUNCE_POLLS (8) times and stops early only once a frame
+     *     of ours verifies. Announcements 2..8 can therefore land after we have
+     *     already sent frames 1..n under that same session. Restarting would
+     *     re-issue those exact nonces with different plaintext -- keystream
+     *     reuse, which XORs two ciphertexts into the XOR of two keystrokes.
+     *  2. WITH ONE. A session frame is authenticated but carries no freshness,
+     *     so a recorded one stays valid forever under the same key. Replaying
+     *     an old session frame would drag us back to a previous session_id and
+     *     restart the counter into nonces already used under it.
+     *
+     * A monotonic counter removes both: the (session_id, counter) pair cannot
+     * repeat while the counter cannot repeat, whatever happens to session_id.
+     * It costs nothing on the wire and needs no receiver change -- the receiver
+     * only requires a counter that is non-zero and above its high-water mark,
+     * and it resets that mark to 0 when it mints a session, so a counter that
+     * simply keeps climbing always satisfies it.
+     *
+     * What a replayed session frame can still do is desynchronise us onto a
+     * session the receiver is not using, so our frames fail its MAC until it
+     * re-announces -- a nuisance the silence guard recovers from, not a key
+     * compromise. Closing that needs freshness in the session frame, which is a
+     * wire-format change, and is noted for the key-establishment phase.
+     *
+     * Residual: across a keyboard reboot the counter restarts from RAM, so
+     * uniqueness falls back to session_id not repeating -- the receiver's own
+     * documented 32-bit birthday bound (~1% after ~9,300 sessions under one
+     * long-lived key). Per-session keys from the establishment phase void it. */
     crypt_session_id = session_id;
-    crypt_tx_ctr = 0u;         /* first transmitted counter is 1 */
     crypt_session_ready = 1u;
     seal_pending = 0u;         /* any half-built frame belongs to the old session */
 }

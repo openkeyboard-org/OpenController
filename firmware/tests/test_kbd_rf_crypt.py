@@ -180,12 +180,21 @@ class KbdCryptTest(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
         self.h = Harness(Path(self._tmp.name))
-        self.h.cmd(f"install {KEY.hex()}")
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
 
     def tearDown(self):
         self.h.close()
         self._tmp.cleanup()
+
+    def fresh(self, sid: int = SID):
+        """Reinstall the key, then adopt `sid`.
+
+        Installing a key is the ONLY thing that rewinds the counter -- adopting
+        a session deliberately does not (see kbd_crypt_adopt_session) -- so this
+        is how a test gets a predictable counter of 1 on its next seal.
+        """
+        self.h.cmd(f"install {KEY.hex()}")
+        self.h.cmd(f"session {sid:08x}")
 
     # ---------------------------------------------------------- wire format
 
@@ -193,7 +202,7 @@ class KbdCryptTest(unittest.TestCase):
         """Each report shape seals to exactly the reference bytes."""
         for tag, n in BODY_LEN.items():
             with self.subTest(tag=hex(tag)):
-                self.h.cmd(f"session {SID:08x}")     # counter restarts at 1
+                self.fresh()
                 body = bytes(range(0x10, 0x10 + n))
                 ctrl = 0x5A
                 got = self.h.cmd(f"seal {ctrl:02x} {tag:02x} {body.hex()}")
@@ -202,7 +211,7 @@ class KbdCryptTest(unittest.TestCase):
 
     def test_pinned_on_silicon_vector(self):
         """The exact frame OpenDongle's on-silicon suite asserts. Cannot drift."""
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         got = self.h.cmd(f"seal 5a a3 {bytes([0xE9, 0x00]).hex()}")
         self.assertEqual(got, "OK 5aa301000000f59261bf78f0e660f668")
 
@@ -228,9 +237,9 @@ class KbdCryptTest(unittest.TestCase):
     def test_split_seal_matches_one_shot(self):
         """begin()+finish() must produce the byte-identical frame to seal()."""
         body = bytes(range(0x20, 0x28))
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         one_shot = self.h.cmd(f"seal 03 a1 {body.hex()}")
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
         split = self.h.cmd("finish 03")
         self.assertEqual(split, one_shot)
@@ -238,10 +247,10 @@ class KbdCryptTest(unittest.TestCase):
     def test_ctrl_is_authenticated(self):
         """ctrl is AAD: the same payload under a different ctrl differs in MAC."""
         body = bytes(8)
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
         a = bytes.fromhex(self.h.cmd("finish 00")[3:])
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
         b = bytes.fromhex(self.h.cmd("finish 01")[3:])
         self.assertNotEqual(a[-8:], b[-8:])           # MAC differs
@@ -252,7 +261,7 @@ class KbdCryptTest(unittest.TestCase):
         body = bytes(range(8))
         for ctrl in (0x00, 0x01, 0x02, 0x03):
             with self.subTest(ctrl=ctrl):
-                self.h.cmd(f"session {SID:08x}")
+                self.fresh()
                 got = self.h.cmd(f"seal {ctrl:02x} a1 {body.hex()}")
                 want = ccm_ref.build_frame(KEY, SID, 1, ctrl, TAG_BOOT, body)
                 self.assertEqual(got, "OK " + want.hex())
@@ -293,17 +302,60 @@ class KbdCryptTest(unittest.TestCase):
         wrong_tag[1] = 0xA1
         self.assertEqual(self.h.cmd(f"verify {bytes(wrong_tag).hex()}"), "SHAPE")
 
-    def test_adopting_session_restarts_counter(self):
+    def test_re_announce_does_not_rewind_the_counter(self):
+        """The receiver announces one session up to 8 times.
+
+        A later announcement can land after we have already transmitted under
+        that session, so rewinding would re-issue nonces already used -- with no
+        attacker involved at all. The counter must carry on.
+        """
+        body = bytes(8)
+        self.h.cmd(f"seal 02 a1 {body.hex()}")        # counter 1
+        self.h.cmd(f"seal 02 a1 {body.hex()}")        # counter 2
+        self.h.cmd(f"session {SID:08x}")              # re-announce, same id
+        got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+        self.assertEqual(got, "OK " + ccm_ref.build_frame(KEY, SID, 3, 0x02, TAG_BOOT, body).hex())
+
+    def test_replayed_old_session_cannot_rewind_the_counter(self):
+        """A session frame carries no freshness, so a recorded one stays valid.
+
+        Replaying it must not drag the counter back into nonces already spent
+        under that session_id -- that would be keystream reuse on keystrokes.
+        """
+        body = bytes(8)
+        used = set()
+        for _ in range(3):
+            frame = bytes.fromhex(self.h.cmd(f"seal 02 a1 {body.hex()}")[3:])
+            used.add((SID, frame[2:6]))
+        self.h.cmd(f"session {SID ^ 0xABCD:08x}")     # move to a new session
+        self.h.cmd(f"seal 02 a1 {body.hex()}")
+        self.h.cmd(f"session {SID:08x}")              # attacker replays the OLD one
+        frame = bytes.fromhex(self.h.cmd(f"seal 02 a1 {body.hex()}")[3:])
+        self.assertNotIn((SID, frame[2:6]), used)
+
+    def test_counter_is_monotonic_across_arbitrary_session_churn(self):
+        """No (session_id, counter) pair may ever repeat under one key."""
+        body = bytes(8)
+        seen = set()
+        for i in range(12):
+            self.h.cmd(f"session {(SID + (i % 3)):08x}")   # churn among 3 ids
+            got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+            frame = bytes.fromhex(got[3:])
+            pair = (SID + (i % 3), frame[2:6])            # (session_id, counter)
+            self.assertNotIn(pair, seen)
+            seen.add(pair)
+
+    def test_installing_a_key_does_rewind(self):
+        """A new key is a fresh nonce space, so the counter restarts there."""
         body = bytes(8)
         self.h.cmd(f"seal 02 a1 {body.hex()}")
-        self.h.cmd(f"seal 02 a1 {body.hex()}")
-        self.h.cmd(f"session {SID:08x}")              # re-announce, same id
+        self.fresh()
         got = self.h.cmd(f"seal 02 a1 {body.hex()}")
         self.assertEqual(got, "OK " + ccm_ref.build_frame(KEY, SID, 1, 0x02, TAG_BOOT, body).hex())
 
     def test_new_session_id_changes_ciphertext(self):
         body = bytes(8)
-        self.h.cmd(f"session {SID:08x}")
+        self.fresh()
         a = self.h.cmd(f"seal 02 a1 {body.hex()}")
         self.h.cmd(f"session {SID ^ 1:08x}")
         b = self.h.cmd(f"seal 02 a1 {body.hex()}")
