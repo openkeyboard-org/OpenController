@@ -82,14 +82,19 @@ export PATH := $(MRS_TOOLCHAIN):$(PATH)
 # MounRiver renamed the tool prefix at GCC15: riscv-wch-elf-* became
 # riscv32-wch-elf-*. Probe the install instead of hardcoding one prefix, so
 # MRS_TOOLCHAIN alone selects either toolchain (OpenBoot runs the same probe).
-# Only enforced when a goal needs the compiler: a fresh checkout must still
-# `make clean` with no toolchain installed.
+# Only enforced when a goal actually needs the application compiler: clean,
+# check-deps (whose contract says verifying a SHA must not require a
+# toolchain), the OpenBoot-only targets (they use OPENBOOT_TOOLCHAIN, gated
+# separately), and the minichlink-only probe helpers must all work on a
+# checkout with no app toolchain installed.
 TOOL_PREFIXES := riscv32-wch-elf- riscv-wch-elf-
 PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
     if [ -x "$(MRS_TOOLCHAIN)/$${p}gcc" ]; then printf '%s' "$$p"; break; fi; done)
+NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
+                   openboot-image openboot-test info gdbserver
 NEED_TOOLCHAIN := 1
 ifneq ($(MAKECMDGOALS),)
-ifeq ($(filter-out clean,$(MAKECMDGOALS)),)
+ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
 NEED_TOOLCHAIN := 0
 endif
 endif
