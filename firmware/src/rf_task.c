@@ -221,6 +221,24 @@ static volatile uint8_t crypt_session_rx[KBD_CRYPT_LEN_SESSION];
 static volatile uint8_t crypt_session_rx_pending;
 static volatile uint8_t crypt_polls_since_auth;
 static volatile uint8_t crypt_keepalive_due;
+
+/* Seal the next uplink frame, and act on a failure instead of discarding it.
+ *
+ * Neither failure that can reach here is retryable. An engine fault is a fatal
+ * fault of the radio path (hal_aes.h says so explicitly), and counter
+ * exhaustion needs a re-key, not another attempt. Dropping the session makes
+ * the link fail CLOSED in both cases: with no session there is no sealed frame,
+ * and rf_do_response_tx then sends bare acks rather than plaintext. Discarding
+ * the status instead left the keyboard looking healthy while it had nothing to
+ * send, until the receiver's silence guard dropped the link. */
+static void rf_crypt_arm(uint8_t ctrl_hint)
+{
+    kbd_crypt_status_t st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD,
+                                                 hid_report, sizeof(hid_report));
+    if (st == KBD_CRYPT_FAULT_ENGINE || st == KBD_CRYPT_EXHAUSTED) {
+        kbd_crypt_end_session();
+    }
+}
 #else
 static uint8_t tx_payload[10];
 #endif
@@ -1137,8 +1155,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         /* Task context: the whole CCM for the next uplink frame, so the
          * response path has only a buffer copy left to do. */
         if (kbd_crypt_active() && !kbd_crypt_seal_pending()) {
-            (void)kbd_crypt_seal_begin(tx_ctrl, KBD_CRYPT_TAG_BOOT_KBD,
-                                       hid_report, sizeof(hid_report));
+            rf_crypt_arm(tx_ctrl);
         }
         return events ^ RF_EVT_CRYPT_ARM;
     }
@@ -1720,8 +1737,7 @@ void RF_QueueHIDReport(const uint8_t report[8])
          * its counter, which is harmless -- the receiver only requires the
          * counter to increase, not to be gapless. */
         if (kbd_crypt_active()) {
-            (void)kbd_crypt_seal_begin(tx_ctrl, KBD_CRYPT_TAG_BOOT_KBD,
-                                       hid_report, sizeof(hid_report));
+            rf_crypt_arm(tx_ctrl);
         }
 #endif
     }

@@ -45,11 +45,13 @@ HARNESS = r"""
 
 static aes_sw_ctx_t g_ctx;
 static int g_fail_next = 0;
+static int g_fail_after = -1;   /* fail the Nth block from now */
 
 void hal_aes_init(void) {}
 void hal_aes_set_key(const uint8_t key[16]) { aes_sw_expand_key(&g_ctx, key); }
 hal_aes_status_t hal_aes_encrypt_block(const uint8_t in[16], uint8_t out[16]) {
     if (g_fail_next) { g_fail_next = 0; memset(out, 0, 16); return HAL_AES_ENGINE_TIMEOUT; }
+    if (g_fail_after >= 0 && g_fail_after-- == 0) { memset(out, 0, 16); return HAL_AES_ENGINE_TIMEOUT; }
     aes_sw_encrypt_block(&g_ctx, in, out);
     return HAL_AES_OK;
 }
@@ -105,6 +107,8 @@ int main(void){
             printf("%d\n", kbd_crypt_active());
         } else if (!strcmp(cmd, "failnext")) {
             g_fail_next = 1; printf("OK\n");
+        } else if (!strcmp(cmd, "failafter")) {
+            g_fail_after = atoi(a1); printf("OK\n");
         } else if (!strcmp(cmd, "seal")) {
             unsigned long ctrl = strtoul(a1, NULL, 16);
             unsigned long tag  = strtoul(a2, NULL, 16);
@@ -429,6 +433,56 @@ class KbdCryptTest(unittest.TestCase):
         self.assertEqual(self.h.cmd("claim"), "0")
         self.h.cmd("release")
         self.assertEqual(self.h.cmd("claim"), "1")
+
+
+    def test_late_engine_fault_cannot_poison_a_pending_seal(self):
+        """A seal that fails partway must leave NO frame, not a half-built one.
+
+        seal_begin() replaces an already-pending frame, so it overwrites the
+        counter and ciphertext before the MAC variants are done. If the engine
+        fails on a later block and the pending flag survived, finish() would
+        publish the new ciphertext under a stale tag -- and, because the counter
+        is only committed on success, the next seal would re-issue that same
+        counter and reuse the CTR keystream.
+        """
+        body_a = bytes(range(8))
+        body_b = bytes(range(0x80, 0x88))
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body_a.hex()}"), "OK")
+        # Replace it, failing on the 6th block -- inside the MAC variant loop,
+        # well after the counter and ciphertext have been rewritten.
+        self.h.cmd("failafter 5")
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body_b.hex()}"), "ENGINE")
+        # Nothing may be publishable: the old frame is gone, the new one failed.
+        self.assertEqual(self.h.cmd("finish 02"), "SHAPE")
+
+    def test_counter_never_repeats_after_a_failed_seal(self):
+        """The counter a failed seal consumed may be re-issued, but only once."""
+        body = bytes(range(8))
+        seen = set()
+        first = bytes.fromhex(self.h.cmd(f"seal 02 a1 {body.hex()}")[3:])
+        seen.add(first[2:6])
+        self.h.cmd("failafter 5")
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body.hex()}"), "ENGINE")
+        for _ in range(4):
+            got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+            self.assertTrue(got.startswith("OK "), got)
+            ctr = bytes.fromhex(got[3:])[2:6]
+            self.assertNotIn(ctr, seen)
+            seen.add(ctr)
+
+    def test_ending_a_session_does_not_rewind_the_counter(self):
+        """rf_enter_connected ends the session on EVERY connect.
+
+        If that rewound the counter, a replayed session announce would re-issue
+        spent nonces under a session an attacker already holds ciphertexts for.
+        """
+        body = bytes(8)
+        self.h.cmd(f"seal 02 a1 {body.hex()}")
+        self.h.cmd(f"seal 02 a1 {body.hex()}")
+        self.h.cmd("endsession")
+        self.h.cmd(f"session {SID:08x}")
+        got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+        self.assertEqual(got, "OK " + ccm_ref.build_frame(KEY, SID, 3, 0x02, TAG_BOOT, body).hex())
 
     # ------------------------------------------------------------- helpers
 

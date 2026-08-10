@@ -207,9 +207,21 @@ void kbd_crypt_adopt_session(uint32_t session_id)
 
 void kbd_crypt_end_session(void)
 {
+    /* The counter is NOT reset here. It survives for the lifetime of the
+     * installed key, which is the invariant kbd_crypt_adopt_session() documents
+     * and depends on. Resetting it here quietly broke that: rf_enter_connected()
+     * ends the session on every connect, so the counter restarted per
+     * connection, and an attacker replaying an old (freshness-free) session
+     * announce after a reconnect could get counter 1 re-issued under a session
+     * whose ciphertexts they already hold -- keystream reuse, and the XOR of two
+     * keystroke reports falls out. Only installing a key rewinds the counter,
+     * because that genuinely is a fresh nonce space.
+     *
+     * A residual remains across a keyboard REBOOT, where the counter restarts
+     * from RAM and uniqueness falls back to the receiver not repeating a 32-bit
+     * session id. Closing that needs a persisted counter or per-session keys. */
     crypt_session_ready = 0u;
     crypt_session_id = 0u;
-    crypt_tx_ctr = 0u;
     seal_pending = 0u;
 }
 
@@ -327,6 +339,18 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
     if (!kbd_crypt_try_claim()) {
         return KBD_CRYPT_BUSY;
     }
+
+    /* Invalidate any frame already waiting BEFORE overwriting the state it is
+     * made of. This call replaces a pending seal, and every early return below
+     * leaves that state half-rewritten: new counter and ciphertext, MAC
+     * variants from the previous frame. Leaving seal_pending set across that
+     * would let seal_finish() publish the new ciphertext under a stale tag, and
+     * -- because crypt_tx_ctr is only committed on success -- the next seal
+     * would hand out the same counter again, reusing the CTR keystream. Clear
+     * first, so a failed seal yields no frame at all rather than a poisoned
+     * one. Re-issuing the counter after this point is safe precisely because
+     * nothing was ever published under it. */
+    seal_pending = 0u;
 
     seal_ctr = crypt_tx_ctr + 1u;
     build_nonce(nonce, crypt_session_id, KBD_CRYPT_DIR_KB_TO_DONGLE, seal_ctr);
