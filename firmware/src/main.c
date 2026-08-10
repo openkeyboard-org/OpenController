@@ -4,8 +4,9 @@
  * OpenController keyboard wireless-module firmware for the WCH CH592F.
  *
  * This is intentionally a keyboard-module application, not a USB dongle:
- * UART1 is remapped to PB12/PB13 and speaks the wireless-module binary
- * command/status protocol used by the keyboard's host MCU.
+ * UART1 uses the selected board profile's pin mapping and speaks the
+ * wireless-module binary command/status protocol used by the keyboard's
+ * host MCU.
  */
 
 #include "CONFIG.h"
@@ -98,6 +99,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x51: /* pair current transport */
         if (transport_is_2g4) {
+            if (!RF_IdentityValid()) {
+                KeyboardUart_SendStatus(0x36);
+                break;
+            }
             RF_EnterPairing();
             KeyboardUart_SendStatus(0x31);
             KeyboardUart_SendStatus(0x23);
@@ -122,6 +127,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x63: /* factory 2.4G pair */
         transport_is_2g4 = 1;
+        if (!RF_IdentityValid()) {
+            KeyboardUart_SendStatus(0x36);
+            break;
+        }
         RF_Disconnect();
         RF_ClearBond();
         RF_EnterPairing();
@@ -245,7 +254,7 @@ int main(void)
 
     RF_TaskInit();
     BOOT_PHASE(0xA6);
-    if (RF_HasBond()) {
+    if (RF_HasBond() && RF_IdentityValid()) {
         transport_is_2g4 = 1;
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x35);

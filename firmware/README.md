@@ -56,12 +56,21 @@ Prerequisites: GNU Make >= 4.3, Python 3 (slot-geometry derivation; plus
 `openboot` CLI (updates/bundles only).
 
 ```bash
-make              # slot A -> build/ch592f-slotA/opencontroller_ch592f.{elf,hex,bin}
-make SLOT=B       # slot B -> build/ch592f-slotB/...
-make bundle       # both slots -> build/opencontroller-ch592f.obb
+make              # default board, slot A -> build/opencontroller-ch592-slotA/...
+make SLOT=B       # default board, slot B -> build/opencontroller-ch592-slotB/...
+make bundle       # both slots -> build/opencontroller-ch592.obb
 make factory      # blessed whole-chip image (bootloader + slot A + record)
+
+# MK65MX Wireless: CH592 UART1 on PA8/PA9 and factory-ROM RF identity
+make BOARD=mk65mx-wireless-ch592
+make BOARD=mk65mx-wireless-ch592 bundle
+make BOARD=mk65mx-wireless-ch592 factory
 make clean
 ```
+
+The MK65MX profile takes its 2.4 GHz keyboard identity from the CH592 factory
+ROM. Switching an already-paired module from the default fixed identity to
+this profile requires clearing and re-pairing the receiver bond.
 
 The size check enforces the 216 KiB slot capacity (see BOOT.md).
 

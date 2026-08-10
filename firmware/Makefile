@@ -91,7 +91,7 @@ TOOL_PREFIXES := riscv32-wch-elf- riscv-wch-elf-
 PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
     if [ -x "$(MRS_TOOLCHAIN)/$${p}gcc" ]; then printf '%s' "$$p"; break; fi; done)
 NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
-                   openboot-image openboot-test info gdbserver
+                   openboot-image openboot-test info gdbserver print-board-config
 NEED_TOOLCHAIN := 1
 ifneq ($(MAKECMDGOALS),)
 ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
@@ -109,10 +109,41 @@ OBJCOPY:= $(PREFIX)objcopy
 SIZE   := $(PREFIX)size
 
 # ---------------------------------------------------------------------------
+# Product board configuration
+# ---------------------------------------------------------------------------
+# Keep the original OpenController module as the default.  A board profile
+# owns every hardware-dependent choice shared by the application and its
+# OpenBoot image; selecting a profile is therefore enough to produce a
+# self-consistent factory image:
+#
+#   make BOARD=mk65mx-wireless-ch592
+BOARD ?= opencontroller-ch592
+BOARD_FILE := boards/$(BOARD).mk
+ifeq ($(wildcard $(BOARD_FILE)),)
+$(error unknown BOARD '$(BOARD)' - expected a file at $(BOARD_FILE))
+endif
+include $(BOARD_FILE)
+
+ifeq ($(strip $(OPENBOOT_BOARD)),)
+$(error BOARD '$(BOARD)' must set OPENBOOT_BOARD)
+endif
+ifneq ($(words $(strip $(KBD_UART1_REMAP))),1)
+$(error BOARD '$(BOARD)' must set KBD_UART1_REMAP to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_UART1_REMAP))),)
+$(error BOARD '$(BOARD)' has invalid KBD_UART1_REMAP='$(KBD_UART1_REMAP)')
+endif
+ifneq ($(words $(strip $(KBD_FACTORY_MAC))),1)
+$(error BOARD '$(BOARD)' must set KBD_FACTORY_MAC to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_FACTORY_MAC))),)
+$(error BOARD '$(BOARD)' has invalid KBD_FACTORY_MAC='$(KBD_FACTORY_MAC)')
+endif
+
+# ---------------------------------------------------------------------------
 # OpenBoot integration
 # ---------------------------------------------------------------------------
 OPENBOOT := $(abspath ../third_party/openboot)
-OPENBOOT_BOARD := opencontroller-ch592
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
@@ -181,17 +212,17 @@ endif
 
 # Project
 TARGET := opencontroller_ch592f
-BUILD  := build/ch592f-slot$(SLOT)
+BUILD  := build/$(BOARD)-slot$(SLOT)
 MEMORY_LD := $(BUILD)/memory.ld
 
-SLOT_A_BIN := build/ch592f-slotA/$(TARGET).bin
-SLOT_B_BIN := build/ch592f-slotB/$(TARGET).bin
-BUNDLE_BIN := build/opencontroller-ch592f.obb
+SLOT_A_BIN := build/$(BOARD)-slotA/$(TARGET).bin
+SLOT_B_BIN := build/$(BOARD)-slotB/$(TARGET).bin
+BUNDLE_BIN := build/$(BOARD).obb
 
 OPENBOOT_FACTORY_BIN := $(patsubst %.bin,%-factory.bin,$(OPENBOOT_SRC_BIN))
 OPENBOOT_MANIFEST := $(patsubst %.bin,%.manifest,$(OPENBOOT_SRC_BIN))
-FACTORY_BIN := $(BUILD)/$(TARGET)-factory.bin
-FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
+FACTORY_BIN := $(BUILD)/$(BOARD)-factory.bin
+FACTORY_MANIFEST := $(BUILD)/$(BOARD)-factory.manifest
 
 # Architecture flags
 ARCH   := -march=rv32imac_zicsr_zifencei -mabi=ilp32
@@ -206,6 +237,8 @@ CFLAGS += -fno-common
 CFLAGS += -DOPENBOOT_CHIP_CH59X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
+CFLAGS += -DKBD_UART1_REMAP=$(KBD_UART1_REMAP)
+CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
 
 # Per-build overrides go through EXTRA_CFLAGS. Use `make EXTRA_CFLAGS=...`
 # not `make CFLAGS+=...`; the latter clobbers ARCH.
@@ -345,7 +378,7 @@ OBJS   := $(C_OBJS) $(S_OBJS)
 # prepend reaches $(shell) is version-dependent, and a bare invocation could
 # silently fingerprint a different compiler than the build uses.
 CC_FOR_VERSION := $(if $(findstring /,$(CC)),$(CC),$(MRS_TOOLCHAIN)/$(CC))
-CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
+CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "BOARD=$(BOARD)" "OPENBOOT_BOARD=$(OPENBOOT_BOARD)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
 CONFIG_STAMP := $(BUILD)/.config-$(CONFIG_FINGERPRINT)
 
 # VPATH for source file lookup
@@ -370,9 +403,21 @@ PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
 .PHONY: all clean size size-check info gdbserver debug factory flash-factory \
         bundle update check-deps check-openboot-toolchain check-factory-slot \
-        openboot-image openboot-test FORCE
+        openboot-image openboot-test print-board-config FORCE
 
 all: $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size size-check
+
+# Toolchain-free, machine-readable summary used by profile tests and useful
+# before producing a factory image for similarly named CH592 boards.
+print-board-config:
+	@printf '%s\n' \
+	    'BOARD=$(BOARD)' \
+	    'OPENBOOT_BOARD=$(OPENBOOT_BOARD)' \
+	    'KBD_UART1_REMAP=$(KBD_UART1_REMAP)' \
+	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
+	    'BUILD=$(BUILD)' \
+	    'BUNDLE_BIN=$(BUNDLE_BIN)' \
+	    'FACTORY_BIN=$(FACTORY_BIN)'
 
 # Exactly one stamp may exist: returning to a config used EARLIER left its old
 # stamp in place, older than objects built under another config since — make
@@ -391,7 +436,7 @@ $(OBJS): $(CONFIG_STAMP)
 # when the bytes actually change, so an unchanged slot does not relink.
 $(MEMORY_LD): FORCE | $(BUILD)
 	@ram_len=$$(printf '0x%X' $$(( $(OPENBOOT_BOOTREQ_ADDR) - 0x20000000 ))); \
-	 { echo "/* Generated by firmware/Makefile for slot $(SLOT). DO NOT EDIT. */"; \
+	 { echo "/* Generated by firmware/Makefile for board $(BOARD), slot $(SLOT). DO NOT EDIT. */"; \
 	   echo "MEMORY"; \
 	   echo "{"; \
 	   echo "    FLASH (rx)  : ORIGIN = $(OPENBOOT_SLOT_BASE), LENGTH = $(OPENBOOT_SLOT_CAP)"; \
@@ -436,7 +481,7 @@ size-check: $(BUILD)/$(TARGET).bin
 	    echo "       by the first COMMIT."; \
 	    exit 1; \
 	 else \
-	    echo "  firmware: $$sz / $$max B ($$pct% of slot capacity, slot $(SLOT))"; \
+	    echo "  firmware: $$sz / $$max B ($$pct% of slot capacity, board $(BOARD), slot $(SLOT))"; \
 	 fi
 
 # ---------------------------------------------------------------------------
@@ -591,8 +636,8 @@ flash-factory: factory
 # both recurse into the shared OpenBoot submodule build directory - run such
 # goals as separate invocations.
 bundle:
-	+$(MAKE) SLOT=A $(SLOT_A_BIN)
-	+$(MAKE) SLOT=B $(SLOT_B_BIN)
+	+$(MAKE) BOARD=$(BOARD) SLOT=A $(SLOT_A_BIN)
+	+$(MAKE) BOARD=$(BOARD) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \
 	  echo "build the OpenBoot CLI first: cargo build --release --manifest-path $(OPENBOOT)/tools/Cargo.toml" >&2; \
 	  exit 1; }
@@ -601,9 +646,9 @@ bundle:
 	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
 	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
-# Bench OBP update over the WCH-LinkE CDC wired to PB12/PB13. Opening the
-# port resets the target into OpenBoot's 10 s idle window; the CLI's HELLO
-# then holds it (fail-stay). Both bundle members are family-checked (ODG2
+# Bench OBP update over UART1 on the selected board profile's pins. Opening
+# the port resets the target into OpenBoot's 10 s idle window; the CLI's
+# HELLO then holds it (fail-stay). Both bundle members are family-checked (ODG2
 # family 0xB2 at image offset 0x25) before anything talks to the device:
 # OpenBoot's COMMIT attests only length+CRC, so this is the only guard
 # against cross-flashing a dongle CH592 image on a shared bench.

@@ -78,10 +78,11 @@ immediately, since the app re-enters its bonded state on boot).
 
 ## Update flows
 
-**Bench OBP update (WCH-LinkE CDC on PB12/PB13):**
+**Bench OBP update (WCH-LinkE CDC on the selected UART pins):**
 
 ```sh
-make update OB_PORT=/dev/serial/by-id/usb-wch.cn_WCH-Link_<serial>-if01
+make BOARD=opencontroller-ch592 update \
+    OB_PORT=/dev/serial/by-id/usb-wch.cn_WCH-Link_<serial>-if01
 ```
 
 builds both slots, bundles, family-checks (`0xB2`), sends `A6 81`, settles
@@ -91,6 +92,9 @@ after the soft reset the bootloader's UART drops or corrupts frames
 (bench-measured `OB_E_CRC` reports at t<2 s, clean HELLO from ~2.3 s, with
 variance); the CLI's fast HELLO retries all land inside that window
 otherwise. Total idle budget is 10 s, so the settle cannot grow much more.
+The default board uses PB12/PB13. For the MK65MX profile, pass
+`BOARD=mk65mx-wireless-ch592` and connect the serial bridge to PA8/PA9; an
+eventual QMK-hosted updater can use the same UART path.
 
 **Factory install (SWD, whole chip):**
 
