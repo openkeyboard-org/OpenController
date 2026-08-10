@@ -95,7 +95,9 @@ int main(void){
         char *a3 = strtok(NULL, " \t\r\n");
 
         if (!strcmp(cmd, "install")) {
-            unhex(a1, buf, 16); kbd_crypt_install_key(buf); printf("OK\n");
+            unhex(a1, buf, 16);
+            kbd_crypt_install_key(buf, a2 ? (uint32_t)strtoul(a2, NULL, 16) : 0u);
+            printf("OK\n");
         } else if (!strcmp(cmd, "session")) {
             unsigned long v = strtoul(a1, NULL, 16);
             kbd_crypt_adopt_session((uint32_t)v); printf("OK\n");
@@ -483,6 +485,41 @@ class KbdCryptTest(unittest.TestCase):
         self.h.cmd(f"session {SID:08x}")
         got = self.h.cmd(f"seal 02 a1 {body.hex()}")
         self.assertEqual(got, "OK " + ccm_ref.build_frame(KEY, SID, 3, 0x02, TAG_BOOT, body).hex())
+
+
+    def test_counter_start_is_honoured_and_clamped(self):
+        """A varying start is what breaks nonce reuse when session_id repeats.
+
+        The receiver's session_id generator is close to deterministic for a
+        fixed device, so if BOTH ends restarted from a constant, one repeated
+        session_id across a reboot would guarantee keystream reuse.
+        """
+        body = bytes(8)
+        self.h.cmd(f"install {KEY.hex()} 1000")
+        self.h.cmd(f"session {SID:08x}")
+        got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+        want = ccm_ref.build_frame(KEY, SID, 0x1000 + 1, 0x02, TAG_BOOT, body)
+        self.assertEqual(got, "OK " + want.hex())
+
+        # A start above the cap must be clamped, or too few counters remain
+        # before exhaustion -- seconds, at the keepalive rate.
+        self.h.cmd(f"install {KEY.hex()} FFFFFFF0")
+        self.h.cmd(f"session {SID:08x}")
+        got = self.h.cmd(f"seal 02 a1 {body.hex()}")
+        ctr = int.from_bytes(bytes.fromhex(got[3:])[2:6], "little")
+        self.assertLessEqual(ctr, 0x7FFFFFFF)
+        self.assertGreater(ctr, 0)
+
+    def test_two_boots_with_the_same_session_do_not_collide(self):
+        """Different starts keep (session_id, counter) distinct across reboots."""
+        body = bytes(8)
+        frames = []
+        for start in (0x0001_0000, 0x0200_0000):
+            self.h.cmd(f"install {KEY.hex()} {start:X}")
+            self.h.cmd(f"session {SID:08x}")          # SAME session both times
+            for _ in range(3):
+                frames.append(bytes.fromhex(self.h.cmd(f"seal 02 a1 {body.hex()}")[3:])[2:6])
+        self.assertEqual(len(frames), len(set(frames)))
 
     # ------------------------------------------------------------- helpers
 

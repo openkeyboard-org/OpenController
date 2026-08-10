@@ -149,7 +149,8 @@ void kbd_crypt_init(void)
     hal_aes_init();
 }
 
-void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES])
+void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES],
+                           uint32_t ctr_start)
 {
     hal_aes_set_key(key);
     crypt_key_ready = 1u;
@@ -157,7 +158,11 @@ void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES])
      * about replay under a different key. */
     crypt_session_ready = 0u;
     crypt_session_id = 0u;
-    crypt_tx_ctr = 0u;
+    /* Clamped so a high start cannot strand us near exhaustion -- see the
+     * header for why the start varies at all. */
+    crypt_tx_ctr = (ctr_start > KBD_CRYPT_CTR_START_MAX)
+                 ? (ctr_start & KBD_CRYPT_CTR_START_MAX)
+                 : ctr_start;
     seal_pending = 0u;
 }
 

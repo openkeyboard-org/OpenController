@@ -531,6 +531,40 @@ static void rf_set_event_atomic(uint16_t evt)
     rf_irq_restore(irq);
 }
 
+#if KBD_RF_CRYPT
+/* A per-boot starting point for the CCM transmit counter.
+ *
+ * Not a security random: the counter travels in the clear, and CCM needs the
+ * nonce to be UNIQUE, not secret. What it must do is differ from boot to boot,
+ * because the receiver's session_id does not reliably differ -- its generator is
+ * close to deterministic for a fixed device, and this bench saw the same value
+ * return across reboots. Two deterministic halves make a repeated session_id
+ * into certain keystream reuse; varying this one breaks that.
+ *
+ * RTC is the part that actually moves between boots; the chip UID only
+ * separates units. Folded with a 32-bit mix so neighbouring RTC values do not
+ * produce neighbouring starts, then bounded well below the top of the range so
+ * exhaustion stays remote. */
+static uint32_t rf_crypt_ctr_start(void)
+{
+    uint8_t uid[8] __attribute__((aligned(4))) = {0};
+    uint32_t x;
+
+    GET_UNIQUE_ID(uid);
+    x = ((uint32_t)uid[0] | ((uint32_t)uid[1] << 8) |
+         ((uint32_t)uid[2] << 16) | ((uint32_t)uid[3] << 24));
+    x ^= ((uint32_t)uid[4] | ((uint32_t)uid[5] << 8) |
+          ((uint32_t)uid[6] << 16) | ((uint32_t)uid[7] << 24));
+    x ^= rtc_read_32k();
+    x ^= systick_read();
+    /* xorshift32 avalanche: spread neighbouring inputs across the range. */
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x & KBD_CRYPT_CTR_START_MAX;
+}
+#endif
+
 static uint32_t rf_bond_checksum(const rf_bond_record_t *rec)
 {
     const uint8_t *p = (const uint8_t *)rec;
@@ -630,7 +664,7 @@ static uint8_t rf_load_bond_from_flash(void)
     /* Install the key once, here at boot, where the schedule is off the poll
      * grid. The per-session nonce arrives later, from the receiver's announce. */
     if (rf_bond_enc_active()) {
-        kbd_crypt_install_key(stored_link_key);
+        kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
     } else {
         kbd_crypt_clear();
     }
@@ -1778,7 +1812,7 @@ uint8_t RF_ProvisionLinkKey(const uint8_t key[KBD_CRYPT_KEY_BYTES])
         stored_link_key[i] = key[i];
     }
     stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE);
-    kbd_crypt_install_key(stored_link_key);
+    kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
     rf_save_bond_to_flash();
     return 1;
 }

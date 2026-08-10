@@ -137,8 +137,34 @@ typedef enum {
 void kbd_crypt_init(void);
 
 /* Install the 16-byte link key (runs the key schedule once). Clears any
- * session: a new key means the old session_id/counter pair is meaningless. */
-void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES]);
+ * session: a new key means the old session_id/counter pair is meaningless.
+ *
+ * `ctr_start` is the last-consumed counter, so the first frame transmitted uses
+ * ctr_start + 1. Pass a value that VARIES per boot rather than 0.
+ *
+ * Why it matters: the nonce is session_id || direction || counter, so reuse
+ * needs both halves to repeat. The receiver mints session_id from a xorshift32
+ * seeded off chip UID and RTC, which its own source notes is close to
+ * deterministic for a fixed device once the SRAM-PUF contribution is compiled
+ * out -- and on this bench its session AA came back identical across reboots.
+ * With both ends restarting deterministically, one repeated session_id gives
+ * GUARANTEED keystream reuse across a reboot. A varying start turns that into
+ * "session repeats AND the two counter ranges overlap", which is negligible.
+ *
+ * It does NOT need to be unpredictable -- the counter is transmitted in the
+ * clear, and CCM requires nonce uniqueness, not nonce secrecy. Mixing chip UID,
+ * RTC and SysTick is therefore sufficient here, even though the same sources
+ * would be quite inadequate for, say, a key.
+ *
+ * Keep it inside KBD_CRYPT_CTR_START_MAX. Starting near the top of the range
+ * leaves too few counters before exhaustion: at the keepalive's ~36 frames/s a
+ * few hundred remaining values last seconds. */
+void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES],
+                           uint32_t ctr_start);
+
+/* Largest permitted counter start, leaving >= 2^31 values -- about two years of
+ * continuous transmission at the keepalive rate. A larger start is clamped. */
+#define KBD_CRYPT_CTR_START_MAX 0x7FFFFFFFu
 
 /* Adopt a session_id. Call ONLY after kbd_crypt_verify_session() has
  * authenticated the frame that carried it. Does NOT reset the TX counter --
