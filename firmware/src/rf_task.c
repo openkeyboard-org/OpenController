@@ -315,6 +315,8 @@ static volatile uint8_t  supervision_kick;
 volatile uint32_t kbd_crypt_sess_rx  __attribute__((section(".diag_safe")));  /* LEN-14 announces seen by the ISR */
 volatile uint32_t kbd_crypt_sess_ok  __attribute__((section(".diag_safe")));  /* verified and adopted */
 volatile uint32_t kbd_crypt_sess_bad __attribute__((section(".diag_safe")));  /* verify rejected */
+volatile uint32_t kbd_crypt_tx_sealed __attribute__((section(".diag_safe")));  /* sealed frames handed to RF_Tx */
+volatile uint32_t kbd_crypt_seal_miss __attribute__((section(".diag_safe")));  /* wanted one, none was ready */
 #endif
 volatile uint32_t rf_cb_count[6] __attribute__((section(".diag_safe")));
 volatile uint32_t rf_pair_bcast_count __attribute__((section(".diag_safe")));
@@ -1083,6 +1085,9 @@ static void rf_do_response_tx(void)
                 crypt_keepalive_due = 0;
                 crypt_polls_since_auth = 0;
                 tx_payload[0] = response_ctrl;
+                kbd_crypt_tx_sealed++;
+            } else {
+                kbd_crypt_seal_miss++;
             }
             /* Seal the next one from task context, whether or not this slot
              * found a frame ready. */
@@ -1616,6 +1621,8 @@ void RF_TaskInit(void)
     kbd_crypt_sess_rx = 0;
     kbd_crypt_sess_ok = 0;
     kbd_crypt_sess_bad = 0;
+    kbd_crypt_tx_sealed = 0;
+    kbd_crypt_seal_miss = 0;
 #endif
 #if RF_DIAG_COUNTERS
     for (uint8_t i = 0; i < 6; i++) {
