@@ -991,11 +991,22 @@ static void rf_do_response_tx(void)
     tx_payload[0] = response_ctrl;
     tx_len = 1;
 #if KBD_RF_CRYPT
-    if (kbd_crypt_active()) {
-        /* On an encrypted bond a plaintext HID frame is forbidden: the receiver
-         * drops it as a downgrade attempt, and sending one would put the
-         * keystroke on air in clear. So either the pre-sealed frame goes out or
-         * the bare ack does -- never the plaintext report. */
+    /* Gate on whether the BOND requires encryption, NOT on whether a session is
+     * currently usable. Those differ, and the difference leaked keystrokes:
+     * kbd_crypt_active() additionally demands an adopted session, and
+     * rf_enter_connected() ends the session on EVERY connect, so between connect
+     * and the receiver's session announce this test was false on an
+     * encryption-required bond and execution fell through to the plaintext
+     * branch below. A report pending across that window went out as
+     * [ctrl][A1][report] in clear. The receiver discards it as a downgrade, so
+     * the link still worked and the leak was invisible -- but a passive listener
+     * gets the keystroke, which is the exact thing this feature exists to stop.
+     *
+     * With the bond-level predicate, an encryption-required bond that has no
+     * usable session simply finds no sealed frame and sends the bare ack. */
+    if (rf_bond_enc_active()) {
+        /* Either the pre-sealed frame goes out or the bare ack does -- never
+         * the plaintext report. */
         if (hid_resend || crypt_keepalive_due) {
             uint8_t sealed_len = 0;
             /* No cipher work happens here: seal_finish only selects the tag
