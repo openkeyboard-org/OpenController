@@ -306,6 +306,16 @@ static volatile uint8_t  supervision_kick;
 #define RF_DIAG_COUNTERS 1
 #endif
 #if RF_DIAG_COUNTERS
+#if KBD_RF_CRYPT
+/* Session-adoption trace. Not gated on RF_DIAG_COUNTERS: an encrypted link that
+ * never adopts a session is silently dead -- it sends only bare acks, which look
+ * exactly like a healthy idle link until the receiver gives up -- and these
+ * three counters are the difference between diagnosing that in one bench run
+ * and guessing. 12 bytes of the .diag_safe window. */
+volatile uint32_t kbd_crypt_sess_rx  __attribute__((section(".diag_safe")));  /* LEN-14 announces seen by the ISR */
+volatile uint32_t kbd_crypt_sess_ok  __attribute__((section(".diag_safe")));  /* verified and adopted */
+volatile uint32_t kbd_crypt_sess_bad __attribute__((section(".diag_safe")));  /* verify rejected */
+#endif
 volatile uint32_t rf_cb_count[6] __attribute__((section(".diag_safe")));
 volatile uint32_t rf_pair_bcast_count __attribute__((section(".diag_safe")));
 volatile uint32_t rf_connected_tx_count __attribute__((section(".diag_safe")));
@@ -964,6 +974,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                     crypt_session_rx[i] = rxBuf[2 + i];
                 }
                 crypt_session_rx_pending = 1;
+                kbd_crypt_sess_rx++;
                 rf_set_event_atomic(RF_EVT_CRYPT_SESSION);
             }
             /* Count every connected reception against the receiver's silence
@@ -1180,7 +1191,10 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         if (kbd_crypt_verify_session(frame, KBD_CRYPT_LEN_SESSION, &sid)
                 == KBD_CRYPT_OK) {
             kbd_crypt_adopt_session(sid);
+            kbd_crypt_sess_ok++;
             rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        } else {
+            kbd_crypt_sess_bad++;
         }
         return events ^ RF_EVT_CRYPT_SESSION;
     }
@@ -1596,6 +1610,12 @@ void RF_TaskInit(void)
      * through this backend. Safe here because CH59x_BLEInit()/RF_RoleInit()
      * have already run by the time the RF task is created. */
     kbd_crypt_init();
+    /* .diag_safe is NOLOAD and deliberately not zeroed by startup (that is how
+     * ll_boot_count survives a reset), so these must be cleared explicitly or
+     * they read as stale RAM. */
+    kbd_crypt_sess_rx = 0;
+    kbd_crypt_sess_ok = 0;
+    kbd_crypt_sess_bad = 0;
 #endif
 #if RF_DIAG_COUNTERS
     for (uint8_t i = 0; i < 6; i++) {
