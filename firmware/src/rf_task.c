@@ -6,6 +6,9 @@
 #include "ISP592.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#if KBD_RF_CRYPT
+#include "kbd_rf_crypt.h"
+#endif
 
 #define RF_EVT_START              0x0001
 #define RF_EVT_RX_RESTART         0x0002
@@ -15,6 +18,10 @@
 #define RF_EVT_RESPOND            0x0020   /* connected poll-response TX (main loop) */
 #define RF_EVT_NOTIFY_LED         0x0040
 #define RF_EVT_SAVE_BOND          0x0100   /* deferred DataFlash write, not from RF ISR */
+#if KBD_RF_CRYPT
+#define RF_EVT_CRYPT_SESSION      0x0200   /* verify+adopt a received session frame */
+#define RF_EVT_CRYPT_ARM          0x0400   /* pre-seal the next encrypted uplink frame */
+#endif
 
 /* Stock-interop H1/H2 discriminator: skip the first N connected-poll responses
  * (keep listening/tracking, no uplink TX). If the keyboard then catches several
@@ -91,7 +98,19 @@
 #define RF_BOND_EEPROM_OFF        0x4000u  /* DataFlash 0x74000: stock keyboard 2.4G bond page */
 #define RF_BOND_EEPROM_ERASE_LEN  256u
 #define RF_BOND_MAGIC             0x3244424bu  /* "KBD2" little-endian */
+#if KBD_RF_CRYPT
+/* v2 appends the negotiated flags and the 16-byte link key. The version bump is
+ * deliberate and there is NO migration: a v1 record predates any notion of a
+ * key, so it is invalidated and the unit re-pairs, which is exactly the right
+ * semantics when encryption state enters the bond. The record grows from 24 to
+ * 40 bytes inside an erase page of 256, and the checksum already covers
+ * sizeof-4, so nothing else has to move. */
+#define RF_BOND_VERSION           2u
+#define RF_BOND_FLAG_ENC_CAPABLE  0x01u  /* peer negotiated encryption at pairing */
+#define RF_BOND_FLAG_ENC_KEY      0x02u  /* link_key holds a provisioned key      */
+#else
 #define RF_BOND_VERSION           1u
+#endif
 
 #define R32_RTC_CNT_32K_ADDR      0x40001038u
 #define SYSTICK_CNT_ADDR          0xE000F008u
@@ -149,17 +168,40 @@ static uint8_t has_bond;
 static uint8_t stored_dongle_mac[6];
 static uint32_t stored_session_aa;
 static uint8_t stored_type_tag;
+#if KBD_RF_CRYPT
+static uint8_t stored_bond_flags;
+static uint8_t stored_link_key[KBD_CRYPT_KEY_BYTES];
+#endif
 
 typedef struct {
     uint32_t magic;
     uint8_t  version;
     uint8_t  type_tag;
+#if KBD_RF_CRYPT
+    uint8_t  flags;         /* RF_BOND_FLAG_ENC_*; was the low half of reserved0 */
+    uint8_t  reserved0;
+#else
     uint16_t reserved0;
+#endif
     uint32_t session_aa;
     uint8_t  dongle_mac[6];
     uint16_t reserved1;
+#if KBD_RF_CRYPT
+    uint8_t  link_key[KBD_CRYPT_KEY_BYTES];  /* valid iff flags & ENC_KEY */
+#endif
     uint32_t checksum;
 } rf_bond_record_t;
+
+#if KBD_RF_CRYPT
+/* Encryption is NEGOTIATED, never assumed: it goes active only for a peer that
+ * advertised the capability at pairing AND a key that has been provisioned.
+ * Mirrors the receiver's bond_enc_active(). */
+static uint8_t rf_bond_enc_active(void)
+{
+    return (stored_bond_flags & (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY))
+           == (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY);
+}
+#endif
 
 static uint8_t pair_bcast_count;
 static uint8_t pair_payload[10];
@@ -169,7 +211,24 @@ static uint16_t pending_interval;
 static uint32_t pending_session_aa;
 
 static uint8_t hid_report[8];
+#if KBD_RF_CRYPT
+/* An encrypted boot-keyboard frame is 22 bytes on air, so the response buffer
+ * has to hold one. Sized only in encrypted builds so a plaintext image keeps
+ * its exact .bss layout. */
+static uint8_t tx_payload[KBD_CRYPT_MAX_FRAME];
+/* Session frame copied out of the RX ISR, verified in task context. */
+static volatile uint8_t crypt_session_rx[KBD_CRYPT_LEN_SESSION];
+static volatile uint8_t crypt_session_rx_pending;
+/* The receiver force-releases the link after RF_CRYPT_SILENCE_FRAMES (64)
+ * connected receptions with nothing authenticated among them -- and it counts
+ * bare poll acks too, so an idle keyboard that only acks would be dropped in
+ * ~56 ms. Send something authenticated well inside that. */
+#define KBD_CRYPT_KEEPALIVE_POLLS 32u
+static volatile uint8_t crypt_polls_since_auth;
+static volatile uint8_t crypt_keepalive_due;
+#else
 static uint8_t tx_payload[10];
+#endif
 static uint8_t tx_ctrl;
 static uint8_t prev_data_idx;     /* current connected data-channel index */
 static volatile uint8_t pending_led;
@@ -495,6 +554,16 @@ static void rf_build_bond_record(rf_bond_record_t *rec)
     for (uint8_t i = 0; i < 6; i++) {
         rec->dongle_mac[i] = stored_dongle_mac[i];
     }
+#if KBD_RF_CRYPT
+    rec->flags = stored_bond_flags;
+    /* Canonical form: no key provisioned => the field is zero, so a stale key
+     * can never sit behind a cleared flag. */
+    if (stored_bond_flags & RF_BOND_FLAG_ENC_KEY) {
+        for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+            rec->link_key[i] = stored_link_key[i];
+        }
+    }
+#endif
     rec->checksum = rf_bond_checksum(rec);
 }
 
@@ -540,6 +609,19 @@ static uint8_t rf_load_bond_from_flash(void)
     for (uint8_t i = 0; i < 6; i++) {
         stored_dongle_mac[i] = rec.dongle_mac[i];
     }
+#if KBD_RF_CRYPT
+    stored_bond_flags = rec.flags;
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        stored_link_key[i] = rec.link_key[i];
+    }
+    /* Install the key once, here at boot, where the schedule is off the poll
+     * grid. The per-session nonce arrives later, from the receiver's announce. */
+    if (rf_bond_enc_active()) {
+        kbd_crypt_install_key(stored_link_key);
+    } else {
+        kbd_crypt_clear();
+    }
+#endif
     has_bond = 1;
     return 1;
 }
@@ -576,6 +658,13 @@ static void rf_clear_bond_ram(void)
     stored_session_aa = 0;
     stored_type_tag = 0;
     tmos_memset(stored_dongle_mac, 0, sizeof(stored_dongle_mac));
+#if KBD_RF_CRYPT
+    /* Unpairing must take the key with it -- a cleared bond that kept its key
+     * would re-arm encryption against a peer we no longer have a session with. */
+    stored_bond_flags = 0;
+    tmos_memset(stored_link_key, 0, sizeof(stored_link_key));
+    kbd_crypt_clear();
+#endif
 }
 
 static void rf_clear_bond_flash(void)
@@ -754,7 +843,15 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
              * ignored here -- responding to them disrupts the lock. (Measured: the
              * keyboard never even receives the EV10 LEN-15 re-key before a drop --
              * the drop is loss of channel lock, not an EV10-rekey-ignore.) */
-            if (len != 1u && len != 3u && len != 10u) {
+            if (len != 1u && len != 3u && len != 10u
+#if KBD_RF_CRYPT
+                /* The receiver announces a fresh session nonce in place of a
+                 * poll, so this length has to be let through or encryption can
+                 * never start. It is authenticated, but not here: copy it out
+                 * and verify in task context (hal_aes must not run in an ISR). */
+                && len != KBD_CRYPT_LEN_SESSION
+#endif
+                ) {
                 rf_set_event_atomic(RF_EVT_RX_RESTART);
                 return;
             }
@@ -809,6 +906,28 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                 pending_led = rxBuf[4];
                 rf_set_event_atomic(RF_EVT_NOTIFY_LED);
             }
+#if KBD_RF_CRYPT
+            /* Session announce: copy it out and defer. Verifying needs the AES
+             * engine, which must not run here -- same discipline the receiver
+             * uses for its own decrypt path. Nothing is adopted until the tag
+             * checks out in task context. */
+            if (len == KBD_CRYPT_LEN_SESSION && rxBuf[3] == KBD_CRYPT_TAG_SESSION
+                && !crypt_session_rx_pending) {
+                for (uint8_t i = 0; i < KBD_CRYPT_LEN_SESSION; i++) {
+                    crypt_session_rx[i] = rxBuf[2 + i];
+                }
+                crypt_session_rx_pending = 1;
+                rf_set_event_atomic(RF_EVT_CRYPT_SESSION);
+            }
+            /* Count every connected reception against the receiver's silence
+             * guard; only a frame we actually authenticated resets it. */
+            if (crypt_polls_since_auth < 0xFFu) {
+                crypt_polls_since_auth++;
+            }
+            if (crypt_polls_since_auth >= KBD_CRYPT_KEEPALIVE_POLLS) {
+                crypt_keepalive_due = 1;
+            }
+#endif
 
             /* Re-arm the supervision timer in the main loop (RF_ConnectedTick),
              * NOT here: tmos_start/stop_task are not safe from this ISR (see the
@@ -875,6 +994,33 @@ static void rf_do_response_tx(void)
     }
 #endif
     tx_payload[0] = response_ctrl;
+    tx_len = 1;
+#if KBD_RF_CRYPT
+    if (kbd_crypt_active()) {
+        /* On an encrypted bond a plaintext HID frame is forbidden: the receiver
+         * drops it as a downgrade attempt, and sending one would put the
+         * keystroke on air in clear. So either the pre-sealed frame goes out or
+         * the bare ack does -- never the plaintext report. */
+        if (hid_resend || crypt_keepalive_due) {
+            uint8_t sealed_len = 0;
+            /* No cipher work happens here: seal_finish only selects the tag
+             * that seal_begin already computed for this ctrl. */
+            if (kbd_crypt_seal_finish(response_ctrl, tx_payload, &sealed_len)
+                    == KBD_CRYPT_OK) {
+                tx_len = sealed_len;
+                if (hid_resend) {
+                    hid_resend--;
+                }
+                crypt_keepalive_due = 0;
+                crypt_polls_since_auth = 0;
+                tx_payload[0] = response_ctrl;
+            }
+            /* Seal the next one from task context, whether or not this slot
+             * found a frame ready. */
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+    } else
+#endif
     if (hid_resend) {
         tx_payload[1] = 0xA1;
         for (uint8_t i = 0; i < 8; i++) {
@@ -882,8 +1028,6 @@ static void rf_do_response_tx(void)
         }
         tx_len = 10;
         hid_resend--;
-    } else {
-        tx_len = 1;
     }
     RF_DIAG_SET(last_rf_op, 3);
     RF_Shut();
@@ -964,6 +1108,36 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_NOTIFY_LED;
     }
 
+#if KBD_RF_CRYPT
+    if (events & RF_EVT_CRYPT_SESSION) {
+        uint8_t frame[KBD_CRYPT_LEN_SESSION];
+        uint32_t sid = 0;
+
+        for (uint8_t i = 0; i < KBD_CRYPT_LEN_SESSION; i++) {
+            frame[i] = crypt_session_rx[i];
+        }
+        crypt_session_rx_pending = 0;
+        /* A frame that does not authenticate is simply dropped: it is noise or
+         * a forgery, and adopting from it would hand an attacker our session. */
+        if (kbd_crypt_verify_session(frame, KBD_CRYPT_LEN_SESSION, &sid)
+                == KBD_CRYPT_OK) {
+            kbd_crypt_adopt_session(sid);
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+        return events ^ RF_EVT_CRYPT_SESSION;
+    }
+
+    if (events & RF_EVT_CRYPT_ARM) {
+        /* Task context: the whole CCM for the next uplink frame, so the
+         * response path has only a buffer copy left to do. */
+        if (kbd_crypt_active() && !kbd_crypt_seal_pending()) {
+            (void)kbd_crypt_seal_begin(tx_ctrl, KBD_CRYPT_TAG_BOOT_KBD,
+                                       hid_report, sizeof(hid_report));
+        }
+        return events ^ RF_EVT_CRYPT_ARM;
+    }
+#endif
+
     if (events & RF_EVT_SAVE_BOND) {
         rf_save_bond_to_flash();
         return events ^ RF_EVT_SAVE_BOND;
@@ -1014,6 +1188,12 @@ static uint8_t rf_configure(uint32_t access_addr)
     cfg.CRCInit = RF_CRC_INIT;
     cfg.rfStatusCB = RF_2G4StatusCallBack;
     cfg.RxMaxlen = RF_RX_MAX_LEN;
+#if KBD_RF_CRYPT
+    /* The memset above leaves TxMaxlen at 0 while the library documents a
+     * default of 251. Ten-byte frames evidently pass regardless, but an
+     * encrypted frame is 22, so stop relying on that and state the bound. */
+    cfg.TxMaxlen = RF_RX_MAX_LEN;
+#endif
 
     RF_DIAG_INC(rf_config_count);
     uint8_t cfg_status = RF_Config(&cfg);
@@ -1067,6 +1247,10 @@ static void rf_start_rx(uint8_t channel)
 #endif
 }
 
+#if KBD_RF_CRYPT
+static void rf_pair_send_cap_advert(void);
+#endif
+
 static void rf_pair_broadcast(void)
 {
     RF_DIAG_SET(last_rf_op, 2);
@@ -1074,6 +1258,17 @@ static void rf_pair_broadcast(void)
     uint8_t pair_channel_idx = (uint8_t)(dwell % NUM_PAIR_CHANNELS);
 
     rf_channel = pair_channels[pair_channel_idx];
+
+#if KBD_RF_CRYPT
+    /* One slot in four advertises the encryption capability instead of the
+     * beacon. The receiver needs a beacon to accept the pair at all, so the
+     * advert must not crowd them out; it only has to arrive once. */
+    if ((pair_bcast_count & 0x03u) == 0x03u) {
+        pair_bcast_count++;
+        rf_pair_send_cap_advert();
+        return;
+    }
+#endif
 
     for (uint8_t i = 0; i < 6; i++) {
         pair_payload[i] = keyboard_mac[i];
@@ -1093,6 +1288,31 @@ static void rf_pair_broadcast(void)
     rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
 }
 
+#if KBD_RF_CRYPT
+/* Tell the receiver we can do link encryption, so it records the capability on
+ * the bond it is about to write. Purely additive: the beacon carries no tag
+ * byte and the receiver classifies pair traffic by length, so this LEN-3 frame
+ * is a separate transmission that a receiver without the feature ignores.
+ *
+ * It rides one broadcast slot in four rather than doubling every slot: TX
+ * completion is asynchronous (TX_MODE_TX_FINISH re-arms RX), so two
+ * back-to-back RF_Tx calls in one slot would need sequencing, and the receiver
+ * only has to see this once during the pairing window. */
+static void rf_pair_send_cap_advert(void)
+{
+    uint8_t cap[KBD_CRYPT_LEN_CAP];
+
+    cap[0] = 0u;                         /* ctrl: ignored by the receiver here */
+    cap[1] = KBD_CRYPT_TAG_CAP;
+    cap[2] = KBD_CRYPT_CAP_VERSION;
+
+    RF_Shut();
+    rf_configure_if_needed(rf_access_addr);
+    (void)RF_Tx(cap, sizeof(cap), 0xFF, 0xFF);
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
+}
+#endif
+
 static void rf_enter_connected(void)
 {
     RF_DIAG_INC(entered_connected_count);
@@ -1107,6 +1327,18 @@ static void rf_enter_connected(void)
     rf_conn_interval = pending_interval;
     prev_data_idx = (uint8_t)((stored_type_tag + STOCK_CONNECT_IDX_BIAS) % NUM_DATA_CHANNELS);
     tx_ctrl = 0x02;
+#if KBD_RF_CRYPT
+    /* We always advertise the capability while pairing, so the bond is capable
+     * from our side; encryption still needs a key before it goes active. */
+    stored_bond_flags |= RF_BOND_FLAG_ENC_CAPABLE;
+    /* Each connection gets a fresh session from the receiver's announce. Drop
+     * any session carried over from the previous one so nothing is transmitted
+     * under a session the receiver has already replaced. */
+    kbd_crypt_end_session();
+    crypt_session_rx_pending = 0;
+    crypt_polls_since_auth = 0;
+    crypt_keepalive_due = 0;
+#endif
     hop_anchor = pending_anchor;   /* seeded at the 2nd 15-byte (rx-13) */
     since_rx = 0;
     response_pending = 0;
@@ -1293,6 +1525,12 @@ void TMR0_IRQHandler(void)
 
 void RF_TaskInit(void)
 {
+#if KBD_RF_CRYPT
+    /* Before any bond load: rf_load_bond_from_flash() installs the link key
+     * through this backend. Safe here because CH59x_BLEInit()/RF_RoleInit()
+     * have already run by the time the RF task is created. */
+    kbd_crypt_init();
+#endif
 #if RF_DIAG_COUNTERS
     for (uint8_t i = 0; i < 6; i++) {
         rf_cb_count[i] = 0;
@@ -1459,8 +1697,61 @@ void RF_QueueHIDReport(const uint8_t report[8])
      * next few polls so a dropped slot doesn't lose a key-down or key-up. */
     if (changed) {
         hid_resend = HID_RESEND_COUNT;
+#if KBD_RF_CRYPT
+        /* Re-seal immediately: any frame already prepared holds the PREVIOUS
+         * report, and the response path cannot build one itself. Main-loop
+         * context (this is called from the UART command handler), so the CCM
+         * work is free of the poll deadline. Replacing a prepared frame burns
+         * its counter, which is harmless -- the receiver only requires the
+         * counter to increase, not to be gapless. */
+        if (kbd_crypt_active()) {
+            (void)kbd_crypt_seal_begin(tx_ctrl, KBD_CRYPT_TAG_BOOT_KBD,
+                                       hid_report, sizeof(hid_report));
+        }
+#endif
     }
 }
+
+#if KBD_RF_CRYPT
+/* Provision the 16-byte link key into the bond and activate encryption.
+ *
+ * BRING-UP SCAFFOLD. Until the key-establishment handshake exists, both ends
+ * are given the same key out of band -- this is the keyboard half, the
+ * receiver's is its USB IAP BondWrite. It is deliberately not reachable from
+ * any shipped command path: a link key that any host can overwrite at will is
+ * an open door to exactly the injection this feature exists to stop.
+ *
+ * Returns 0 if there is no bond to attach the key to, or if the key is one of
+ * the two values that mean "erased flash" rather than a key. */
+uint8_t RF_ProvisionLinkKey(const uint8_t key[KBD_CRYPT_KEY_BYTES])
+{
+    uint8_t all_zero = 1;
+    uint8_t all_ff = 1;
+
+    if (!has_bond) {
+        return 0;
+    }
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        if (key[i] != 0x00u) {
+            all_zero = 0;
+        }
+        if (key[i] != 0xFFu) {
+            all_ff = 0;
+        }
+    }
+    if (all_zero || all_ff) {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        stored_link_key[i] = key[i];
+    }
+    stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE);
+    kbd_crypt_install_key(stored_link_key);
+    rf_save_bond_to_flash();
+    return 1;
+}
+#endif
 
 uint8_t RF_GetState(void)
 {

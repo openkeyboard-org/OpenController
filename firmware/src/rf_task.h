@@ -28,4 +28,14 @@ void RF_ConnectedTick(void);
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);
 
+#if KBD_RF_CRYPT
+/* Attach a 16-byte link key to the current bond and activate encryption.
+ * Returns 0 if there is no bond, or the key is all-zero / all-0xFF.
+ *
+ * BRING-UP SCAFFOLD, and deliberately not reachable from any shipped command
+ * path -- see the definition. Both ends are provisioned the same key out of
+ * band until the key-establishment handshake replaces this. */
+uint8_t RF_ProvisionLinkKey(const uint8_t key[16]);
+#endif
+
 #endif
