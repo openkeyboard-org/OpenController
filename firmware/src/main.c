@@ -74,6 +74,18 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         KeyboardUart_SendStatus(RF_ProvisionLinkKey(payload) ? 0x21 : 0x36);
         return;
     }
+
+    if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        /* Same .diag_safe counters that were previously read over SWD, sent out
+         * of band instead. Order matches the reply layout documented in
+         * keyboard_uart.h; keep the two in step. */
+        const uint32_t counters[5] = {
+            kbd_crypt_seal_miss, kbd_crypt_tx_sealed,
+            kbd_crypt_sess_bad,  kbd_crypt_sess_ok, kbd_crypt_sess_rx,
+        };
+        KeyboardUart_SendCryptDiag(counters, 5u);
+        return;
+    }
 #endif
 
     if (cmd != 0xA6) {

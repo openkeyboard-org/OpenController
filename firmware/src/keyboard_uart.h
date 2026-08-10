@@ -18,6 +18,11 @@ void KeyboardUart_SendStatus(uint8_t sub);
 void KeyboardUart_SendBattery(uint8_t percent);
 void KeyboardUart_SendLed(uint8_t led_mask);
 
+#if KBD_CRYPT_BENCH_KEY
+/* Emit [0x5D][n x u32 LE][checksum]. See KBD_UART_CMD_CRYPT_DIAG. */
+void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n);
+#endif
+
 /* Nonzero when the TX FIFO is empty AND the transmitter shift register has
  * drained - i.e. every queued byte has physically left the wire. */
 uint8_t KeyboardUart_TxIdle(void);
@@ -32,6 +37,23 @@ uint8_t KeyboardUart_TxIdle(void);
  * hand an attacker the ability to forge keystrokes, which is the exact thing
  * link encryption exists to prevent. Never enable this in a release build. */
 #define KBD_UART_CMD_SET_LINK_KEY 0xAEu
+
+/* Bench: dump the link-encryption counters over UART.
+ *
+ * These live in .diag_safe and were previously read over SWD, which is wrong
+ * twice on this part: firmware/README.md documents that minichlink's CH5xx
+ * memory reads are unreliable (a known-good SRAM address can read back all
+ * zeros), and that ANY debug attach to a running application effectively resets
+ * the part. Both corrupted this investigation -- an all-zero read was taken as
+ * evidence of a reboot, and the reset-per-attach was measured as a phantom
+ * periodic crash. The README's own advice is to instrument the firmware and
+ * read it out of band; this is that channel for the keyboard, matching what
+ * CMD_CRYPT_DIAG already does for the receiver.
+ *
+ * Reply: [0x5D][20 bytes: seal_miss, tx_sealed, sess_bad, sess_ok, sess_rx,
+ * each u32 LE][checksum]. Read-only, and gated with the bench key command so a
+ * shipping build has neither. */
+#define KBD_UART_CMD_CRYPT_DIAG 0xAFu
 #endif
 
 #endif

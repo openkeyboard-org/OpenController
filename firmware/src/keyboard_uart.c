@@ -114,6 +114,29 @@ void KeyboardUart_SendLed(uint8_t led_mask)
     uart_send_frame(0x5A, led_mask);
 }
 
+#if KBD_CRYPT_BENCH_KEY
+void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n)
+{
+    uint8_t chk = 0x5D;
+    uint8_t i, b;
+
+    if (!uart_send_byte(0x5D)) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        uint8_t k;
+        for (k = 0; k < 4u; k++) {
+            b = (uint8_t)(counters[i] >> (8u * k));
+            if (!uart_send_byte(b)) {
+                return;   /* TX wedged: abandon rather than desync the checksum */
+            }
+            chk = (uint8_t)(chk + b);
+        }
+    }
+    uart_send_byte(chk);
+}
+#endif
+
 static void reset_parser(void)
 {
     rx_len = 0;
@@ -131,6 +154,8 @@ static uint8_t expected_for_header(uint8_t b)
 #if KBD_CRYPT_BENCH_KEY
     case KBD_UART_CMD_SET_LINK_KEY:
         return 18;   /* [AE][key 0..15][chk] */
+    case KBD_UART_CMD_CRYPT_DIAG:
+        return 2;    /* [AF][chk] -- read-only, no body */
 #endif
     case 0xA9:
         /* BLE device-name frames are FIXED 21 bytes on the wire: the host
@@ -163,6 +188,8 @@ static uint8_t frame_is_valid(void)
 #if KBD_CRYPT_BENCH_KEY
     } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
         return checksum(rx_buf, 17) == rx_buf[17];
+    } else if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        return checksum(rx_buf, 1) == rx_buf[1];
 #endif
     }
     return 0;
@@ -193,6 +220,12 @@ static void dispatch_frame(void)
         KeyboardUart_SendAck();
         if (frame_cb) {
             frame_cb(KBD_UART_CMD_SET_LINK_KEY, 0, &rx_buf[1], 16);
+        }
+    } else if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        /* No ack: the 0x5D reply IS the response, and an ack ahead of it just
+         * gives the host another frame to skip past. */
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_CRYPT_DIAG, 0, 0, 0);
         }
 #endif
     } else {
