@@ -223,6 +223,13 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
 /* Non-zero if a seal_begin() result is waiting for its seal_finish(). */
 int kbd_crypt_seal_pending(void);
 
+/* Throw away a prepared frame without building another. Cipher-free, so it is
+ * safe anywhere -- unlike seal_begin(), whose ~160 us of AES must not run at an
+ * arbitrary moment (see the note on seal_begin's cost). Use it when the report a
+ * prepared frame carries has been superseded: discard here, and let the next
+ * arm build the replacement in a slot chosen for it. */
+void kbd_crypt_seal_discard(void);
+
 /* One-shot seal for callers with no timing constraint (host tests, and any
  * path that already runs in task context). Equivalent to begin()+finish(). */
 kbd_crypt_status_t kbd_crypt_seal(uint8_t ctrl, uint8_t tag,

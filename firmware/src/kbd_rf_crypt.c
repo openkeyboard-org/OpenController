@@ -457,6 +457,15 @@ int kbd_crypt_seal_pending(void)
     return seal_pending != 0u;
 }
 
+void kbd_crypt_seal_discard(void)
+{
+    /* Cheap and cipher-free, which is the point: a caller that learns the
+     * prepared frame is stale (its report has been superseded) can invalidate it
+     * without doing 11 AES blocks wherever it happens to be running. The
+     * replacement seal is then built in a slot chosen for it. */
+    seal_pending = 0u;
+}
+
 kbd_crypt_status_t kbd_crypt_seal(uint8_t ctrl, uint8_t tag,
                                   const uint8_t *body, uint8_t body_len,
                                   uint8_t *out, uint8_t *out_len)

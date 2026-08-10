@@ -1764,15 +1764,26 @@ void RF_QueueHIDReport(const uint8_t report[8])
     if (changed) {
         hid_resend = HID_RESEND_COUNT;
 #if KBD_RF_CRYPT
-        /* Re-seal immediately: any frame already prepared holds the PREVIOUS
-         * report, and the response path cannot build one itself. Main-loop
-         * context (this is called from the UART command handler), so the CCM
-         * work is free of the poll deadline. Replacing a prepared frame burns
-         * its counter, which is harmless -- the receiver only requires the
-         * counter to increase, not to be gapless. */
-        if (kbd_crypt_active()) {
-            rf_crypt_arm(tx_ctrl);
-        }
+        /* Only DISCARD the prepared frame here -- do not build its replacement.
+         *
+         * Any prepared frame holds the previous report, so it must not go out.
+         * But this runs from the UART command handler, which is asynchronous to
+         * the radio's poll grid, and sealing costs ~160 us of AES. With the
+         * default STOCK_ISR_FAST_RESPONSE=0 the turnaround ISR only posts
+         * RF_EVT_RESPOND, and this single cooperative main loop cannot service
+         * it until the seal returns -- so a seal starting shortly before a poll
+         * pushes the response past the receiver's post-poll RX window and the
+         * response is simply lost. Bench-observed: a keystroke that never
+         * arrived while the link was otherwise healthy, and a keepalive rate at
+         * roughly half its nominal value.
+         *
+         * Discarding is cipher-free and safe anywhere. The replacement is built
+         * by the RF_EVT_CRYPT_ARM handler, which is posted from the response
+         * path -- the quiet window immediately after a transmission, ~700 us
+         * before the next poll. The report therefore waits one extra poll
+         * (~1.75 ms rather than ~875 us) before going on air, which is far below
+         * anything a typist can perceive and much cheaper than losing it. */
+        kbd_crypt_seal_discard();
 #endif
     }
 }
