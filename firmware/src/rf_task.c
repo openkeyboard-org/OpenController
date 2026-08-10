@@ -219,11 +219,6 @@ static uint8_t tx_payload[KBD_CRYPT_MAX_FRAME];
 /* Session frame copied out of the RX ISR, verified in task context. */
 static volatile uint8_t crypt_session_rx[KBD_CRYPT_LEN_SESSION];
 static volatile uint8_t crypt_session_rx_pending;
-/* The receiver force-releases the link after RF_CRYPT_SILENCE_FRAMES (64)
- * connected receptions with nothing authenticated among them -- and it counts
- * bare poll acks too, so an idle keyboard that only acks would be dropped in
- * ~56 ms. Send something authenticated well inside that. */
-#define KBD_CRYPT_KEEPALIVE_POLLS 32u
 static volatile uint8_t crypt_polls_since_auth;
 static volatile uint8_t crypt_keepalive_due;
 #else
@@ -1261,9 +1256,18 @@ static void rf_pair_broadcast(void)
 
 #if KBD_RF_CRYPT
     /* One slot in four advertises the encryption capability instead of the
-     * beacon. The receiver needs a beacon to accept the pair at all, so the
-     * advert must not crowd them out; it only has to arrive once. */
-    if ((pair_bcast_count & 0x03u) == 0x03u) {
+     * beacon. It must arrive BEFORE the receiver commits the bond, because the
+     * capability is read at commit time and the receiver can accept the very
+     * first beacon it hears -- so lead with two, then repeat occasionally in
+     * case both were lost. Advertising only on a late slot leaves the bond
+     * recorded as not-capable, and encryption then stays off no matter how the
+     * key is provisioned (bench-observed, 2026-08-10).
+     *
+     * These replace a beacon slot rather than doubling up: TX completion is
+     * asynchronous, so two transmissions in one slot would need sequencing. The
+     * receiver only answers beacons, so an advert slot costs 20 ms of pairing
+     * latency and nothing else. */
+    if (pair_bcast_count < 2u || (pair_bcast_count & 0x07u) == 0x07u) {
         pair_bcast_count++;
         rf_pair_send_cap_advert();
         return;

@@ -81,6 +81,21 @@
 #define KBD_CRYPT_CTRL_VARIANT_MASK 0x03u
 #define KBD_CRYPT_CTRL_VARIANTS      4u
 
+/* How often an idle link must put an AUTHENTICATED frame on air, in connected
+ * receptions. The receiver force-releases after 64 receptions with nothing
+ * verified among them (RF_CRYPT_SILENCE_FRAMES) and counts bare poll acks
+ * toward it, so an idle keyboard that only acked would be dropped in ~56 ms.
+ *
+ * 32 (~28 ms against a ~56 ms deadline) is what has been observed delivering
+ * HID on hardware. It is NOT yet a settled number: an idle link survived one
+ * 8 s soak at this value and dropped after ~2 s on the next, so the keepalive
+ * does not reliably hold an idle encrypted link yet. Tightening it to 16 made
+ * matters worse rather than better -- keystroke delivery stopped entirely --
+ * which points at the keepalive contending with real reports for the single
+ * pre-sealed frame rather than at the margin being too thin. Unresolved; see
+ * the bench notes before changing this. */
+#define KBD_CRYPT_KEEPALIVE_POLLS   32u
+
 /* Direction byte folded into the nonce, domain-separating the link halves. */
 #define KBD_CRYPT_DIR_KB_TO_DONGLE 0x01u
 #define KBD_CRYPT_DIR_DONGLE_TO_KB 0x02u
