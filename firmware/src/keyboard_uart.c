@@ -128,6 +128,10 @@ static uint8_t expected_for_header(uint8_t b)
         return 3;
     case 0xA1:
         return 10;
+#if KBD_CRYPT_BENCH_KEY
+    case KBD_UART_CMD_SET_LINK_KEY:
+        return 18;   /* [AE][key 0..15][chk] */
+#endif
     case 0xA9:
         /* BLE device-name frames are FIXED 21 bytes on the wire: the host
          * pads [A9][len][name...][chk] out to 21 regardless of len (stock
@@ -156,6 +160,10 @@ static uint8_t frame_is_valid(void)
                 checksum(rx_buf, chk_idx) == rx_buf[chk_idx]);
     } else if (cmd == 0x61) {
         return rx_buf[1] == 0x0D && rx_buf[2] == 0x0A;
+#if KBD_CRYPT_BENCH_KEY
+    } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        return checksum(rx_buf, 17) == rx_buf[17];
+#endif
     }
     return 0;
 }
@@ -180,6 +188,13 @@ static void dispatch_frame(void)
         if (frame_cb) {
             frame_cb(0xA9, name_len, &rx_buf[2], name_len);
         }
+#if KBD_CRYPT_BENCH_KEY
+    } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_SET_LINK_KEY, 0, &rx_buf[1], 16);
+        }
+#endif
     } else {
         /* Host ACK to one of our 0x5A/0x5B/0x5C frames. */
     }

@@ -22,4 +22,16 @@ void KeyboardUart_SendLed(uint8_t led_mask);
  * drained - i.e. every queued byte has physically left the wire. */
 uint8_t KeyboardUart_TxIdle(void);
 
+#if KBD_CRYPT_BENCH_KEY
+/* BENCH ONLY -- [0xAE][16-byte link key][checksum].
+ *
+ * Provisions the link key both ends must share until the key-establishment
+ * handshake exists. Compiled ONLY under KBD_CRYPT_BENCH_KEY, which is separate
+ * from KBD_RF_CRYPT precisely so an encrypted SHIPPING image has no key-write
+ * command at all: a link key that any host on the wire could overwrite would
+ * hand an attacker the ability to forge keystrokes, which is the exact thing
+ * link encryption exists to prevent. Never enable this in a release build. */
+#define KBD_UART_CMD_SET_LINK_KEY 0xAEu
+#endif
+
 #endif

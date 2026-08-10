@@ -253,6 +253,19 @@ CFLAGS += -DSTOCK_CONNECT_IDX_BIAS=$(STOCK_CONNECT_IDX_BIAS)
 # A/B of the two images can never compare stale objects.
 KBD_RF_CRYPT ?= 0
 CFLAGS += -DKBD_RF_CRYPT=$(KBD_RF_CRYPT)
+# BENCH ONLY: compile the UART command that writes the link key (0xAE). Kept
+# SEPARATE from KBD_RF_CRYPT on purpose - an encrypted release image must carry
+# no key-write path at all, or anything on the host wire could overwrite the key
+# and forge keystrokes, defeating the point of encrypting the link. Until the
+# key-establishment handshake lands, a bench build needs it to key both ends:
+#   make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1
+KBD_CRYPT_BENCH_KEY ?= 0
+CFLAGS += -DKBD_CRYPT_BENCH_KEY=$(KBD_CRYPT_BENCH_KEY)
+ifeq ($(KBD_CRYPT_BENCH_KEY),1)
+ifneq ($(KBD_RF_CRYPT),1)
+$(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
+endif
+endif
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
 # WCH-Interrupt-fast/HPE semantics; do not emit a firmware image otherwise.

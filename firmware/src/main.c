@@ -65,6 +65,17 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         return;
     }
 
+#if KBD_CRYPT_BENCH_KEY
+    if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        /* Bench scaffold; see keyboard_uart.h for why this is behind its own
+         * flag. Status mirrors the pairing codes so the bench driver can read
+         * the outcome: 0x21 accepted, 0x36 rejected (no bond, or a key of all
+         * 0x00 / all 0xFF, which are erased-flash patterns rather than keys). */
+        KeyboardUart_SendStatus(RF_ProvisionLinkKey(payload) ? 0x21 : 0x36);
+        return;
+    }
+#endif
+
     if (cmd != 0xA6) {
         return;
     }
