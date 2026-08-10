@@ -27,15 +27,16 @@ static uint32_t crypt_tx_ctr;        /* last counter CONSUMED; next is +1 */
  * interrupt can land inside. */
 static volatile uint8_t crypt_engine_busy;
 
-/* seal_begin() -> seal_finish() carry state. */
+/* seal_begin() -> seal_finish() carry state. seal_mic holds one finished tag per
+ * reachable ctrl value, which is what lets seal_finish() run without touching
+ * the AES engine at all -- see the header's note on the response path. */
 static uint8_t  seal_pending;
 static uint8_t  seal_tag;
 static uint8_t  seal_body_len;
 static uint32_t seal_ctr;
-static uint8_t  seal_plain[KBD_CRYPT_MAX_BODY];  /* MAC is over plaintext */
+static uint8_t  seal_ctrl_base;                  /* ctrl bits above the ARQ pair */
 static uint8_t  seal_cipher[KBD_CRYPT_MAX_BODY];
-static uint8_t  seal_x1[16];                     /* E(B0) */
-static uint8_t  seal_s0[16];                     /* tag mask */
+static uint8_t  seal_mic[KBD_CRYPT_CTRL_VARIANTS][KBD_CRYPT_TAG_BYTES];
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -224,12 +225,13 @@ void kbd_crypt_clear(void)
     crypt_tx_ctr = 0u;
     seal_pending = 0u;
     for (i = 0; i < KBD_CRYPT_MAX_BODY; i++) {
-        seal_plain[i] = 0u;
         seal_cipher[i] = 0u;
     }
-    for (i = 0; i < 16u; i++) {
-        seal_x1[i] = 0u;
-        seal_s0[i] = 0u;
+    for (i = 0; i < KBD_CRYPT_CTRL_VARIANTS; i++) {
+        uint8_t j;
+        for (j = 0; j < KBD_CRYPT_TAG_BYTES; j++) {
+            seal_mic[i][j] = 0u;
+        }
     }
 }
 
@@ -294,11 +296,17 @@ static uint8_t seal_body_len_for_tag(uint8_t tag)
 
 /* ---------------------------------------------------------------- transmit */
 
-kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t tag,
+kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
                                         const uint8_t *body, uint8_t body_len)
 {
     uint8_t nonce[13];
+    uint8_t s0[16];
     uint8_t s1[16];
+    uint8_t x1[16];
+    uint8_t x[16];
+    uint8_t aad[2];
+    uint8_t plain[KBD_CRYPT_MAX_BODY];
+    uint8_t v;
     uint8_t i;
 
     if (!kbd_crypt_active()) {
@@ -315,27 +323,52 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t tag,
     if (crypt_tx_ctr == 0xFFFFFFFFu) {
         return KBD_CRYPT_EXHAUSTED;
     }
+    /* Self-enforce the non-reentrancy contract rather than trusting callers. */
+    if (!kbd_crypt_try_claim()) {
+        return KBD_CRYPT_BUSY;
+    }
 
     seal_ctr = crypt_tx_ctr + 1u;
     build_nonce(nonce, crypt_session_id, KBD_CRYPT_DIR_KB_TO_DONGLE, seal_ctr);
 
+    for (i = 0; i < body_len; i++) {
+        plain[i] = body[i];
+    }
+
     /* S_0 masks the tag; S_1 is the payload keystream (bodies are <= 8 bytes,
-     * so exactly one keystream block and only its first body_len bytes used). */
-    if (ctr_block(nonce, 0u, seal_s0) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
-    if (ctr_block(nonce, 1u, s1) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
-    /* B0 depends only on the nonce and the message length -- not on ctrl -- so
-     * the first CBC-MAC block is precomputable here. */
-    if (cbc_mac_b0(nonce, 2u, body_len, seal_x1) != HAL_AES_OK) {
+     * so exactly one keystream block and only its first body_len bytes used).
+     * B0 depends only on the nonce and the message length, not on ctrl. */
+    if (ctr_block(nonce, 0u, s0) != HAL_AES_OK ||
+        ctr_block(nonce, 1u, s1) != HAL_AES_OK ||
+        cbc_mac_b0(nonce, 2u, body_len, x1) != HAL_AES_OK) {
+        kbd_crypt_release();
         return KBD_CRYPT_FAULT_ENGINE;
     }
 
     for (i = 0; i < body_len; i++) {
-        seal_plain[i] = body[i];
-        seal_cipher[i] = (uint8_t)(body[i] ^ s1[i]);
+        seal_cipher[i] = (uint8_t)(plain[i] ^ s1[i]);
+    }
+
+    /* Finish the MAC for EVERY reachable ctrl value, not just the one we happen
+     * to know now. ctrl is AAD and is only latched when the poll arrives, so
+     * this is what buys a response path with no AES in it at all. Only the two
+     * ARQ bits vary (rf_task.c seeds tx_ctrl and thereafter replaces bit 0 and
+     * toggles bit 1, never touching the rest), so four tags cover it. */
+    seal_ctrl_base = (uint8_t)(ctrl_hint & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK);
+    for (v = 0; v < KBD_CRYPT_CTRL_VARIANTS; v++) {
+        for (i = 0; i < 16u; i++) {
+            x[i] = x1[i];
+        }
+        aad[0] = (uint8_t)(seal_ctrl_base | v);
+        aad[1] = tag;
+        if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
+            cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
+            kbd_crypt_release();
+            return KBD_CRYPT_FAULT_ENGINE;
+        }
+        for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+            seal_mic[v][i] = (uint8_t)(x[i] ^ s0[i]);
+        }
     }
 
     seal_tag = tag;
@@ -345,40 +378,34 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t tag,
      * Gaps are fine -- the receiver only requires strictly increasing. */
     crypt_tx_ctr = seal_ctr;
     seal_pending = 1u;
+    kbd_crypt_release();
     return KBD_CRYPT_OK;
 }
 
 kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
                                          uint8_t *out, uint8_t *out_len)
 {
-    uint8_t aad[2];
-    uint8_t x[16];
     uint8_t i;
     uint8_t n;
+    uint8_t v;
 
-    if (!seal_pending) {
+    if (!seal_pending || out == 0 || out_len == 0) {
         return KBD_CRYPT_SHAPE;
     }
-    if (out == 0 || out_len == 0) {
+    /* The MAC for this ctrl must already exist. It always will -- begin()
+     * covered every reachable value -- so a miss means the caller's ctrl left
+     * the range the ARQ logic can produce. Refuse rather than reach for the AES
+     * engine here: this runs in the response path, where a crypto call would
+     * both blow the turnaround budget and race main-loop use of the engine. */
+    if ((uint8_t)(ctrl & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK) != seal_ctrl_base) {
         return KBD_CRYPT_SHAPE;
     }
+    v = (uint8_t)(ctrl & KBD_CRYPT_CTRL_VARIANT_MASK);
 
-    /* Consume the pending frame up front: whatever happens below, this counter
-     * value is spent and must not be finished twice. */
+    /* Consume the pending frame: this counter value is spent and the frame must
+     * not be emitted twice. */
     seal_pending = 0u;
     n = seal_body_len;
-
-    for (i = 0; i < 16u; i++) {
-        x[i] = seal_x1[i];
-    }
-    aad[0] = ctrl;
-    aad[1] = seal_tag;
-    if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
-    if (cbc_mac_msg(x, seal_plain, n) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
 
     out[0] = ctrl;
     out[1] = seal_tag;
@@ -390,7 +417,7 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
         out[6 + i] = seal_cipher[i];
     }
     for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
-        out[6 + n + i] = (uint8_t)(x[i] ^ seal_s0[i]);
+        out[6 + n + i] = seal_mic[v][i];
     }
     *out_len = (uint8_t)(n + KBD_CRYPT_FRAME_OVERHEAD);
     return KBD_CRYPT_OK;
@@ -405,7 +432,7 @@ kbd_crypt_status_t kbd_crypt_seal(uint8_t ctrl, uint8_t tag,
                                   const uint8_t *body, uint8_t body_len,
                                   uint8_t *out, uint8_t *out_len)
 {
-    kbd_crypt_status_t st = kbd_crypt_seal_begin(tag, body, body_len);
+    kbd_crypt_status_t st = kbd_crypt_seal_begin(ctrl, tag, body, body_len);
     if (st != KBD_CRYPT_OK) {
         return st;
     }
@@ -436,6 +463,9 @@ kbd_crypt_status_t kbd_crypt_verify_session(const uint8_t *frame, uint8_t len,
     if (!crypt_key_ready) {
         return KBD_CRYPT_INACTIVE;
     }
+    if (!kbd_crypt_try_claim()) {
+        return KBD_CRYPT_BUSY;
+    }
 
     sid = (uint32_t)frame[2] | ((uint32_t)frame[3] << 8) |
           ((uint32_t)frame[4] << 16) | ((uint32_t)frame[5] << 24);
@@ -446,16 +476,14 @@ kbd_crypt_status_t kbd_crypt_verify_session(const uint8_t *frame, uint8_t len,
     aad[0] = frame[0];
     aad[1] = KBD_CRYPT_TAG_SESSION;
 
-    if (cbc_mac_b0(nonce, 2u, 0u, x) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
-    if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK) {
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
     /* Empty payload: no message block, per the CCM construction above. */
-    if (ctr_block(nonce, 0u, s0) != HAL_AES_OK) {
+    if (cbc_mac_b0(nonce, 2u, 0u, x) != HAL_AES_OK ||
+        cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
+        ctr_block(nonce, 0u, s0) != HAL_AES_OK) {
+        kbd_crypt_release();
         return KBD_CRYPT_FAULT_ENGINE;
     }
+    kbd_crypt_release();
 
     /* Accumulate rather than early-exit, so the comparison does not leak how
      * many bytes matched. */

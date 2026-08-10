@@ -24,9 +24,21 @@
  *
  * THE CTRL BYTE IS AAD, AND IT IS NOT KNOWN UNTIL THE POLL ARRIVES. It carries
  * the link's ARQ sequencing and is latched from the received poll (rf_task.c),
- * so a frame cannot be fully sealed ahead of time. See kbd_crypt_seal_begin()
- * / kbd_crypt_seal_finish() for the split that keeps the AES work out of the
- * 100 us response turnaround.
+ * so a frame cannot be sealed against one particular ctrl ahead of time.
+ *
+ * It can be sealed against ALL of them, which is what this module does. Only
+ * two bits of ctrl ever vary: rf_task.c seeds tx_ctrl once per connection and
+ * thereafter only replaces bit 0 and toggles bit 1, never touching the rest.
+ * Four candidate tags therefore cover every value the ARQ logic can produce.
+ * kbd_crypt_seal_begin() computes all four in main-loop context, and
+ * kbd_crypt_seal_finish() -- which runs in the response path -- selects one and
+ * emits the frame WITHOUT CALLING THE AES ENGINE AT ALL.
+ *
+ * That is worth the eight extra block encryptions. It keeps the 100 us
+ * poll-to-response turnaround free of crypto entirely, and it removes any
+ * possibility of the response path racing main-loop use of a cipher that is
+ * explicitly not reentrant. The extra work lands where there is no deadline:
+ * ~160 us per report against a poll interval of ~17.5 ms.
  *
  * COUNTER DISCIPLINE -- two rules, both load-bearing for nonce uniqueness.
  *
@@ -47,9 +59,10 @@
  * kbd_crypt_adopt_session() for the full argument. The counter starts at 1 for
  * a freshly installed key; 0 is reserved and the receiver rejects it.
  *
- * CONTEXT. hal_aes is NOT reentrant (one shared engine, module state), so the
- * caller must serialize main-loop and ISR-path use of this module -- see
- * kbd_crypt_try_claim().
+ * CONTEXT. hal_aes is NOT reentrant (one shared engine, module state). Every
+ * entry point here that touches it claims the engine and returns
+ * KBD_CRYPT_BUSY rather than proceeding, so the contract is enforced instead of
+ * assumed. kbd_crypt_seal_finish() needs no claim because it does no crypto.
  */
 #ifndef KBD_RF_CRYPT_H
 #define KBD_RF_CRYPT_H
@@ -62,6 +75,11 @@
 #define KBD_CRYPT_MAX_BODY         8u   /* boot-keyboard report, the largest */
 #define KBD_CRYPT_FRAME_OVERHEAD  14u   /* ctrl+tag+counter+mic */
 #define KBD_CRYPT_MAX_FRAME       (KBD_CRYPT_MAX_BODY + KBD_CRYPT_FRAME_OVERHEAD)
+
+/* The ctrl bits the ARQ logic varies, and hence how many candidate tags a seal
+ * must carry. Keep in step with rf_task.c's tx_ctrl update. */
+#define KBD_CRYPT_CTRL_VARIANT_MASK 0x03u
+#define KBD_CRYPT_CTRL_VARIANTS      4u
 
 /* Direction byte folded into the nonce, domain-separating the link halves. */
 #define KBD_CRYPT_DIR_KB_TO_DONGLE 0x01u
@@ -130,29 +148,32 @@ uint32_t kbd_crypt_session_id(void);
 
 /* ------------------------------------------------------- engine serialization
  *
- * hal_aes is not reentrant. Any context that will call a sealing/verifying
- * entry point must claim the engine first and release it after. Claim fails
- * (returns 0) if the other context holds it -- the ISR path must then skip
- * encryption for that slot rather than corrupt an in-flight computation. */
+ * Used internally to enforce hal_aes's non-reentrancy; exposed so a caller can
+ * hold the engine across a sequence if it ever needs to. A failed claim means
+ * another context holds it. */
 int  kbd_crypt_try_claim(void);
 void kbd_crypt_release(void);
 
 /* ------------------------------------------------------------------ transmit
  *
- * Sealing is split because the ctrl byte is AAD and only becomes known when the
- * poll arrives, inside a 100 us turnaround that cannot absorb a whole CCM.
+ * Sealing is split so that no AES work lands in the response path.
  *
- * kbd_crypt_seal_begin() does everything that depends only on the counter and
- * the payload -- the keystream, the ciphertext, and the first CBC-MAC block --
- * in main-loop context, and consumes one counter value.
+ * kbd_crypt_seal_begin() runs in main-loop context, consumes one counter value,
+ * and computes the keystream, the ciphertext, and a finished MAC for every
+ * reachable ctrl value. `ctrl_hint` supplies the invariant high bits of ctrl
+ * (pass the current tx_ctrl); only the low KBD_CRYPT_CTRL_VARIANT_MASK bits are
+ * enumerated.
  *
- * kbd_crypt_seal_finish() then folds in the ctrl byte (2 AES blocks) and emits
- * the complete frame. It may be called from the response path.
+ * kbd_crypt_seal_finish() selects the MAC matching the ctrl the poll actually
+ * carried and emits the frame. It performs NO cipher operations, so it is safe
+ * and cheap in the turnaround. It returns KBD_CRYPT_SHAPE if ctrl falls outside
+ * the enumerated set -- the caller should then send its plain keepalive rather
+ * than anything derived from unsealed data.
  *
  * A begin() must be followed by exactly one finish(); a second finish() without
  * an intervening begin() returns KBD_CRYPT_SHAPE rather than resending a frame
  * under an already-used counter. */
-kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t tag,
+kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
                                         const uint8_t *body, uint8_t body_len);
 
 kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,

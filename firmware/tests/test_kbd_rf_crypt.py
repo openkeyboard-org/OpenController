@@ -114,9 +114,11 @@ int main(void){
             if (s == KBD_CRYPT_OK) { printf("OK "); puthex(frame, out_len); printf("\n"); }
             else printf("%s\n", st_name(s));
         } else if (!strcmp(cmd, "begin")) {
-            unsigned long tag = strtoul(a1, NULL, 16);
-            int n = unhex(a2, buf, sizeof(buf));
-            printf("%s\n", st_name(kbd_crypt_seal_begin((uint8_t)tag, buf, (uint8_t)n)));
+            unsigned long hint = strtoul(a1, NULL, 16);
+            unsigned long tag  = strtoul(a2, NULL, 16);
+            int n = unhex(a3, buf, sizeof(buf));
+            printf("%s\n", st_name(kbd_crypt_seal_begin((uint8_t)hint, (uint8_t)tag,
+                                                         buf, (uint8_t)n)));
         } else if (!strcmp(cmd, "finish")) {
             unsigned long ctrl = strtoul(a1, NULL, 16);
             kbd_crypt_status_t s = kbd_crypt_seal_finish((uint8_t)ctrl, frame, &out_len);
@@ -240,7 +242,7 @@ class KbdCryptTest(unittest.TestCase):
         self.fresh()
         one_shot = self.h.cmd(f"seal 03 a1 {body.hex()}")
         self.fresh()
-        self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body.hex()}"), "OK")
         split = self.h.cmd("finish 03")
         self.assertEqual(split, one_shot)
 
@@ -248,10 +250,10 @@ class KbdCryptTest(unittest.TestCase):
         """ctrl is AAD: the same payload under a different ctrl differs in MAC."""
         body = bytes(8)
         self.fresh()
-        self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body.hex()}"), "OK")
         a = bytes.fromhex(self.h.cmd("finish 00")[3:])
         self.fresh()
-        self.assertEqual(self.h.cmd(f"begin a1 {body.hex()}"), "OK")
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body.hex()}"), "OK")
         b = bytes.fromhex(self.h.cmd("finish 01")[3:])
         self.assertNotEqual(a[-8:], b[-8:])           # MAC differs
         self.assertEqual(a[6:14], b[6:14])            # ciphertext identical
@@ -384,7 +386,7 @@ class KbdCryptTest(unittest.TestCase):
 
     def test_finish_without_begin_refused(self):
         """A second finish() must not re-emit under an already-spent counter."""
-        self.h.cmd(f"begin a1 {bytes(8).hex()}")
+        self.h.cmd(f"begin 02 a1 {bytes(8).hex()}")
         self.assertTrue(self.h.cmd("finish 02").startswith("OK "))
         self.assertEqual(self.h.cmd("finish 02"), "SHAPE")
 
@@ -393,10 +395,34 @@ class KbdCryptTest(unittest.TestCase):
         self.h.cmd("failnext")
         self.assertEqual(self.h.cmd(f"seal 02 a1 {bytes(8).hex()}"), "ENGINE")
 
-    def test_engine_fault_in_finish_never_emits(self):
-        self.assertEqual(self.h.cmd(f"begin a1 {bytes(8).hex()}"), "OK")
+    def test_finish_performs_no_cipher_operations(self):
+        """The response path must not touch the AES engine.
+
+        Poisoning the engine and then finishing proves it: if finish() called
+        the cipher at all it would fail, and it must not, because that call
+        would both eat the 100 us turnaround and race main-loop use of a cipher
+        that is explicitly not reentrant.
+        """
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {bytes(8).hex()}"), "OK")
         self.h.cmd("failnext")
-        self.assertEqual(self.h.cmd("finish 02"), "ENGINE")
+        got = self.h.cmd("finish 02")
+        self.assertTrue(got.startswith("OK "), got)
+
+    def test_finish_refuses_a_ctrl_outside_the_sealed_set(self):
+        """Only the ARQ bits may vary; anything else was never sealed."""
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {bytes(8).hex()}"), "OK")
+        self.assertEqual(self.h.cmd("finish 42"), "SHAPE")
+
+    def test_all_four_arq_variants_are_sealed_by_one_begin(self):
+        """One begin() must cover every ctrl the poll can arrive with."""
+        body = bytes(range(8))
+        for ctrl in (0x00, 0x01, 0x02, 0x03):
+            with self.subTest(ctrl=ctrl):
+                self.fresh()
+                self.assertEqual(self.h.cmd(f"begin 02 a1 {body.hex()}"), "OK")
+                got = self.h.cmd(f"finish {ctrl:02x}")
+                want = ccm_ref.build_frame(KEY, SID, 1, ctrl, TAG_BOOT, body)
+                self.assertEqual(got, "OK " + want.hex())
 
     def test_engine_claim_is_exclusive(self):
         self.assertEqual(self.h.cmd("claim"), "1")
