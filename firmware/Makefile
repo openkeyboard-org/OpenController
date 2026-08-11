@@ -139,6 +139,12 @@ endif
 ifeq ($(filter 0 1,$(strip $(KBD_FACTORY_MAC))),)
 $(error BOARD '$(BOARD)' has invalid KBD_FACTORY_MAC='$(KBD_FACTORY_MAC)')
 endif
+ifneq ($(words $(strip $(KBD_DCDC_ENABLE))),1)
+$(error BOARD '$(BOARD)' must set KBD_DCDC_ENABLE to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_DCDC_ENABLE))),)
+$(error BOARD '$(BOARD)' has invalid KBD_DCDC_ENABLE='$(KBD_DCDC_ENABLE)')
+endif
 
 # ---------------------------------------------------------------------------
 # OpenBoot integration
@@ -239,6 +245,7 @@ CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 CFLAGS += -DKBD_UART1_REMAP=$(KBD_UART1_REMAP)
 CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
+CFLAGS += -DKBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)
 
 # Per-build overrides go through EXTRA_CFLAGS. Use `make EXTRA_CFLAGS=...`
 # not `make CFLAGS+=...`; the latter clobbers ARCH.
@@ -415,6 +422,7 @@ print-board-config:
 	    'OPENBOOT_BOARD=$(OPENBOOT_BOARD)' \
 	    'KBD_UART1_REMAP=$(KBD_UART1_REMAP)' \
 	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
+	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
 	    'BUILD=$(BUILD)' \
 	    'BUNDLE_BIN=$(BUNDLE_BIN)' \
 	    'FACTORY_BIN=$(FACTORY_BIN)'

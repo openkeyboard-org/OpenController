@@ -20,16 +20,17 @@ def board_config(board: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
 
-@pytest.mark.parametrize("board,remap,factory_mac,openboot_board", [
-    ("opencontroller-ch592", "1", "0", "opencontroller-ch592"),
-    ("mk65mx-wireless-ch592", "0", "1", "mk65mx-wireless-ch592"),
+@pytest.mark.parametrize("board,remap,factory_mac,dcdc,openboot_board", [
+    ("opencontroller-ch592", "1", "0", "0", "opencontroller-ch592"),
+    ("mk65mx-wireless-ch592", "0", "1", "1", "mk65mx-wireless-ch592"),
 ])
-def test_board_profile(board, remap, factory_mac, openboot_board):
+def test_board_profile(board, remap, factory_mac, dcdc, openboot_board):
     cfg = board_config(board)
     assert cfg["BOARD"] == board
     assert cfg["OPENBOOT_BOARD"] == openboot_board
     assert cfg["KBD_UART1_REMAP"] == remap
     assert cfg["KBD_FACTORY_MAC"] == factory_mac
+    assert cfg["KBD_DCDC_ENABLE"] == dcdc
     assert board in cfg["BUILD"]
     assert board in cfg["BUNDLE_BIN"]
     assert board in cfg["FACTORY_BIN"]
@@ -40,3 +41,17 @@ def test_board_artifact_paths_do_not_overlap():
     mk65 = board_config("mk65mx-wireless-ch592")
     for key in ("BUILD", "BUNDLE_BIN", "FACTORY_BIN"):
         assert original[key] != mk65[key]
+
+
+@pytest.mark.parametrize("bad", ["2", "yes", "0 1", ""])
+def test_dcdc_enable_must_be_an_exact_boolean(bad):
+    """A typo must not silently fall back to the LDO, or worse, to enabling
+    the converter on a board that has no inductor."""
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "BOARD=mk65mx-wireless-ch592", f"KBD_DCDC_ENABLE={bad}",
+         "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "KBD_DCDC_ENABLE" in result.stderr

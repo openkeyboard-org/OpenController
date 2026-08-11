@@ -72,6 +72,21 @@ The MK65MX profile takes its 2.4 GHz keyboard identity from the CH592 factory
 ROM. Switching an already-paired module from the default fixed identity to
 this profile requires clearing and re-pairing the receiver bond.
 
+Board profiles own the hardware-dependent knobs below; each is validated at
+parse time, so a missing or non-boolean value fails the build rather than
+producing a wrong image.
+
+| Knob | `opencontroller-ch592` | `mk65mx-wireless-ch592` | Meaning |
+|---|---|---|---|
+| `KBD_UART1_REMAP` | 1 | 0 | 1 = UART1 on PB12/PB13, 0 = silicon-default PA8/PA9 |
+| `KBD_FACTORY_MAC` | 0 | 1 | 1 = 2.4 GHz identity from the CH592 factory ROM |
+| `KBD_DCDC_ENABLE` | 0 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
+
+`KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
+populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
+that cannot do DC-DC at all (`ROM_CFG_ADR_HW` bit 13); it cannot tell that a
+PCB is missing the part, and enabling it there collapses the core supply.
+
 The size check enforces the 216 KiB slot capacity (see BOOT.md).
 
 ## Boot chain and flashing
