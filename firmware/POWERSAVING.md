@@ -15,9 +15,9 @@ before acting on any of it; see [Measure first](#measure-first).
 |---|---|
 | Core clock | 60 MHz PLL, always (`src/main.c:210`), never lowered |
 | Main loop | pure busy-spin (`src/main.c:191`) — TMOS, hop tick, UART poll, watchdog feed; no idle instruction anywhere |
-| Sleep | `HAL_SLEEP` is FALSE, so `CH59x_LowPower()` compiles to `return 3` and `HAL_SleepInit()` is empty |
-| UART RX | polled. `UART1_DefInit` (`src/keyboard_uart.c:80`) leaves `R8_UART1_IER = RB_IER_TXD_EN`; no RX interrupt exists |
-| 32 kHz source | internal RC — `CLK_OSC32K` defaults to 1 and the application never overrides it, so the LSE crystal path is already unpowered |
+| Sleep | `HAL_SLEEP` defaults to FALSE (`vendor/wch-ch592-sdk/ble/HAL/include/CONFIG.h:84-86`), so `CH59x_LowPower()` returns 3 and `HAL_SleepInit()` is empty (`vendor/wch-ch592-sdk/ble/HAL/SLEEP.c:26-75`, `vendor/wch-ch592-sdk/ble/HAL/SLEEP.c:86-97`) |
+| UART RX | polled. `KeyboardUart_Init` calls `UART1_DefInit` (`src/keyboard_uart.c:73-84`), which sets `R8_UART1_IER = RB_IER_TXD_EN` (`vendor/wch-ch592-sdk/StdPeriphDriver/CH59x_uart1.c:24-31`); no RX interrupt exists |
+| 32 kHz source | internal RC — SDK defaults `CLK_OSC32K` to 1 (`vendor/wch-ch592-sdk/ble/HAL/include/CONFIG.h:123-125`) and the application never overrides it, so the LSE crystal path is already unpowered |
 | Peripheral gating | untouched; `R32_SLEEP_CONTROL` is never written |
 | DC-DC | off on `main`; enabled for the MK65MX profile by PR #7 |
 
