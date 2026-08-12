@@ -213,7 +213,7 @@ static volatile uint8_t  bond_save_pending;
  * regardless and is retained.) */
 static volatile uint8_t  supervision_kick;
 
-#define HID_RESEND_COUNT  6u   /* resend a changed report on this many polls */
+#define HID_RESEND_COUNT  6u   /* resend each submitted report on this many polls */
 
 /* TMR0 one-shot post-poll turnaround. Stock firmwareB.bin FUN_ram_00005abe arms
  * 300 TMR0 counts (~5 us @ 60 MHz), but this main-loop deferred TX path needs a
@@ -852,7 +852,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 }
 
 /* Build + transmit the poll response on the latched channel: LEN=10 HID while a
- * changed report is pending (a few resends), else a LEN=1 [ctrl] keepalive. TX
+ * submitted report is pending (a few resends), else a LEN=1 [ctrl] keepalive. TX
  * skips the full RF_Config (AA/mode still set from the last rf_start_rx) to cut
  * turnaround latency; TX_FINISH clears response_pending and re-arms RX. Called
  * from the main-loop RF_EVT_RESPOND handler, OR (STOCK_ISR_FAST_RESPONSE) directly
@@ -1448,18 +1448,14 @@ uint8_t RF_HasBond(void)
 
 void RF_QueueHIDReport(const uint8_t report[8])
 {
-    uint8_t changed = 0;
     for (uint8_t i = 0; i < 8; i++) {
-        if (hid_report[i] != report[i]) {
-            changed = 1;
-        }
         hid_report[i] = report[i];
     }
-    /* A new report (key event) must be delivered as LEN=10. Resend it on the
-     * next few polls so a dropped slot doesn't lose a key-down or key-up. */
-    if (changed) {
-        hid_resend = HID_RESEND_COUNT;
-    }
+    /* Every UART A1 frame is a new delivery request, even if its payload equals
+     * the cached report.  QMK deliberately sends a duplicate empty report as a
+     * release barrier during transport resynchronisation; suppressing it here
+     * could leave the receiver holding a key after the first release was lost. */
+    hid_resend = HID_RESEND_COUNT;
 }
 
 uint8_t RF_GetState(void)
