@@ -121,3 +121,6 @@ drop-in directories selected with `make BLE_LIB_DIR=...`.
 - `docs/TMOS_REVIEW.md` — SDK-alignment review; the written rationale for
   interrupt-architecture decisions (e.g. why there is no app
   `BB_IRQHandler`).
+- `POWERSAVING.md` — power-reduction survey, ordered by risk to 2.4 GHz link
+  performance. Source-derived and explicitly unmeasured; read the "Measure
+  first" section before acting on the ordering.
