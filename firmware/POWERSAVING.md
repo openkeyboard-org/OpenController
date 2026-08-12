@@ -27,7 +27,7 @@ The core spins at 60 MHz doing nothing for the overwhelming majority of each
 ## The constraint everything hinges on
 
 `RF_ConnectedTick()` is a **polled** hop scheduler. It reads the RTC counter
-(`src/rf_task.c:96`) on each call and compares elapsed ticks against
+(`src/rf_task.c:346`) on each call and compares elapsed ticks against
 `rf_conn_interval`; nothing interrupts it into running. The consequence is
 already documented in the UART TX timeout rationale
 (`src/keyboard_uart.c:12`): a stalled main loop stalls `RF_ConnectedTick`,
