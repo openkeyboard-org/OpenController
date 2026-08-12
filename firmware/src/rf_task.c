@@ -102,6 +102,10 @@
 #define RF_HOP_ANCHOR_BACKDATE    (RF_POLL_BACKDATE_BASE + 1u)  /* seed/re-seed (LEN>=8) */
 #define RF_HOP_DESYNC_INTERVALS   64u           /* gap (in intervals) treated as desync */
 
+#ifndef KBD_FACTORY_MAC
+#define KBD_FACTORY_MAC 0
+#endif
+
 #ifndef KBD_MAC_0
 #define KBD_MAC_0 0xbd
 #define KBD_MAC_1 0xc3
@@ -129,9 +133,19 @@
 #define STOCK_SEED_DONGLE_MAC_5 0x00
 #endif
 
+#if KBD_FACTORY_MAC
+/* GetMACAddress writes six bytes through the ROM flash API and requires a
+ * four-byte-aligned destination (ISP592.h).  Keep validity separate: an API
+ * failure, all-zero value, or erased all-0xFF value must never become a
+ * shared RF pairing identity. */
+static uint8_t keyboard_mac[6] __attribute__((aligned(4)));
+static uint8_t keyboard_mac_valid;
+#else
 static const uint8_t keyboard_mac[6] = {
     KBD_MAC_0, KBD_MAC_1, KBD_MAC_2, KBD_MAC_3, KBD_MAC_4, KBD_MAC_5
 };
+#define keyboard_mac_valid 1u
+#endif
 #define NUM_PAIR_CHANNELS  3u
 #define NUM_DATA_CHANNELS  5u
 #define RF_HOP_MAX_STEP    NUM_DATA_CHANNELS  /* clamp a stale advance to one full hop cycle */
@@ -339,6 +353,31 @@ static uint8_t mac_equal(const uint8_t *a, const uint8_t *b)
         }
     }
     return 1;
+}
+
+static void rf_init_keyboard_identity(void)
+{
+#if KBD_FACTORY_MAC
+    uint8_t all_zero = 1;
+    uint8_t all_ff = 1;
+
+    keyboard_mac_valid = 0;
+    for (uint8_t i = 0; i < sizeof(keyboard_mac); i++) {
+        keyboard_mac[i] = 0;
+    }
+    if (GetMACAddress(keyboard_mac) != 0) {
+        return;
+    }
+    for (uint8_t i = 0; i < sizeof(keyboard_mac); i++) {
+        if (keyboard_mac[i] != 0x00) {
+            all_zero = 0;
+        }
+        if (keyboard_mac[i] != 0xFF) {
+            all_ff = 0;
+        }
+    }
+    keyboard_mac_valid = (uint8_t)(!all_zero && !all_ff);
+#endif
 }
 
 static uint32_t rtc_read_32k(void)
@@ -1069,6 +1108,11 @@ static void rf_start_rx(uint8_t channel)
 
 static void rf_pair_broadcast(void)
 {
+    if (!keyboard_mac_valid) {
+        rf_state = RF_STATE_IDLE;
+        RF_Shut();
+        return;
+    }
     RF_DIAG_SET(last_rf_op, 2);
     uint8_t dwell = (uint8_t)(pair_bcast_count / RF_PAIR_DWELL_BCASTS);
     uint8_t pair_channel_idx = (uint8_t)(dwell % NUM_PAIR_CHANNELS);
@@ -1293,6 +1337,11 @@ void TMR0_IRQHandler(void)
 
 void RF_TaskInit(void)
 {
+    /* This runs after RF_RoleInit, matching WCH's own RF examples.  Failure
+     * leaves the radio idle, but initialization continues so UART commands
+     * (including OpenBoot entry) remain available. */
+    rf_init_keyboard_identity();
+
 #if RF_DIAG_COUNTERS
     for (uint8_t i = 0; i < 6; i++) {
         rf_cb_count[i] = 0;
@@ -1357,7 +1406,7 @@ void RF_TaskInit(void)
     (void)rf_load_bond_from_flash();
 #endif
     tmos_memset(hid_report, 0, sizeof(hid_report));
-    if (has_bond) {
+    if (has_bond && keyboard_mac_valid) {
         rf_state = RF_STATE_PAIRING;
         rf_access_addr = stored_session_aa;
         rf_channel = pair_channels[0];
@@ -1370,6 +1419,9 @@ void RF_TaskInit(void)
 
 uint8_t RF_Select2G4(void)
 {
+    if (!keyboard_mac_valid) {
+        return 0;
+    }
     if (rf_state == RF_STATE_CONNECTED) {
         return has_bond;
     }
@@ -1395,7 +1447,7 @@ void RF_EnterPairing(void)
      * dongle keeps polling the session AA -> a silent phantom (the natural-drop
      * reconnect failure). Forcing a fresh pair while connected requires an
      * explicit unpair (A6 52) or disconnect first. */
-    if (rf_state == RF_STATE_CONNECTED) {
+    if (!keyboard_mac_valid || rf_state == RF_STATE_CONNECTED) {
         return;
     }
     rf_tmr0_stop();
@@ -1444,6 +1496,11 @@ void RF_ClearBond(void)
 uint8_t RF_HasBond(void)
 {
     return has_bond;
+}
+
+uint8_t RF_IdentityValid(void)
+{
+    return keyboard_mac_valid;
 }
 
 void RF_QueueHIDReport(const uint8_t report[8])

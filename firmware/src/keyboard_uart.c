@@ -7,6 +7,10 @@
 
 #define KBD_UART_MAX_FRAME  24
 
+#ifndef KBD_UART1_REMAP
+#define KBD_UART1_REMAP 1
+#endif
+
 /* Bound the TX-FIFO-full spin: a stalled host main-MCU must not freeze
  * Main_Circulation (which would stall RF_ConnectedTick -> the time-based hop ->
  * drop the RF link with no recovery). One byte is ~87 us at 115200; 150 us lets a
@@ -72,10 +76,23 @@ static uint8_t uart_send_frame(uint8_t cmd, uint8_t val)
 
 void KeyboardUart_Init(void)
 {
+#if KBD_UART1_REMAP
     GPIOPinRemap(ENABLE, RB_PIN_UART1);
     GPIOB_SetBits(bTXD1_);
     GPIOB_ModeCfg(bTXD1_, GPIO_ModeOut_PP_5mA);
     GPIOB_ModeCfg(bRXD1_, GPIO_ModeIN_PU);
+#else
+    /* MK65MX uses UART1's default PA8/PA9 mapping.  PB13 is CHWAKE on that
+     * board: explicitly return both alternate UART pins to floating inputs so
+     * neither the application nor an inherited pin state can drive it. */
+    GPIOB_ModeCfg(bRXD1_ | bTXD1_, GPIO_ModeIN_Floating);
+    GPIOA_SetBits(bTXD1);
+    GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(bRXD1, GPIO_ModeIN_PU);
+    /* Switch the peripheral only after PA9 is already idling high, avoiding a
+     * transient low start edge if this follows firmware that used the remap. */
+    GPIOPinRemap(DISABLE, RB_PIN_UART1);
+#endif
 
     UART1_DefInit();
     UART1_BaudRateCfg(115200);
