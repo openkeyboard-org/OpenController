@@ -223,6 +223,11 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
 /* Non-zero if a seal_begin() result is waiting for its seal_finish(). */
 int kbd_crypt_seal_pending(void);
 
+/* Seal double-compute disagreements: radio/AES collisions caught (and the
+ * seal recomputed) before a corrupted block could poison a frame. See the
+ * note inside kbd_crypt_seal_begin(). */
+extern uint32_t kbd_crypt_seal_redo;
+
 /* Throw away a prepared frame without building another. Cipher-free, so it is
  * safe anywhere -- unlike seal_begin(), whose ~160 us of AES must not run at an
  * arbitrary moment (see the note on seal_begin's cost). Use it when the report a

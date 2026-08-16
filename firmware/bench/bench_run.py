@@ -42,7 +42,7 @@ KBD_DIAG_N = 9
 KBD_DIAG_LEN = 1 + 4 * KBD_DIAG_N + 1          # 34
 KBD_FAIL_LEN = 8 + 22 + 8 + 1                  # 39
 DIAG_NAMES = ["seal_miss", "tx_sealed", "sess_bad", "sess_ok", "sess_rx",
-              "selfck_ok", "selfck_bad", "bb_during_aes", "aes_stale"]
+              "selfck_ok", "selfck_bad", "bb_during_aes", "seal_redo"]
 
 t0 = time.time()
 

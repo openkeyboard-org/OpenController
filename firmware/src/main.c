@@ -88,7 +88,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
             kbd_crypt_seal_miss, kbd_crypt_tx_sealed,
             kbd_crypt_sess_bad,  kbd_crypt_sess_ok, kbd_crypt_sess_rx,
             kbd_crypt_selfck_ok, kbd_crypt_selfck_bad,
-            kbd_crypt_bb_during_aes, 0u,
+            kbd_crypt_bb_during_aes, kbd_crypt_seal_redo,
         };
         KeyboardUart_SendCryptDiag(counters, 9u);
         return;

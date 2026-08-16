@@ -17,6 +17,10 @@
 
 /* ------------------------------------------------------------------ state */
 
+/* Seal double-compute disagreements (each is one radio/AES collision caught
+ * before it could poison a frame; the seal was recomputed). Plain .bss. */
+uint32_t kbd_crypt_seal_redo;
+
 static uint8_t  crypt_key_ready;
 static uint8_t  crypt_session_ready;
 static uint32_t crypt_session_id;
@@ -401,41 +405,118 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
         plain[i] = body[i];
     }
 
-    /* S_0 masks the tag; S_1 is the payload keystream (bodies are <= 8 bytes,
-     * so exactly one keystream block and only its first body_len bytes used).
-     * B0 depends only on the nonce and the message length, not on ctrl. */
-    if (ctr_block(nonce, 0u, s0) != HAL_AES_OK ||
-        ctr_block(nonce, 1u, s1) != HAL_AES_OK ||
-        cbc_mac_b0(nonce, 2u, body_len, x1) != HAL_AES_OK) {
-        KBD_BENCH_AES_END();
-        kbd_crypt_release();
-        return KBD_CRYPT_FAULT_ENGINE;
-    }
+    /* Compute the WHOLE seal twice and require the passes to agree.
+     *
+     * The engine shares a datapath with the radio, and a BLEB preempt
+     * mid-block silently aborts the operation: CFG reads back complete while
+     * the DATA latch still holds the PREVIOUS block's output (docs/TODO.md
+     * section 0). Arming the seal after TX_FINISH removed most exposure, but
+     * the poll grid keeps the radio active every 875 us, so ~0.5% of seals
+     * still caught a corrupted block on the bench. An aborted block returns
+     * stale bytes that an honest recompute cannot reproduce, so pass
+     * disagreement detects it; both passes aborting AT the same block with
+     * the same stale latch content is the only blind spot, and the collision
+     * rate squared puts that below one seal in ten million. One bounded
+     * retry, then KBD_CRYPT_BUSY: no frame this slot (the response path sends
+     * its bare ack), and the caller's re-arm tries again in the next cycle --
+     * never a poisoned frame, and never a torn-down session for a transient. */
+    for (uint8_t attempt = 0; ; attempt++) {
+        uint8_t s0b[16];
+        uint8_t xb[16];
+        uint8_t diff;
 
-    for (i = 0; i < body_len; i++) {
-        seal_cipher[i] = (uint8_t)(plain[i] ^ s1[i]);
-    }
-
-    /* Finish the MAC for EVERY reachable ctrl value, not just the one we happen
-     * to know now. ctrl is AAD and is only latched when the poll arrives, so
-     * this is what buys a response path with no AES in it at all. Only the two
-     * ARQ bits vary (rf_task.c seeds tx_ctrl and thereafter replaces bit 0 and
-     * toggles bit 1, never touching the rest), so four tags cover it. */
-    seal_ctrl_base = (uint8_t)(ctrl_hint & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK);
-    for (v = 0; v < KBD_CRYPT_CTRL_VARIANTS; v++) {
-        for (i = 0; i < 16u; i++) {
-            x[i] = x1[i];
-        }
-        aad[0] = (uint8_t)(seal_ctrl_base | v);
-        aad[1] = tag;
-        if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
-            cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
+        /* Pass 1: S_0 masks the tag; S_1 is the payload keystream (bodies are
+         * <= 8 bytes, so exactly one keystream block). B0 depends only on the
+         * nonce and the message length, not on ctrl. */
+        if (ctr_block(nonce, 0u, s0) != HAL_AES_OK ||
+            ctr_block(nonce, 1u, s1) != HAL_AES_OK ||
+            cbc_mac_b0(nonce, 2u, body_len, x1) != HAL_AES_OK) {
             KBD_BENCH_AES_END();
             kbd_crypt_release();
             return KBD_CRYPT_FAULT_ENGINE;
         }
-        for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
-            seal_mic[v][i] = (uint8_t)(x[i] ^ s0[i]);
+
+        for (i = 0; i < body_len; i++) {
+            seal_cipher[i] = (uint8_t)(plain[i] ^ s1[i]);
+        }
+
+        /* Finish the MAC for EVERY reachable ctrl value, not just the one we
+         * happen to know now. ctrl is AAD and is only latched when the poll
+         * arrives, so this is what buys a response path with no AES in it at
+         * all. Only the two ARQ bits vary (rf_task.c seeds tx_ctrl and
+         * thereafter replaces bit 0 and toggles bit 1, never touching the
+         * rest), so four tags cover it. */
+        seal_ctrl_base = (uint8_t)(ctrl_hint & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK);
+        for (v = 0; v < KBD_CRYPT_CTRL_VARIANTS; v++) {
+            for (i = 0; i < 16u; i++) {
+                x[i] = x1[i];
+            }
+            aad[0] = (uint8_t)(seal_ctrl_base | v);
+            aad[1] = tag;
+            if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
+                cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
+                KBD_BENCH_AES_END();
+                kbd_crypt_release();
+                return KBD_CRYPT_FAULT_ENGINE;
+            }
+            for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+                seal_mic[v][i] = (uint8_t)(x[i] ^ s0[i]);
+            }
+        }
+
+        /* Pass 2: re-derive every block into scratch and accumulate the
+         * differences (no early exit; the comparison is not secret-dependent
+         * in a way that matters, but staying branch-free is free here). */
+        diff = 0u;
+        if (ctr_block(nonce, 0u, s0b) != HAL_AES_OK ||
+            ctr_block(nonce, 1u, xb) != HAL_AES_OK) {
+            KBD_BENCH_AES_END();
+            kbd_crypt_release();
+            return KBD_CRYPT_FAULT_ENGINE;
+        }
+        for (i = 0; i < 16u; i++) {
+            diff |= (uint8_t)(s0[i] ^ s0b[i]);
+        }
+        for (i = 0; i < body_len; i++) {
+            diff |= (uint8_t)(seal_cipher[i] ^ (uint8_t)(plain[i] ^ xb[i]));
+        }
+        if (cbc_mac_b0(nonce, 2u, body_len, xb) != HAL_AES_OK) {
+            KBD_BENCH_AES_END();
+            kbd_crypt_release();
+            return KBD_CRYPT_FAULT_ENGINE;
+        }
+        for (i = 0; i < 16u; i++) {
+            diff |= (uint8_t)(x1[i] ^ xb[i]);
+        }
+        for (v = 0; v < KBD_CRYPT_CTRL_VARIANTS; v++) {
+            for (i = 0; i < 16u; i++) {
+                x[i] = x1[i];
+            }
+            aad[0] = (uint8_t)(seal_ctrl_base | v);
+            aad[1] = tag;
+            if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
+                cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
+                KBD_BENCH_AES_END();
+                kbd_crypt_release();
+                return KBD_CRYPT_FAULT_ENGINE;
+            }
+            for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+                diff |= (uint8_t)(seal_mic[v][i] ^ (uint8_t)(x[i] ^ s0b[i]));
+            }
+        }
+
+        if (diff == 0u) {
+            break;
+        }
+        kbd_crypt_seal_redo++;
+        if (attempt != 0u) {
+            /* Two disagreeing attempts: stand down for this slot rather than
+             * risk a poisoned frame. Not FAULT_ENGINE -- the engine answers,
+             * the radio is just colliding with it -- so the session survives
+             * and the next arm retries. */
+            KBD_BENCH_AES_END();
+            kbd_crypt_release();
+            return KBD_CRYPT_BUSY;
         }
     }
 
