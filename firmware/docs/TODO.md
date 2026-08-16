@@ -48,10 +48,26 @@ sits inside the TX window and reads ~100% "bad" (a sacrificial canary; its
 counters do NOT indicate link health — the receiver's ok/mac counters are the
 ground truth).
 
-**The fix (as landed):** arm the seal from the TX_FINISH path instead of
-before `RF_Tx`, so `seal_begin` structurally cannot overlap the transmission
-it follows (`crypt_arm_after_tx` latch, consumed by the TX_FINISH/TX_FAIL
-callback with a `tx_status != 0` fallback).
+**The fix (as landed, two halves):**
+1. Arm the seal from the TX_FINISH path instead of before `RF_Tx`, so
+   `seal_begin` structurally cannot overlap the transmission it follows
+   (`crypt_arm_after_tx` latch, consumed by the TX_FINISH/TX_FAIL callback
+   with a `tx_status != 0` fallback). Alone this measured 0.5% residual —
+   the poll grid keeps the radio active every 875 µs, so timing cannot fully
+   close the window.
+2. `seal_begin` derives every block TWICE and requires the passes to agree
+   (stale-abort output cannot survive an honest recompute); one bounded
+   retry, then `KBD_CRYPT_BUSY` — bare ack this slot, session survives,
+   next arm retries. `kbd_crypt_seal_redo` counts collisions caught.
+
+**Validated 2026-08-16**, 300 s idle soaks, fresh pair each: verify-on
+10459/10459 and verify-off 10200/10200 sealed frames verified, **0 MAC
+failures**, while `seal_redo` caught 742 and 2273 live collisions
+respectively — the redo rate rises when the pre-seal verify's ~73 µs is
+removed (seal starts earlier in the active window) while the on-air rate
+stays zero: the dose-response that confirms both mechanism and guard. The
+link no longer depends on any timing accident; the bench self-verify is
+now diagnostics only.
 
 **Tried and withdrawn:** masking `mstatus.MIE` across each
 `hal_aes_encrypt_block` as defense in depth. Architecturally sound per the
