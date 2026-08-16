@@ -1,64 +1,59 @@
 # Link-encryption bench diagnostics
 
-Host scripts used to characterise the encrypted link on hardware. They talk to
-the CH592 receiver over its vendor HID (IAP) interface and to the keyboard over
-SWD via `minichlink`. Neither resets the target.
+Host scripts for characterising the encrypted link on the UART-only bench (no
+target USB): keyboard on WCH-Link `CEBD8F0653EF` (ttyACM1), receiver on
+`CF148F065446` (ttyACM0), both CH592F devboards with UART on the chip-default
+PA8/PA9. Requires `pyserial`.
 
-Requires `pyserial`. Probe serials and the `minichlink` path are constants at the
-top of each script — edit them for a different bench.
+Two rules the scripts embody, learned the hard way (`docs/TODO.md` §6):
 
-## `crypt_diag.py`
+- **Never read the keyboard over SWD during a run.** A `minichlink` attach
+  resets the target, and CH5xx probe memory reads return plausible stale
+  garbage even when they "work". Counters travel over UART only: keyboard
+  `0xAF`/`0xB0`, receiver 1 Hz `0x5E` telemetry broadcast.
+- **Opening a probe CDC port can DTR-reset its target**, and after a reset
+  OpenBoot may hold the UART for ~10 s. Open each port once, settle ≥11 s,
+  and hold the handle for the whole run.
 
-One-shot read of the receiver's `CMD_CRYPT_DIAG` (IAP `0x94`) plus its bond
-record. Prints the verified count, the per-reason drop tally, and the pre-verify
-sink counters.
+## `bench_run.py [hold_seconds] [--fresh]`
 
-The pre-verify counters are the point. `ok` and the reason array only count
-frames that already reached `rf_crypt_rx()`; a frame lost before that leaves them
-all at zero, which reads identically to "the keyboard sent nothing". `conn_rx`,
-`len_max`, `enc_shape`, `fifo_full`, `flush_drop` and `plain_drop` split those
-cases apart. `len_max` is the decisive one: it is recorded *before* any
-classification, so a frame the classifier rejects still leaves evidence of what
-actually arrived on air.
+The orchestrator: pairs (keyboard `A6 51` first — the receiver only accepts in
+the first seconds after boot), keys both ends (`0xAE` + the bench key baked
+into the receiver's `DONGLE_CRYPT_BENCH_FORCE_KEY`), power-cycles the receiver
+into the encrypted epoch, holds with a link-keeper, and prints the
+keyboard-vs-receiver reconciliation plus the TODO.md §4 decision numbers.
 
-Two protocol details that cost time to rediscover:
+`--fresh` first wipes the receiver's DataFlash bond over SDI and clears the
+keyboard's with `A6 52` — mismatched bond states silently never connect, so
+start every characterisation run fresh.
 
-- IAP packets are `[report-id 0][cmd][len][body][checksum]` padded to 65 bytes,
-  `checksum = (cmd + len + sum(body)) & 0xFF`. A packet without the checksum is
-  ignored **silently** — the symptom is a bare timeout, not an error.
-- `BondRead` replies `[ack][len][status][record…]`, so the record starts at
-  offset **3**. Reading from offset 2 shifts every field by one byte and yields a
-  plausible-looking but wrong version/flags. The link key is redacted by design.
+## `rx_uart_diag.py [--follow] [--seconds N]`
 
-## `both_ends.py`
+Follows the receiver's `0x5E` telemetry (all `CMD_CRYPT_DIAG` counters plus
+`mac_same_ok`, `same_differs`, `bb_during_aes`, the KAT result, and the
+first-failure frame latch for the offline `ccm_ref.py` oracle). One-shot by
+default; `--follow` prints one line per frame with deltas.
 
-Runs one connected session and reconciles the keyboard's transmit counters
-against the receiver's receive counters:
+## `crypt_diag.py` / `both_ends.py` / `watch_reboot.py`
 
-    sealed  vs  enc_shape   -> did every sealed frame reach the sink?
-    enc_shape vs ok + mac   -> did every arriving frame verify?
+The USB-era tools, kept for when a receiver with USB returns to the bench.
+`crypt_diag.py` reads `CMD_CRYPT_DIAG` over hidraw (needs the dongle's own
+USB). `both_ends.py` still reads the keyboard over SWD — port it to `0xAF`
+before trusting it. **Do not run `watch_reboot.py`**: its polling loop is the
+probe-attach reboot artifact in executable form (TODO.md §6), and its
+docstring's claim that SWD reads don't reset the target is refuted.
 
-A shortfall in the first is a transmit or air-loss problem; a shortfall in the
-second is a crypto-state problem. They point at completely different code.
+## Protocol notes that cost time to rediscover
 
-Caveat: the keyboard's `.diag_safe` counters are zeroed by `RF_TaskInit`, which
-runs once per boot. If the keyboard reboots mid-run the deltas are meaningless
-and can even go negative — check `watch_reboot.py` before trusting a result.
-
-## `watch_reboot.py`
-
-Answers "is the keyboard rebooting?" without needing any new symbol.
-`kbd_crypt_tx_sealed` is zeroed only by `RF_TaskInit`, so it otherwise increases
-monotonically — a **decrease** between two samples is a reboot, full stop.
-
-`ll_boot_count` is the direct version of the same signal: `RF_TaskInit` is called
-exactly once from `main.c`, so every increment is a real reboot rather than a
-re-init.
-
-## Addresses shift
-
-Every `.diag_safe` address moves whenever a counter is added or removed. Always
-re-derive them from the current `build/ch592f-slotA/opencontroller_ch592f.map`
-rather than reusing a value from notes. Related: `rf_last_tx_status`,
-`rf_last_rx_status` and `rf_last_config_status` are packed `uint8_t`, not words —
-a 4-byte read blends three fields into one plausible-looking number.
+- Keyboard UART frames are `[cmd][body...][chk]`, `chk = sum & 0xFF`. `0xAF`
+  → `[0x5D][9 × u32 LE][chk]` (seal_miss, tx_sealed, sess_bad, sess_ok,
+  sess_rx, selfck_ok, selfck_bad, bb_during_aes, spare). `0xB0` → the
+  self-verify failure latch (frame + recomputed tag + keystream blocks).
+  `[0xB1][mode]` toggles the pre-seal self-verify at runtime.
+- The self-verify counters are a hazard-window canary, not a link-health
+  metric — while the verify overlaps the radio-active window its own AES gets
+  corrupted and `selfck_bad` reads ~100% even when every frame verifies on
+  air. The receiver's `ok`/`drop` counters are the ground truth.
+- IAP packets (USB era) are `[report-id 0][cmd][len][body][checksum]` padded
+  to 65 bytes; an unchecksummed packet is ignored silently. `BondRead`'s
+  record starts at offset **3**; the link key is redacted by design.

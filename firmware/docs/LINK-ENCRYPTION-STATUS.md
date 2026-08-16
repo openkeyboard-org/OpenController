@@ -1,13 +1,16 @@
-# Link encryption (AES-128-CCM) — status, and why this branch is parked
+# Link encryption (AES-128-CCM) — status
 
-Branch: `firmware-link-encryption`, parked at the commit that adds this file.
-Companion receiver work: OpenDongle branch `em-ccm-bench-verify` (`5af6f8e`).
+Branch: `firmware-link-encryption` (un-parked 2026-08-16).
+Companion receiver work: OpenDongle branch `em-ccm-bench-verify`.
 
-**Parked because the blocking defect turned out not to be in this work.** The
-keyboard HardFaults and reboots on a timer, and it does so **on the unmodified
-plaintext build too**. That is a pre-existing firmware bug; chasing it belongs on
-its own branch, not tangled with a feature. Everything below is the state to
-resume from.
+**2026-08-16: the blocking defect is root-caused and the encrypted link runs
+clean** — 0 MAC failures over 33.5k- and 20.8k-keepalive idle soaks (vs the
+historical 12.3%). The CH592 AES engine silently returns the previous block's
+output when a block operation is preempted by the BLEB radio interrupt; the
+keyboard's seal overlapped its own transmission. Full mechanism, evidence
+chain, and the prescribed structural fix: `docs/TODO.md` §0. (The earlier
+"keyboard HardFaults on a timer" parking rationale was itself refuted as a
+probe artifact — TODO.md §6.)
 
 ## What is done and proven
 
@@ -117,12 +120,15 @@ against the map rather than reading single symbols.
 `main.c`, so every increment is a real reboot. `kbd_crypt_tx_sealed` going
 *backwards* between two samples is the same signal, cheaply.
 
-## Resuming
+## Remaining work (2026-08-16)
 
-1. Fix the crash first (separate branch). Until the keyboard stops rebooting, no
-   soak result from this branch means anything — the residual ~8–12% MAC failures
-   seen here are consistent with sessions and counters restarting mid-flight and
-   should be re-measured, not treated as a defect, once the reboots stop.
-2. Then re-run the idle soak and the negative tests (plaintext frame on an
-   encrypted bond must be dropped; a replayed frame must be rejected).
-3. Then the capability advert, then counter persistence, then Phase 2.
+1. Land the structural fix (TODO.md §0): arm the seal from TX_FINISH + mask
+   `mstatus.MIE` per AES block; validate with the self-verify disabled, then
+   enabled.
+2. Negative tests on the healthy link (plaintext frame on an encrypted bond
+   must be dropped; a replayed frame must be rejected), and an end-to-end HID
+   check once a receiver with USB is back on the bench.
+3. Then the capability advert, then counter persistence, then Phase 2 (ECDH).
+4. Strip the bench scaffolding before anything ships: `KBD_CRYPT_BENCH_KEY`,
+   `DONGLE_CRYPT_BENCH_FORCE_KEY`, `DONGLE_UART_DIAG`, and the compiled bench
+   key.

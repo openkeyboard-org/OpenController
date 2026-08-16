@@ -1,12 +1,80 @@
 # Link encryption — where we are, and what to do next
 
 Branch `firmware-link-encryption`. Companion receiver work: OpenDongle branch
-`em-ccm-bench-verify` (`6d5aa87`).
+`em-ccm-bench-verify`.
 
-One open defect blocks the feature: **on an encrypted bond, ~12% of sealed
-frames fail their CCM tag at the receiver, and two consecutive failures release
-the link.** Everything else is built and proven. The next step is one small,
-fully-specified receiver change (§4).
+**2026-08-16: the blocking defect is ROOT-CAUSED and the link runs clean.**
+Two idle soaks measured **0 MAC failures over 33.5k and 20.8k keepalives**
+(vs the historical 12.3%). See §0 for the mechanism and the caveat; the next
+step is the structural fix it prescribes.
+
+---
+
+## 0. ROOT CAUSE (2026-08-16)
+
+**The CH592's AES engine silently returns the PREVIOUS block's output when a
+block operation is preempted by the BLEB radio interrupt** — CFG bit 0 reads
+back clear ("complete"), but the computation never ran and the DATA read path
+still holds stale output. (This differs from the mocked-register experiment,
+where write and read share memory and an aborted op returns the *input*: real
+silicon has separate in/out latches.) The keyboard's seal overlapped its own
+`RF_Tx`/TX_FINISH window, so one interrupt per sealed frame occasionally landed
+inside one of the seal's 11 block windows: that block yielded the previous
+block's bytes — intact ciphertext (s1 computed early), garbage tag, and the
+inverse idle/loaded asymmetry via phase shifts.
+
+Evidence chain, all on hardware:
+- Receiver exonerated: same-session re-verify `mac_same_ok` 0/34+, computed
+  tags deterministic (`same_differs` 0), FIPS KAT passes, and the offline
+  `ccm_ref.py` oracle reproduces the receiver's tag exactly.
+- Keyboard convicted per-frame: latched failing frames decrypt to the correct
+  all-zero keepalive body (ciphertext byte-identical to the oracle's seal)
+  under a tag that verifies under NO ctrl variant.
+- Mechanism caught in the act: a keyboard-side re-verify latched `x == s0`
+  exactly (final XOR collapses the tag to zeros — the s0 block returned the
+  CBC-MAC state still in the engine), at ~96% failure when one BB callback
+  landed inside the computation and ~0% when none did.
+- Codex disassembly of the linked LIBCH59xBLE.a v1.4.2: `BB_IRQLibHandler`
+  reads `AES_STA`, clears bits 1 then 0 (only when bit 1 is set), never
+  touches CFG/KEY/DATA, never calls `phy_status_clear`. Conclusion: BLEB
+  handler preemption aborts the op; the exact register-level trigger inside
+  the handler is not further separable from this repository.
+
+**Why it currently measures 0%:** the bench self-verify
+(`kbd_crypt_bench_verify_pending`, called at the top of `rf_crypt_arm`) adds
+~73 µs of AES before each `seal_begin`, shifting the seal out of the hazardous
+window. That is a timing accident doing the work of a fix — the verify itself
+sits inside the TX window and reads ~100% "bad" (a sacrificial canary; its
+counters do NOT indicate link health — the receiver's ok/mac counters are the
+ground truth).
+
+**The fix to implement (both halves):**
+1. Arm the seal from the TX_FINISH path instead of before `RF_Tx`
+   (`rf_task.c:1094` today), so `seal_begin` structurally cannot overlap the
+   transmission it follows.
+2. Mask `mstatus.MIE` across each single `hal_aes_encrypt_block`
+   (~15 µs; restore between blocks). Codex confirms this gates VTF/HPE
+   fast-vectored interrupts on QingKe V4C (WCH's own RTOS ports use
+   `csrrci mstatus, 8`); worst-case IRQ deferral ~15 µs = 1.7% of the poll
+   period. Do NOT fuse the 11 blocks into one mask. Fallback if leak-through
+   is ever proven: `PFIC_DisableIRQ(BLEB_IRQn)` (IRQ 20) around the block —
+   only `bb.o` imports `gptrAESReg`, BLEL does not need masking.
+
+**Traps already paid for — do not repeat:**
+- Do NOT gate the driver on `AES_STA` bit 1 as completion evidence: the engine
+  never sets it outside the vendor IRQ flow, so the gate rejects every healthy
+  block and the link fails closed (session torn down per seal, reconnect
+  churn).
+- A "stale counter" incrementing when CFG completes with bit 1 clear counts
+  every healthy block — it detects nothing.
+- Poison-canary DATA writes cannot work (separate in/out latches); double
+  compute is diagnostic, not a guarantee; do not reorder the STA/CFG handshake
+  (matches the vendor's own `AES_DevAESEnc` exactly).
+
+Validation once the fix lands: soak with the self-verify DISABLED (UART `B1 00`)
+— the receiver must hold 0 MAC failures with no canary in place — then a soak
+with it ENABLED, where `selfck_bad` should now stay ≈0 (post-TX, the verify
+becomes a genuine detector again).
 
 ---
 
@@ -61,23 +129,24 @@ correct response to frames not verifying. Fix the MAC failures and it goes away.
 keepalive. Even at a healthy failure rate that is thin margin for a radio link,
 and the two constants live in different repos with nothing tying them together.)*
 
-## 3. The open defect
+## 3. The open defect — RESOLVED, see §0
 
 **~12% of sealed frames fail their tag**, with key, session, counter and frame
 shape all provably correct. Nothing is lost in transit — the keyboard's sealed
 count and the receiver's arrival count agree exactly.
 
-The one strong clue, unexplained:
+The one strong clue, ~~unexplained~~ *(explained in §0: phase of the seal's
+AES blocks relative to the radio-active window)*:
 
 | condition | frames | verified | MAC failures | rate |
 |---|---|---|---|---|
 | idle (keepalives only) | 276 | 242 | 34 | **12.3%** |
 | heavy HID traffic | 391 | 377 | 14 | **3.6%** |
 
-More crypto activity produces *fewer* failures. No mechanism yet predicts that
-3.4× ratio.
+More crypto activity produces *fewer* failures — because more activity shifts
+which seal blocks overlap the TX window.
 
-## 4. NEXT STEP — the experiment to run
+## 4. The experiment that was run (2026-08-15, outcome in §0)
 
 On each receiver `DROP_MAC`, immediately re-run the tag computation **under the
 same current session**: same counter, same AAD, same ciphertext, a separate
@@ -99,6 +168,12 @@ Interpretation:
 Every measurement so far has assumed the receiver computes correctly. This is the
 first test that checks it, and it splits the search space in half. It runs only
 on actual failures and does not perturb keyboard timing.
+
+*Outcome:* implemented (plus an `expect1`-vs-`expect2` determinism check, a
+first-failure frame latch for the offline oracle, a FIPS KAT, and a
+BB-interrupt-during-CCM correlator, all in one receiver flash). `mac_same_ok`
+stayed 0, the receiver's tags were deterministic and oracle-identical, and the
+latched frame convicted the keyboard per-frame — see §0.
 
 ## 5. Refuted — do not re-test
 
@@ -167,6 +242,21 @@ WCH OpenOCD does **not** help here: per the same README, attaching to a running
 application resets it, so it cannot observe live state either. Firmware
 instrumentation read out of band is the only sound approach.
 
+Further traps paid for on 2026-08-15/16, same family:
+
+- **minichlink CH5xx memory reads return PLAUSIBLE GARBAGE, not just zeros** —
+  repeated reads of `.diag_safe` returned byte-identical stale junk across
+  flashes and resets while the UART counters showed live values. A
+  minichlink-GDB halt reads PC=0 on a *healthy* target too (verified against
+  the working receiver as a control). Never diagnose from probe memory reads.
+- **Opening a probe CDC port DTR-resets the target** (sometimes — the edge
+  does not always fire), and after any reset **OpenBoot may hold the UART for
+  ~10 s** before the app answers. Settle ≥11 s after opening a port, and hold
+  ports open across a run.
+- **The devboard UART wiring is marginal**: one deafness episode was cured
+  only by physically reseating the PA8/PA9 jumpers, after firmware theories
+  had consumed hours. Reseat first.
+
 ## 7. Other open items
 
 - **Receiver wedges.** The CH592 stopped answering IAP three times in one
@@ -230,7 +320,34 @@ the current `.map`. `rf_last_tx_status` / `rx_status` / `config_status` are
 packed `uint8_t`, not words.
 
 Bench scripts live in `firmware/bench/` (see its README). Probes: keyboard
-`CEBD8F0653EF`, CH592 dongle `C2228F064754`.
+`CEBD8F0653EF` (ttyACM1), receiver `CF148F065446` (ttyACM0). *(The
+`C2228F064754` serial in older notes left the bench.)*
+
+**The 2026-08 bench is UART-only** — neither target's USB is connected, so the
+receiver's IAP/hidraw tooling is unreachable. What replaces it:
+
+- Both CH592F devboards wire UART on the chip-default **PA8/PA9** (probe
+  TX→PA8/RXD1, probe RX←PA9/TXD1): build the keyboard with
+  `KBD_UART1_DEFAULT_PINS=1` (the PCB's PB12/PB13 remap stays the default and
+  is silent on this bench), and flash with `make ... flash-factory
+  KBD_PROBE=CEBD8F0653EF ALLOW_BONDED_FLASH=1`.
+- The receiver (OpenDongle `em-ccm-bench-verify`) broadcasts its full crypto
+  telemetry once per second on PA9 (`DONGLE_UART_DIAG`, 127-byte `0x5E`
+  frame) and force-activates decryption for any valid loaded bond with the
+  compiled-in bench key `4f70656e4b626421a55ac33c69960ff0`
+  (`DONGLE_CRYPT_BENCH_FORCE_KEY`) — the keyboard gets the same key over
+  `0xAE`. Both gates live in `ch592/src/dongle_target.h` and must never ship.
+- Orchestration: `bench/bench_run.py [hold_s] --fresh` runs the whole
+  sequence (fresh-state reset, pair, key, receiver power cycle into the
+  encrypted epoch, hold with a link-keeper, reconciliation report);
+  `bench/rx_uart_diag.py` follows the receiver telemetry alone.
+
+**Fresh-pair recipe that always works** (mismatched bond states silently never
+connect): wipe the receiver's bond (write 4 KiB of `0xFF` at DataFlash
+`0x75000` over SDI, power-cycle → it camps in pairing indefinitely), keyboard
+`A6 52` then `A6 51`, key with `0xAE` *after* pairing, then power-cycle the
+receiver and immediately re-send `A6 30` so the keyboard broadcasts inside the
+receiver's ~3 s boot window (mint + announce happen at that connect).
 
 ## 9. References
 
