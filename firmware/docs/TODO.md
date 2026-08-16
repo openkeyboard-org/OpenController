@@ -48,17 +48,20 @@ sits inside the TX window and reads ~100% "bad" (a sacrificial canary; its
 counters do NOT indicate link health — the receiver's ok/mac counters are the
 ground truth).
 
-**The fix to implement (both halves):**
-1. Arm the seal from the TX_FINISH path instead of before `RF_Tx`
-   (`rf_task.c:1094` today), so `seal_begin` structurally cannot overlap the
-   transmission it follows.
-2. Mask `mstatus.MIE` across each single `hal_aes_encrypt_block`
-   (~15 µs; restore between blocks). Codex confirms this gates VTF/HPE
-   fast-vectored interrupts on QingKe V4C (WCH's own RTOS ports use
-   `csrrci mstatus, 8`); worst-case IRQ deferral ~15 µs = 1.7% of the poll
-   period. Do NOT fuse the 11 blocks into one mask. Fallback if leak-through
-   is ever proven: `PFIC_DisableIRQ(BLEB_IRQn)` (IRQ 20) around the block —
-   only `bb.o` imports `gptrAESReg`, BLEL does not need masking.
+**The fix (as landed):** arm the seal from the TX_FINISH path instead of
+before `RF_Tx`, so `seal_begin` structurally cannot overlap the transmission
+it follows (`crypt_arm_after_tx` latch, consumed by the TX_FINISH/TX_FAIL
+callback with a `tx_status != 0` fallback).
+
+**Tried and withdrawn:** masking `mstatus.MIE` across each
+`hal_aes_encrypt_block` as defense in depth. Architecturally sound per the
+Codex review (VTF/HPE interrupts are MIE-maskable on QingKe V4C; WCH's own
+RTOS ports use `csrrci mstatus, 8`), and a no-op in host builds — but on
+silicon both ends failed at their first masked AES call (receiver: session
+announces silently never transmit; keyboard: dead at announce-verify). The
+mechanism was not isolated; the measurement stands. If hardening is revisited,
+try `PFIC_DisableIRQ(BLEB_IRQn)` (IRQ 20; only `bb.o` imports `gptrAESReg`)
+instead, and A/B it one end at a time with the wiring freshly verified.
 
 **Traps already paid for — do not repeat:**
 - Do NOT gate the driver on `AES_STA` bit 1 as completion evidence: the engine
