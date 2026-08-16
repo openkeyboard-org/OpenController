@@ -317,19 +317,22 @@ static volatile uint8_t  supervision_kick;
 #ifndef RF_DIAG_COUNTERS
 #define RF_DIAG_COUNTERS 1
 #endif
-#if RF_DIAG_COUNTERS
 #if KBD_RF_CRYPT
 /* Session-adoption trace. Not gated on RF_DIAG_COUNTERS: an encrypted link that
  * never adopts a session is silently dead -- it sends only bare acks, which look
  * exactly like a healthy idle link until the receiver gives up -- and these
  * three counters are the difference between diagnosing that in one bench run
- * and guessing. 12 bytes of the .diag_safe window. */
+ * and guessing. 12 bytes of the .diag_safe window. (They really are outside
+ * the gate now: the crypto paths increment them unconditionally, so a
+ * KBD_RF_CRYPT=1 RF_DIAG_COUNTERS=0 release build must still link -- the
+ * 2026-08-15 audit caught them defined under the wrong #if.) */
 volatile uint32_t kbd_crypt_sess_rx  __attribute__((section(".diag_safe")));  /* LEN-14 announces seen by the ISR */
 volatile uint32_t kbd_crypt_sess_ok  __attribute__((section(".diag_safe")));  /* verified and adopted */
 volatile uint32_t kbd_crypt_sess_bad __attribute__((section(".diag_safe")));  /* verify rejected */
 volatile uint32_t kbd_crypt_tx_sealed __attribute__((section(".diag_safe")));  /* sealed frames handed to RF_Tx */
 volatile uint32_t kbd_crypt_seal_miss __attribute__((section(".diag_safe")));  /* wanted one, none was ready */
 #endif
+#if RF_DIAG_COUNTERS
 volatile uint32_t rf_cb_count[6] __attribute__((section(".diag_safe")));
 volatile uint32_t rf_pair_bcast_count __attribute__((section(".diag_safe")));
 volatile uint32_t rf_connected_tx_count __attribute__((section(".diag_safe")));
@@ -442,7 +445,10 @@ static uint32_t rtc_read_32k(void)
     return *(volatile uint32_t *)R32_RTC_CNT_32K_ADDR;
 }
 
-#if RF_DIAG_COUNTERS
+/* Also outside the diag gate: rf_crypt_ctr_start() folds this into the
+ * per-boot counter seed, so a KBD_RF_CRYPT=1 RF_DIAG_COUNTERS=0 release
+ * build needs it (same audit finding as the kbd_crypt_* counters above). */
+#if RF_DIAG_COUNTERS || KBD_RF_CRYPT
 static uint32_t systick_read(void)
 {
     return *(volatile uint32_t *)SYSTICK_CNT_ADDR;

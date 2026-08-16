@@ -271,6 +271,27 @@ ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
 endif
 endif
+# `make update` REBUILDS both slots (update: bundle), so invoking it without
+# the crypto knobs silently replaces an encrypted image with a plaintext one
+# and flashes it -- the 2026-08-15 audit's finding 1, observed in this very
+# checkout. kbd_rf_crypt.o is linked only by encrypted builds and survives a
+# knob change (the config stamp forces rebuilds but never deletes rival
+# objects), so its presence marks "the last build here was encrypted". Refuse
+# a defaulted-plaintext update in that state; a deliberate downgrade says
+# KBD_RF_CRYPT=0 explicitly, which also clears the markers so later defaulted
+# updates stop tripping this.
+CRYPT_BUILD_MARKERS := $(wildcard build/ch592f-slot*/kbd_rf_crypt.o)
+ifneq ($(filter update flash-factory,$(MAKECMDGOALS)),)
+ifeq ($(KBD_RF_CRYPT),0)
+ifneq ($(CRYPT_BUILD_MARKERS),)
+ifeq ($(origin KBD_RF_CRYPT),command line)
+$(shell rm -f build/ch592f-slot*/kbd_rf_crypt.o)
+else
+$(error the last build was ENCRYPTED and this goal would rebuild and flash PLAINTEXT. Pass the knobs on THIS command (e.g. `make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1 update OB_PORT=...`), or downgrade deliberately with an explicit KBD_RF_CRYPT=0)
+endif
+endif
+endif
+endif
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
 # WCH-Interrupt-fast/HPE semantics; do not emit a firmware image otherwise.
