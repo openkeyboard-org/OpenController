@@ -21,6 +21,13 @@ void KeyboardUart_SendLed(uint8_t led_mask);
 #if KBD_CRYPT_BENCH_KEY
 /* Emit [0x5D][n x u32 LE][checksum]. See KBD_UART_CMD_CRYPT_DIAG. */
 void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n);
+/* Emit the self-verify failure latch. See KBD_UART_CMD_CRYPT_FAIL.
+ * Reply: [0x5F][latched][len][session u32][seal_bb][frame 22][good 8]
+ *        [plain 8][s1 8][s0 8][chk] = 63 bytes. */
+void KeyboardUart_SendCryptFail(uint8_t latched, uint8_t len, uint32_t session,
+                                uint8_t seal_bb, const uint8_t *frame22,
+                                const uint8_t *good8, const uint8_t *plain8,
+                                const uint8_t *s1_8, const uint8_t *s0_8);
 #endif
 
 /* Nonzero when the TX FIFO is empty AND the transmitter shift register has
@@ -54,6 +61,18 @@ uint8_t KeyboardUart_TxIdle(void);
  * each u32 LE][checksum]. Read-only, and gated with the bench key command so a
  * shipping build has neither. */
 #define KBD_UART_CMD_CRYPT_DIAG 0xAFu
+/* [B0][chk] -> [0x5F][latched][len][session:u32 LE][seal_bb][frame:22][good_tag:8][chk]:
+ * the first self-verify-failed sealed frame this boot, with the recomputed
+ * (correct) tag and the count of RF callbacks that landed inside its seal. */
+#define KBD_UART_CMD_CRYPT_FAIL 0xB0u
+/* [B1][mode][chk] -> ack: runtime toggle of the bench pre-seal self-verify
+ * (mode 0 = off, 1 = on). The verify adds ~73 us of AES immediately before
+ * each seal_begin, which SHIFTS THE SEAL'S PHASE in the poll cycle -- and the
+ * ~12% idle MAC-failure defect vanished the moment this instrumentation was
+ * flashed. Toggling it mid-session, with no reboot and no re-key, is the
+ * in-situ A/B that separates "the verify's timing shift masks the defect"
+ * from "something else changed". */
+#define KBD_UART_CMD_CRYPT_VERIFY 0xB1u
 #endif
 
 #endif

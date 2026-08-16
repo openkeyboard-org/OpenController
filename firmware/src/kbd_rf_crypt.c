@@ -27,6 +27,42 @@ static uint32_t crypt_tx_ctr;        /* last counter CONSUMED; next is +1 */
  * interrupt can land inside. */
 static volatile uint8_t crypt_engine_busy;
 
+#if KBD_CRYPT_BENCH_KEY
+/* Bench self-verify state; see the header block. Plain .bss (zeroed at boot),
+ * read over UART only. */
+volatile uint8_t kbd_crypt_in_aes;
+volatile uint8_t kbd_crypt_selfck_enable = 1u;   /* UART 0xB1 toggles */
+uint32_t kbd_crypt_bb_during_aes;
+volatile uint8_t kbd_crypt_seal_bb;
+uint32_t kbd_crypt_selfck_ok;
+uint32_t kbd_crypt_selfck_bad;
+uint8_t  kbd_crypt_selfck_latched;
+uint8_t  kbd_crypt_selfck_len;
+uint32_t kbd_crypt_selfck_session;
+uint8_t  kbd_crypt_selfck_frame[KBD_CRYPT_LEN_BOOT_KBD];
+uint8_t  kbd_crypt_selfck_good[KBD_CRYPT_TAG_BYTES];
+uint8_t  kbd_crypt_selfck_seal_bb;
+/* Block-level evidence for the latched failure: the verify's own recovered
+ * plaintext and both keystream blocks. An idle keepalive's plain is all-zero,
+ * so plain != 0 here convicts the s1 block at the verify call site. */
+uint8_t  kbd_crypt_selfck_plain[KBD_CRYPT_MAX_BODY];
+uint8_t  kbd_crypt_selfck_s1[8];
+uint8_t  kbd_crypt_selfck_s0[8];
+
+static uint8_t  bench_pend_valid;
+static uint8_t  bench_pend_len;
+static uint8_t  bench_pend_seal_bb;
+static uint32_t bench_pend_session;
+static uint8_t  bench_pend_frame[KBD_CRYPT_LEN_BOOT_KBD];
+
+#define KBD_BENCH_AES_BEGIN() do { kbd_crypt_seal_bb = 0u; \
+                                   kbd_crypt_in_aes = 1u; } while (0)
+#define KBD_BENCH_AES_END()   do { kbd_crypt_in_aes = 0u; } while (0)
+#else
+#define KBD_BENCH_AES_BEGIN() do { } while (0)
+#define KBD_BENCH_AES_END()   do { } while (0)
+#endif
+
 /* seal_begin() -> seal_finish() carry state. seal_mic holds one finished tag per
  * reachable ctrl value, which is what lets seal_finish() run without touching
  * the AES engine at all -- see the header's note on the response path. */
@@ -344,6 +380,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
     if (!kbd_crypt_try_claim()) {
         return KBD_CRYPT_BUSY;
     }
+    KBD_BENCH_AES_BEGIN();   /* bench: count RF callbacks landing in this seal */
 
     /* Invalidate any frame already waiting BEFORE overwriting the state it is
      * made of. This call replaces a pending seal, and every early return below
@@ -370,6 +407,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
     if (ctr_block(nonce, 0u, s0) != HAL_AES_OK ||
         ctr_block(nonce, 1u, s1) != HAL_AES_OK ||
         cbc_mac_b0(nonce, 2u, body_len, x1) != HAL_AES_OK) {
+        KBD_BENCH_AES_END();
         kbd_crypt_release();
         return KBD_CRYPT_FAULT_ENGINE;
     }
@@ -392,6 +430,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
         aad[1] = tag;
         if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
             cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
+            KBD_BENCH_AES_END();
             kbd_crypt_release();
             return KBD_CRYPT_FAULT_ENGINE;
         }
@@ -407,6 +446,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
      * Gaps are fine -- the receiver only requires strictly increasing. */
     crypt_tx_ctr = seal_ctr;
     seal_pending = 1u;
+    KBD_BENCH_AES_END();
     kbd_crypt_release();
     return KBD_CRYPT_OK;
 }
@@ -535,3 +575,104 @@ kbd_crypt_status_t kbd_crypt_verify_session(const uint8_t *frame, uint8_t len,
     *out_session_id = sid;
     return KBD_CRYPT_OK;
 }
+
+#if KBD_CRYPT_BENCH_KEY
+/* ---------------------------------------------------- bench self-verify
+ * See the header block for what this is hunting. */
+
+void kbd_crypt_bench_snapshot(const uint8_t *frame, uint8_t len)
+{
+    uint8_t i;
+
+    if (len < 16u || len > KBD_CRYPT_LEN_BOOT_KBD) {
+        return;
+    }
+    for (i = 0; i < len; i++) {
+        bench_pend_frame[i] = frame[i];
+    }
+    bench_pend_len = len;
+    bench_pend_session = crypt_session_id;
+    bench_pend_seal_bb = kbd_crypt_seal_bb;
+    bench_pend_valid = 1u;
+}
+
+void kbd_crypt_bench_verify_pending(void)
+{
+    uint8_t nonce[13];
+    uint8_t s0[16];
+    uint8_t s1[16];
+    uint8_t x[16];
+    uint8_t aad[2];
+    uint8_t plain[KBD_CRYPT_MAX_BODY];
+    uint8_t good[KBD_CRYPT_TAG_BYTES];
+    uint32_t ctr;
+    uint8_t n;
+    uint8_t diff;
+    uint8_t i;
+
+    if (!bench_pend_valid || !kbd_crypt_selfck_enable) {
+        return;
+    }
+    n = (uint8_t)(bench_pend_len - KBD_CRYPT_FRAME_OVERHEAD);
+    if (n == 0u || n > KBD_CRYPT_MAX_BODY) {
+        bench_pend_valid = 0u;
+        return;
+    }
+    if (!kbd_crypt_try_claim()) {
+        return;                     /* engine busy: retry on the next arm */
+    }
+    bench_pend_valid = 0u;
+    kbd_crypt_in_aes = 1u;          /* count BB overlap during the verify too */
+
+    ctr = (uint32_t)bench_pend_frame[2]
+        | ((uint32_t)bench_pend_frame[3] << 8)
+        | ((uint32_t)bench_pend_frame[4] << 16)
+        | ((uint32_t)bench_pend_frame[5] << 24);
+    build_nonce(nonce, bench_pend_session, KBD_CRYPT_DIR_KB_TO_DONGLE, ctr);
+    aad[0] = bench_pend_frame[0];
+    aad[1] = bench_pend_frame[1];
+
+    if (ctr_block(nonce, 1u, s1) != HAL_AES_OK) {
+        goto out;
+    }
+    for (i = 0; i < n; i++) {
+        plain[i] = (uint8_t)(bench_pend_frame[6 + i] ^ s1[i]);
+    }
+    if (cbc_mac_b0(nonce, 2u, n, x) != HAL_AES_OK ||
+        cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
+        cbc_mac_msg(x, plain, n) != HAL_AES_OK ||
+        ctr_block(nonce, 0u, s0) != HAL_AES_OK) {
+        goto out;
+    }
+    diff = 0u;
+    for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+        good[i] = (uint8_t)(x[i] ^ s0[i]);
+        diff |= (uint8_t)(good[i] ^ bench_pend_frame[6 + n + i]);
+    }
+    if (diff == 0u) {
+        kbd_crypt_selfck_ok++;
+    } else {
+        kbd_crypt_selfck_bad++;
+        if (!kbd_crypt_selfck_latched) {
+            kbd_crypt_selfck_len = bench_pend_len;
+            kbd_crypt_selfck_session = bench_pend_session;
+            kbd_crypt_selfck_seal_bb = bench_pend_seal_bb;
+            for (i = 0; i < bench_pend_len; i++) {
+                kbd_crypt_selfck_frame[i] = bench_pend_frame[i];
+            }
+            for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
+                kbd_crypt_selfck_good[i] = good[i];
+                kbd_crypt_selfck_s1[i] = s1[i];
+                kbd_crypt_selfck_s0[i] = s0[i];
+            }
+            for (i = 0; i < n; i++) {
+                kbd_crypt_selfck_plain[i] = plain[i];
+            }
+            kbd_crypt_selfck_latched = 1u;
+        }
+    }
+out:
+    kbd_crypt_in_aes = 0u;
+    kbd_crypt_release();
+}
+#endif /* KBD_CRYPT_BENCH_KEY */

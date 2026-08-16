@@ -261,6 +261,11 @@ CFLAGS += -DKBD_RF_CRYPT=$(KBD_RF_CRYPT)
 #   make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1
 KBD_CRYPT_BENCH_KEY ?= 0
 CFLAGS += -DKBD_CRYPT_BENCH_KEY=$(KBD_CRYPT_BENCH_KEY)
+# BENCH ONLY: route UART1 on the chip-default PA8/PA9 pins (generic CH592F
+# devboard wiring: probe TX -> PA8/RXD1, probe RX <- PA9/TXD1). The keyboard
+# PCB wires the PB12/PB13 remap, which remains the default.
+KBD_UART1_DEFAULT_PINS ?= 0
+CFLAGS += -DKBD_UART1_DEFAULT_PINS=$(KBD_UART1_DEFAULT_PINS)
 ifeq ($(KBD_CRYPT_BENCH_KEY),1)
 ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)

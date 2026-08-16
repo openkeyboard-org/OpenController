@@ -233,8 +233,16 @@ static volatile uint8_t crypt_keepalive_due;
  * send, until the receiver's silence guard dropped the link. */
 static void rf_crypt_arm(uint8_t ctrl_hint)
 {
-    kbd_crypt_status_t st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD,
-                                                 hid_report, sizeof(hid_report));
+    kbd_crypt_status_t st;
+#if KBD_CRYPT_BENCH_KEY
+    /* Bench: re-derive the tag of the frame just transmitted, from its own
+     * bytes, before the engine is reused for the next seal. Catches a
+     * corrupted seal at the source (selfck_bad) with the receiver out of the
+     * loop entirely. */
+    kbd_crypt_bench_verify_pending();
+#endif
+    st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD,
+                              hid_report, sizeof(hid_report));
     if (st == KBD_CRYPT_FAULT_ENGINE || st == KBD_CRYPT_EXHAUSTED) {
         kbd_crypt_end_session();
     }
@@ -826,6 +834,17 @@ __HIGH_CODE
 void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 {
     RF_DIAG_INC(rf_cb_count[0]);
+#if KBD_CRYPT_BENCH_KEY
+    /* Bench: this callback preempts the task context that runs seal_begin /
+     * the self-verify; the vendor IRQ path reads/clears AES_STA. Count the
+     * overlaps, total and per-seal. */
+    if (kbd_crypt_in_aes) {
+        kbd_crypt_bb_during_aes++;
+        if (kbd_crypt_seal_bb != 0xFFu) {
+            kbd_crypt_seal_bb++;
+        }
+    }
+#endif
 #if RF_DIAG_COUNTERS
     ll_trace_rec(sta, rsr, rxBuf);
 #endif
@@ -1086,6 +1105,11 @@ static void rf_do_response_tx(void)
                 crypt_polls_since_auth = 0;
                 tx_payload[0] = response_ctrl;
                 kbd_crypt_tx_sealed++;
+#if KBD_CRYPT_BENCH_KEY
+                /* Bench: snapshot the exact bytes handed to RF_Tx below; the
+                 * next CRYPT_ARM re-verifies them in task context. */
+                kbd_crypt_bench_snapshot(tx_payload, tx_len);
+#endif
             } else {
                 kbd_crypt_seal_miss++;
             }

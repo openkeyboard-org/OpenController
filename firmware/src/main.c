@@ -12,6 +12,9 @@
 #include "HAL.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#if KBD_CRYPT_BENCH_KEY
+#include "kbd_rf_crypt.h"   /* bench self-verify counters + latch */
+#endif
 #include "openboot_app.h"
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
@@ -78,12 +81,34 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
         /* Same .diag_safe counters that were previously read over SWD, sent out
          * of band instead. Order matches the reply layout documented in
-         * keyboard_uart.h; keep the two in step. */
-        const uint32_t counters[5] = {
+         * keyboard_uart.h; keep the two in step. The bench self-verify
+         * counters (kbd_rf_crypt.h) append AFTER the original five so an old
+         * reader still parses the prefix. */
+        const uint32_t counters[9] = {
             kbd_crypt_seal_miss, kbd_crypt_tx_sealed,
             kbd_crypt_sess_bad,  kbd_crypt_sess_ok, kbd_crypt_sess_rx,
+            kbd_crypt_selfck_ok, kbd_crypt_selfck_bad,
+            kbd_crypt_bb_during_aes, 0u,
         };
-        KeyboardUart_SendCryptDiag(counters, 5u);
+        KeyboardUart_SendCryptDiag(counters, 9u);
+        return;
+    }
+
+    if (cmd == KBD_UART_CMD_CRYPT_VERIFY) {
+        kbd_crypt_selfck_enable = sub ? 1u : 0u;
+        return;
+    }
+
+    if (cmd == KBD_UART_CMD_CRYPT_FAIL) {
+        KeyboardUart_SendCryptFail(kbd_crypt_selfck_latched,
+                                   kbd_crypt_selfck_len,
+                                   kbd_crypt_selfck_session,
+                                   kbd_crypt_selfck_seal_bb,
+                                   kbd_crypt_selfck_frame,
+                                   kbd_crypt_selfck_good,
+                                   kbd_crypt_selfck_plain,
+                                   kbd_crypt_selfck_s1,
+                                   kbd_crypt_selfck_s0);
         return;
     }
 #endif

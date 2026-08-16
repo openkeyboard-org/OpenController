@@ -255,4 +255,55 @@ kbd_crypt_status_t kbd_crypt_verify_session(const uint8_t *frame, uint8_t len,
  * receiver's rf_crypt_encrypted_body_len(). */
 uint8_t kbd_crypt_encrypted_body_len(uint8_t tag, uint8_t len);
 
+#if KBD_CRYPT_BENCH_KEY
+/* --------------------------------------------------------- bench self-verify
+ *
+ * Bench evidence (2026-08-15, offline ccm_ref oracle on a receiver-latched
+ * frame): the keyboard seals a CORRECT ciphertext under a GARBAGE tag for
+ * ~12% of idle keepalives -- the corruption is confined to the tag pipeline
+ * (s0/B0/AAD/MSG blocks of seal_begin), while the s1 keystream block of the
+ * SAME seal computes correctly, and the receiver's compute is exonerated
+ * (deterministic, KAT-clean, oracle-identical). These hooks catch it at the
+ * source: rf_task snapshots each transmitted sealed frame, and the next
+ * CRYPT_ARM re-derives the tag from the frame bytes in task context.
+ *
+ *   selfck_bad > 0            => the bad tag is observable ON the keyboard at
+ *                                seal time (engine/overlap corruption);
+ *   selfck_bad == 0 while the receiver still sees DROP_MAC => the bytes
+ *                                mutate AFTER sealing (buffer/DMA path).
+ *
+ * bb_during_aes counts RF status callbacks that landed inside a seal/verify
+ * (the vendor IRQ path touches AES_STA); seal_bb latches the count for the
+ * seal whose frame first fails self-verify. */
+extern volatile uint8_t kbd_crypt_in_aes;
+extern uint32_t kbd_crypt_bb_during_aes;
+extern volatile uint8_t kbd_crypt_seal_bb;       /* callbacks in CURRENT seal */
+extern uint32_t kbd_crypt_selfck_ok;
+extern uint32_t kbd_crypt_selfck_bad;
+extern uint8_t  kbd_crypt_selfck_latched;
+extern uint8_t  kbd_crypt_selfck_len;
+extern uint32_t kbd_crypt_selfck_session;
+extern uint8_t  kbd_crypt_selfck_frame[KBD_CRYPT_LEN_BOOT_KBD];
+extern uint8_t  kbd_crypt_selfck_good[KBD_CRYPT_TAG_BYTES];  /* recomputed tag */
+extern uint8_t  kbd_crypt_selfck_seal_bb;        /* seal_bb of the latched seal */
+extern uint8_t  kbd_crypt_selfck_plain[KBD_CRYPT_MAX_BODY]; /* verify's plain */
+extern uint8_t  kbd_crypt_selfck_s1[8];          /* verify's keystream block */
+extern uint8_t  kbd_crypt_selfck_s0[8];          /* verify's tag-mask block */
+
+/* Runtime enable for the pre-seal verify (default ON in bench builds).
+ * Toggled over UART 0xB1 -- flipping it mid-session with no reboot is the
+ * A/B for "the verify's ~73 us timing shift masks the MAC-failure defect". */
+extern volatile uint8_t kbd_crypt_selfck_enable;
+
+/* Snapshot the frame just handed to RF_Tx (call right after seal_finish OK;
+ * copies the bytes + the live session id + the seal's BB count). */
+void kbd_crypt_bench_snapshot(const uint8_t *frame, uint8_t len);
+
+/* If a snapshot is pending, re-derive its tag from the frame bytes (full
+ * pipeline, task context, engine claimed) and count/latch the outcome.
+ * Call from CRYPT_ARM before the next seal_begin. Side-effect free on all
+ * crypto state. */
+void kbd_crypt_bench_verify_pending(void);
+#endif /* KBD_CRYPT_BENCH_KEY */
+
 #endif /* KBD_RF_CRYPT_H */
