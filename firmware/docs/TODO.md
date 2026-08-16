@@ -278,6 +278,55 @@ Further traps paid for on 2026-08-15/16, same family:
 
 ## 7. Other open items
 
+### Carried from the 2026-08-15 audit (FINDINGS.md, retired 2026-08-16)
+
+An independent audit reached the same AES/radio-overlap hypothesis that §0
+proved, and proposed two of the experiments that proved it. Its still-open
+findings, verified against source before the file was retired:
+
+- **Capability negotiation is structurally broken, with a sharper mechanism
+  than "the advert never lands":** the receiver latches the pre-beacon
+  capability advert and then explicitly clears `rf_crypt_peer_capable` when it
+  accepts the first fresh/unbonded beacon (OpenDongle `rf_task.c`, the
+  peer-change accept path) — the pairing sequence erases the very latch it was
+  meant to set. The advert carries no keyboard MAC, so the receiver cannot
+  safely bind a pre-beacon advert to the identity that follows; the redesign
+  must bind capability to the peer, not to arrival order. Also: the "one
+  advert in four" comment does not match the code (first two slots, then one
+  in eight — `pair_bcast_count & 0x07`).
+- **Receiver `BondWrite` persists but does not activate.** IAP `BondWrite`
+  calls only `bond_save()`: no key install, no `rf_crypt_bond_enc`, no fresh
+  session. Runtime state is populated only at bond LOAD (boot). The
+  provisioning tool prints `encryption ACTIVE` from persisted flags alone.
+  Interim rule (institutionalized in `bench_run.py`): restart the receiver
+  after provisioning. Proper fix: a key-state-changing BondWrite applies the
+  live state atomically and forces a fresh session, or explicitly reboots.
+- **Keyboard key persistence can falsely report success.**
+  `rf_save_bond_to_flash()` does `(void)EEPROM_WRITE(...)` with no readback;
+  `RF_ProvisionLinkKey()` then reports success. A failed save works from RAM
+  until reboot and leaves the peers with different keys. Fix: return status,
+  read back, validate, only then report.
+- **Keyboard v1→v2 bond migration is absent by design** ("the version bump is
+  deliberate and there is NO migration") while OpenDongle DOES migrate v1
+  records — so a keyboard field-updated to an encrypted build drops its bond
+  and needs a re-pair while the receiver keeps its half. Decide: mirror the
+  dongle's migration, or document the forced re-pair.
+- **Security-design gaps beyond key establishment** (see also the items
+  below): session announces are authenticated but carry no freshness, so a
+  recorded announce can be replayed to desynchronize the keyboard (DoS);
+  session ids are 32-bit and generated, not reserved; the capability advert is
+  unauthenticated; polls and LED relay (the downlink) are not authenticated at
+  all — encryption today protects only the keyboard→dongle HID uplink.
+
+Fixed out of the same audit (2026-08-16): the host-test `dongle_target.h`
+include regression (both harnesses now compile against the CH592 target, which
+also put the §0 diagnostics under host test — 137/137 pass); the
+`KBD_RF_CRYPT=1 RF_DIAG_COUNTERS=0` link failure (the five `kbd_crypt_*`
+counters and `systick_read` sat under the diag gate while crypto references
+them unconditionally); and `make update` silently rebuilding plaintext (the
+Makefile now refuses a defaulted-plaintext `update` while encrypted build
+markers are present; explicit `KBD_RF_CRYPT=0` downgrades deliberately).
+
 - **Receiver wedges.** The CH592 stopped answering IAP three times in one
   session, twice dropping off USB entirely; only a probe reset recovers it. This
   gates measurement — runs die partway. No credible mechanism found in the
