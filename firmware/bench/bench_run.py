@@ -161,6 +161,7 @@ def main():
     skip_pair = "--skip-pair" in sys.argv
     no_cycle = "--no-power-cycle" in sys.argv
     fresh = "--fresh" in sys.argv
+    verify_off = "--verify-off" in sys.argv
 
     kbd = serial.Serial(KBD_PORT, 115200, timeout=0.05)
     rxs = serial.Serial(RX_PORT, 115200, timeout=0.05)
@@ -224,6 +225,12 @@ def main():
         col.stop = True
         return 1
     log("keyboard keyed (5B 21)")
+
+    if verify_off:
+        kbd.write(frame([0xB1, 0x00]))
+        time.sleep(0.3)
+        ev.feed(kbd.read(64))
+        log("pre-seal self-verify DISABLED (B1 00) -- no canary in play")
 
     if not no_cycle:
         got = False

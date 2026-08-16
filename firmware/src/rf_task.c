@@ -221,6 +221,10 @@ static volatile uint8_t crypt_session_rx[KBD_CRYPT_LEN_SESSION];
 static volatile uint8_t crypt_session_rx_pending;
 static volatile uint8_t crypt_polls_since_auth;
 static volatile uint8_t crypt_keepalive_due;
+/* Deferred CRYPT_ARM: set by rf_do_response_tx, consumed by the TX_FINISH /
+ * TX_FAIL callback (or the tx_status!=0 fallback), so seal_begin's AES never
+ * overlaps the transmission it follows -- see docs/TODO.md section 0. */
+static volatile uint8_t crypt_arm_after_tx;
 
 /* Seal the next uplink frame, and act on a failure instead of discarding it.
  *
@@ -1034,6 +1038,15 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     if (sta == TX_MODE_TX_FINISH) {
         RF_DIAG_INC(rf_cb_count[3]);
         response_pending = 0;   /* response done -> hop may retune again */
+#if KBD_RF_CRYPT
+        /* The radio is quiet now: release the deferred seal arm (see
+         * rf_do_response_tx). Posted after RX_RESTART in priority order, so
+         * the RX re-arm still runs first. */
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
     }
@@ -1041,6 +1054,12 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     if (sta == TX_MODE_TX_FAIL) {
         RF_DIAG_INC(rf_cb_count[4]);
         response_pending = 0;
+#if KBD_RF_CRYPT
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
     }
@@ -1114,8 +1133,16 @@ static void rf_do_response_tx(void)
                 kbd_crypt_seal_miss++;
             }
             /* Seal the next one from task context, whether or not this slot
-             * found a frame ready. */
-            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+             * found a frame ready -- but only AFTER this transmission
+             * completes. Arming here made seal_begin's ~160 us of AES overlap
+             * the ~88 us on-air TX + TX_FINISH window, where a BLEB preempt
+             * silently aborts an AES block into stale output (docs/TODO.md
+             * section 0) -- the ~12% garbage-tag defect. The TX_FINISH /
+             * TX_FAIL callback consumes this latch and posts RF_EVT_CRYPT_ARM
+             * once the radio is done; RF_EVT_RX_RESTART outranks it in
+             * RF_ProcessEvent, so the RX re-arm still runs first and the seal
+             * lands in the dead air before the next poll. */
+            crypt_arm_after_tx = 1u;
         }
     } else
 #endif
@@ -1142,6 +1169,12 @@ static void rf_do_response_tx(void)
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
         response_pending = 0;
+#if KBD_RF_CRYPT
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
     }
 }
