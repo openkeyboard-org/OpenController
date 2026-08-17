@@ -19,7 +19,7 @@ import time
 
 import serial
 
-PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CF148F065446-if01"
+PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
 SOF, PAYLOAD_LEN = 0x5E, 124
 FRAME_LEN = PAYLOAD_LEN + 3
 

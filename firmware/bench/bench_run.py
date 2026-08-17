@@ -32,10 +32,10 @@ sys.path.insert(0, "/home/emolitor/Development/openkeyboard/OpenController/firmw
 from rx_uart_diag import FRAME_LEN, PAYLOAD_LEN, SOF, parse, show  # noqa: E402
 import serial  # noqa: E402
 
-KBD_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
-RX_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CF148F065446-if01"
+KBD_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CF148F065446-if01"
+RX_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
 MINICHLINK = "/home/emolitor/Development/Personal/WCH/ch32fun/minichlink/minichlink"
-RX_PROBE = "CF148F065446"
+RX_PROBE = "CEBD8F0653EF"
 BENCH_KEY = bytes.fromhex("4f70656e4b626421a55ac33c69960ff0")
 
 KBD_DIAG_N = 9
@@ -138,6 +138,22 @@ class RxCollector(threading.Thread):
                     buf = buf[i + 1:]
 
 
+def find_dongle_kbd_hidraw():
+    """The dongle's boot-keyboard interface (0C45:FEFE input0), or None."""
+    import glob
+    for path in sorted(glob.glob("/sys/class/hidraw/hidraw*")):
+        try:
+            uevent = open(path + "/device/uevent").read()
+        except OSError:
+            continue
+        if "00000C45:0000FEFE" not in uevent:
+            continue
+        phys = [l for l in uevent.splitlines() if l.startswith("HID_PHYS")]
+        if phys and phys[0].endswith("input0"):
+            return "/dev/" + path.rsplit("/", 1)[1]
+    return None
+
+
 def rx_power_cycle():
     for args in (["-kt"], ["-k3"]):
         subprocess.run([MINICHLINK, "-C", "linke"] + args + ["-l", RX_PROBE],
@@ -162,6 +178,7 @@ def main():
     no_cycle = "--no-power-cycle" in sys.argv
     fresh = "--fresh" in sys.argv
     verify_off = "--verify-off" in sys.argv
+    hid_test = "--hid-test" in sys.argv
 
     kbd = serial.Serial(KBD_PORT, 115200, timeout=0.05)
     rxs = serial.Serial(RX_PORT, 115200, timeout=0.05)
@@ -259,7 +276,27 @@ def main():
         log(f"rx baseline: ok {r0['ok']} mac {r0['drop_mac']} "
             f"same_ok {r0['mac_same_ok']} mint {r0['mint']}")
 
-    log(f"holding {hold:.0f}s (idle) with link-keeper...")
+    # End-to-end HID oracle: inject boot-keyboard reports over the keyboard's
+    # UART (0xA1 -> RF_QueueHIDReport -> sealed frame) and count what the host
+    # receives through the dongle's USB HID interface. Nothing reaches that
+    # node without a verified CCM tag, so every delivered press is proof of
+    # the whole encrypted path.
+    hid_fd = None
+    hid_injected = 0
+    hid_delivered = 0
+    hid_reports = 0
+    hid_down = False
+    last_inject = 0.0
+    if hid_test:
+        import os
+        node = find_dongle_kbd_hidraw()
+        if node:
+            hid_fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK)
+            log(f"HID oracle armed: injecting via UART 0xA1, reading {node}")
+        else:
+            log("HID oracle: dongle keyboard hidraw NOT found -- skipping")
+
+    log(f"holding {hold:.0f}s ({'HID-injecting' if hid_fd else 'idle'}) with link-keeper...")
     end = time.time() + hold
     last_note = 0.0
     last_rx_activity = time.time()
@@ -268,6 +305,28 @@ def main():
     while time.time() < end:
         ev.feed(kbd.read(128))
         now_w = time.time()
+        if hid_fd is not None:
+            import os
+            if now_w - last_inject >= 3.0:
+                press = bytes([0xA1, 0, 0, 0x68, 0, 0, 0, 0, 0])
+                kbd.write(frame(press))              # F13 down (inert on desktops)
+                time.sleep(0.05)
+                kbd.write(frame(bytes([0xA1] + [0] * 8)))   # all up
+                hid_injected += 1
+                last_inject = now_w
+            try:
+                while True:
+                    rep = os.read(hid_fd, 8)
+                    if not rep:
+                        break
+                    down = 0x68 in rep[2:]
+                    if down:
+                        hid_reports += 1
+                    if down and not hid_down:
+                        hid_delivered += 1   # press EDGE (resends collapse)
+                    hid_down = down
+            except BlockingIOError:
+                pass
         if col.frames:
             d = col.frames[-1][1]
             if d["conn_rx"] != last_conn_rx:
@@ -292,6 +351,23 @@ def main():
                 f"bb {d['bb_during_aes']} mint {d['mint']} "
                 f"latch {d['fail_latched']}")
             last_note = now
+    if hid_fd is not None:
+        import os
+        time.sleep(0.5)
+        try:
+            while True:
+                rep = os.read(hid_fd, 8)
+                if not rep:
+                    break
+                down = 0x68 in rep[2:]
+                if down:
+                    hid_reports += 1
+                if down and not hid_down:
+                    hid_delivered += 1
+                hid_down = down
+        except BlockingIOError:
+            pass
+        os.close(hid_fd)
     d1 = kbd_query(kbd, ev, 0xAF, "diag")
     fail = kbd_query(kbd, ev, 0xB0, "fail")
     time.sleep(1.5)
@@ -312,6 +388,11 @@ def main():
                   f"({100.0 * dd['selfck_bad'] / tot:.1f}%)  "
                   f"bb_during_aes +{dd['bb_during_aes']}")
     print(f"link drops seen: {len(drops)}")
+    if hid_test:
+        print(f"HID END-TO-END: injected {hid_injected} presses over UART, "
+              f"host received {hid_delivered} through the dongle's USB HID "
+              f"({hid_reports} raw reports incl. resends) "
+              f"({'PASS' if hid_injected and hid_delivered == hid_injected else 'CHECK'})")
     if fail and fail["latched"]:
         print(f"\nKBD SELF-VERIFY LATCH: session {fail['session']:08X} "
               f"seal_bb {fail['seal_bb']} len {fail['len']}")
