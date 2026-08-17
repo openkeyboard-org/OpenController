@@ -82,7 +82,13 @@ def main():
     n = r[1]
     ok = struct.unpack_from("<I", r, 2)[0]
     reasons = struct.unpack_from("<6I", r, 6)
-    print(f"payload {n} B  ({'v2' if n >= 46 else 'v1'})")
+    # Two live layouts, told apart by length (the dongle's status profile
+    # byte is the other detector): the BENCH profile serves the v4 62-byte
+    # payload with the pre-verify sink forensics; the PRODUCT profile serves
+    # 38 bytes -- ok + reasons + the stale-abort hardening telemetry
+    # (aes_redo / announce_retry / boot KAT).
+    kind = "bench v4" if n >= 46 else ("product" if n >= 38 else "v1")
+    print(f"payload {n} B  ({kind})")
     print(f"  verified (ok)      {ok}")
     for i, name in enumerate(REASONS):
         if i == 0:
@@ -99,6 +105,13 @@ def main():
         print(f"  fifo_full refused  {fifo_full}")
         print(f"  flush_drop         {flush_drop}")
         print(f"  plain_drop         {plain_drop}")
+    elif n >= 38:
+        aes_redo, announce_retry = struct.unpack_from("<2I", r, 30)
+        kat_run, kat_fail = r[38], r[39]
+        print("  --- stale-abort hardening ---")
+        print(f"  aes_redo caught    {aes_redo}")
+        print(f"  announce_retry     {announce_retry}")
+        print(f"  boot KAT           {'FAIL' if kat_fail else ('ok' if kat_run else 'not run')}")
 
     r = txn(fd, 0x88)
     if r and r[0] == 0x88 and r[1] >= 44:
