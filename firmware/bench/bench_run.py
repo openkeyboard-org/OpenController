@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One encrypted-link bench run over UART only (no dongle USB).
+"""One encrypted-link bench run, orchestrated over the probe UARTs.
 
 Sequence:
   1. open BOTH probe CDC ports once (each open DTR-resets its target; both
@@ -15,12 +15,12 @@ Sequence:
   7. read the keyboard self-verify counters (0xAF, 8 x u32) and the failure
      latch (0xB0), plus the receiver 0x5E telemetry; print the reconciliation.
 
-Keyboard 0xAF reply: [0x5D][8 x u32 LE][chk] =
+Keyboard 0xAF reply: [0x5D][9 x u32 LE][chk] =
   seal_miss, tx_sealed, sess_bad, sess_ok, sess_rx,
-  selfck_ok, selfck_bad, bb_during_aes
+  selfck_ok, selfck_bad, bb_during_aes, seal_redo
 Keyboard 0xB0 reply: [0x5F][latched][len][session u32][seal_bb][frame 22][good 8][chk]
 
-Usage: bench_run.py [hold_seconds] [--skip-pair] [--no-power-cycle]
+Usage: bench_run.py [hold_seconds] [--fresh] [--verify-off] [--hid-test]\n                    [--skip-pair] [--no-power-cycle]\n--fresh wipes both bonds first (mismatched bond states never connect);\n--verify-off disables the pre-seal self-verify (UART B1 00);\n--hid-test injects F13 via UART 0xA1 and counts host-side deliveries\nthrough the dongle's USB HID interface (requires the dongle on USB).
 """
 import struct
 import subprocess
@@ -161,14 +161,18 @@ def rx_power_cycle():
         time.sleep(0.8)
 
 
-FF4K = "/tmp/claude-1000/-home-emolitor-Development-openkeyboard-OpenDongle/ef19b556-a2a8-46c1-ad35-90786d7d221f/scratchpad/ff4k.bin"
-
-
 def rx_wipe_bond():
-    subprocess.run([MINICHLINK, "-C", "linke", "-a", "-l", RX_PROBE],
-                   capture_output=True, timeout=30)
-    subprocess.run([MINICHLINK, "-C", "linke", "-w", FF4K, "0x75000",
-                    "-l", RX_PROBE], capture_output=True, timeout=60)
+    """Invalidate the receiver's bond record: halt, write 4 KiB of 0xFF over
+    DataFlash 0x75000 (minichlink's EEPROM write path erases), power cycle.
+    The receiver then boots bond-less and camps in pairing indefinitely."""
+    import tempfile
+    with tempfile.NamedTemporaryFile(suffix=".bin") as ff:
+        ff.write(b"\xff" * 4096)
+        ff.flush()
+        subprocess.run([MINICHLINK, "-C", "linke", "-a", "-l", RX_PROBE],
+                       capture_output=True, timeout=30)
+        subprocess.run([MINICHLINK, "-C", "linke", "-w", ff.name, "0x75000",
+                        "-l", RX_PROBE], capture_output=True, timeout=60)
     rx_power_cycle()
 
 
