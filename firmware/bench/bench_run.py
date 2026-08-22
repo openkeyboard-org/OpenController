@@ -32,15 +32,20 @@ sys.path.insert(0, "/home/emolitor/Development/openkeyboard/OpenController/firmw
 from rx_uart_diag import FRAME_LEN, PAYLOAD_LEN, SOF, parse, show  # noqa: E402
 import serial  # noqa: E402
 
-KBD_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CF148F065446-if01"
-RX_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
+# Roles per bench/README.md and the OpenDongle validators: the KEYBOARD is on
+# CEBD8F0653EF, the RECEIVER on CF148F065446. These were swapped for a 2026-08-17
+# re-cabling that has since been undone, which pointed every destructive
+# operation below (rail power-cycle, the --fresh DataFlash wipe) at the KEYBOARD
+# while the UART commands went to the receiver's TX-only port.
+KBD_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
+RX_PORT = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CF148F065446-if01"
 MINICHLINK = "/home/emolitor/Development/Personal/WCH/ch32fun/minichlink/minichlink"
-RX_PROBE = "CEBD8F0653EF"
+RX_PROBE = "CF148F065446"
 BENCH_KEY = bytes.fromhex("4f70656e4b626421a55ac33c69960ff0")
 
 KBD_DIAG_N = 9
 KBD_DIAG_LEN = 1 + 4 * KBD_DIAG_N + 1          # 34
-KBD_FAIL_LEN = 8 + 22 + 8 + 1                  # 39
+KBD_FAIL_LEN = 8 + 22 + 4 * 8 + 1   # hdr + frame22 + FOUR 8-byte vecs + chk                  # 39
 DIAG_NAMES = ["seal_miss", "tx_sealed", "sess_bad", "sess_ok", "sess_rx",
               "selfck_ok", "selfck_bad", "bb_during_aes", "seal_redo"]
 
