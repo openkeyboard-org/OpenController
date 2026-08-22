@@ -93,12 +93,20 @@ make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1 bundle
 make update OB_PORT=/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01
 ```
 
-**Pairing order is load-bearing:** select the transport (`A6 30`), put the
-KEYBOARD into pairing FIRST, and only then restart the dongle — it accepts a pair
-only in the first few seconds after boot, so its window must open while the
-keyboard is already broadcasting. The same ordering applies to a bonded
-reconnect. Getting this backwards accounts for every "the CH592 refuses to pair"
-observation in this project.
+**Pairing order is load-bearing FOR THE LINK, and no longer for capability.**
+Select the transport (`A6 30`), put the KEYBOARD into pairing first, and only
+then restart the dongle -- it accepts a pair only in the first few seconds after
+boot, so its window must open while the keyboard is already broadcasting. The
+same ordering applies to a bonded reconnect. Getting this backwards accounts for
+every "the CH592 refuses to pair" observation in this project.
+
+Until 2026-08-22 that same order was ALSO the one in which capability
+negotiation failed: measured 0/10 pairs latched `ENC_CAPABLE` in this order
+against 11/11 with the dongle camped first (Fisher p < 0.00001), because the
+receiver commits on the first beacon it hears and the advert only rode one slot
+in eight. The keyboard now leads every beacon with the advert, so capability
+latches 12/12 in BOTH orders and the pairing order is once again only about
+whether the link comes up.
 
 ## Diagnostics
 
@@ -110,8 +118,7 @@ silently and simply times out. `BondRead` (`0x88`) needs the dispatcher armed
 `[ack][len][status][record…]`, so the record starts at offset **3**, and the link
 key is deliberately redacted.
 
-Keyboard `.diag_safe` counters are read over SWD with `minichlink -r`, which does
-**not** reset the target. Addresses shift whenever a counter is added — always
+Keyboard `.diag_safe` counters are read over the keyboard UART (0xAF counters, 0xB0 fail latch). Do NOT read them over SWD: a probe attach resets a running application and CH5xx probe memory reads return plausible stale garbage -- see TODO.md section 6, which is why those counters were moved to UART. Addresses shift whenever a counter is added — always
 re-derive them from the current `.map`. `rf_last_tx_status` / `rx_status` /
 `config_status` are packed `uint8_t`, not words; read the region and decode
 against the map rather than reading single symbols.

@@ -16,7 +16,7 @@ uint8_t RF_Select2G4(void);
 void RF_EnterPairing(void);
 void RF_Disconnect(void);
 void RF_FlushBondSave(void);
-void RF_ClearBond(void);
+uint8_t RF_ClearBond(void);   /* 1 = the stored bond is provably gone */
 uint8_t RF_HasBond(void);
 
 void RF_QueueHIDReport(const uint8_t report[8]);

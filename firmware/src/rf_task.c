@@ -752,9 +752,40 @@ static void rf_clear_bond_ram(void)
 #endif
 }
 
-static void rf_clear_bond_flash(void)
+/* Erase the stored bond, and VERIFY it went. Returns 1 on a proven-erased page.
+ *
+ * The result used to be discarded. EEPROM_ERASE documents 0=SUCCESS/!0=FAILURE,
+ * and the erase is the highest-current flash operation there is -- exactly what
+ * a battery brownout interrupts, and a user pulling power during an unpair is
+ * the likeliest way to cause one. On a failed or interrupted erase the RAM
+ * state said "unpaired, no key" while DataFlash still held a COMPLETE v2
+ * record: flags, peer identity and the 16-byte link key, all in one checksummed
+ * blob. The next boot loaded it verbatim and re-armed encryption toward the peer
+ * the user had just revoked -- and because a different-peer pair is only
+ * reachable through this clear, a subsequent pairing lived in RAM alone and was
+ * silently reverted by any later power cycle.
+ *
+ * Read back and confirm, mirroring rf_save_bond_to_flash's checked erase. If it
+ * still will not erase, overwrite the record's leading word: DataFlash writes
+ * only clear bits, so zeroing the magic invalidates the record even on a page
+ * that refuses to erase. */
+static uint8_t rf_clear_bond_flash(void)
 {
-    (void)EEPROM_ERASE(RF_BOND_EEPROM_OFF, RF_BOND_EEPROM_ERASE_LEN);
+    rf_bond_record_t cur __attribute__((aligned(4)));
+    uint32_t zero = 0;
+
+    if (EEPROM_ERASE(RF_BOND_EEPROM_OFF, RF_BOND_EEPROM_ERASE_LEN) == 0
+        && EEPROM_READ(RF_BOND_EEPROM_OFF, &cur, sizeof(cur)) == 0
+        && rf_bond_flash_is_erased(&cur)) {
+        return 1;
+    }
+
+    (void)EEPROM_WRITE(RF_BOND_EEPROM_OFF, &zero, sizeof(zero));
+    if (EEPROM_READ(RF_BOND_EEPROM_OFF, &cur, sizeof(cur)) == 0
+        && !rf_bond_record_valid(&cur)) {
+        return 1;                 /* not erased, but no longer a loadable bond */
+    }
+    return 0;
 }
 
 /* PLL servo (stock 0x20000D60): pull the hop anchor toward the reference time
@@ -1872,11 +1903,14 @@ void RF_FlushBondSave(void)
     }
 }
 
-void RF_ClearBond(void)
+uint8_t RF_ClearBond(void)
 {
     rf_clear_bond_ram();
     bond_save_pending = 0;
-    rf_clear_bond_flash();
+    /* Propagate the result: an unpair that only cleared RAM looks identical to
+     * the caller but resurrects the whole bond -- key included -- at the next
+     * boot, so the UART path must be able to report failure rather than ack it. */
+    return rf_clear_bond_flash();
 }
 
 uint8_t RF_HasBond(void)

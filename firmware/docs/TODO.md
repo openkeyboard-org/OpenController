@@ -332,11 +332,20 @@ markers are present; explicit `KBD_RF_CRYPT=0` downgrades deliberately).
   gates measurement — runs die partway. No credible mechanism found in the
   `DONGLE_RF_CRYPT` path; the bounded HAL and sparse traffic argue against
   crypto starvation. Needs its own investigation.
-- **Capability advert never lands** — every pair records `capable=no`, and
-  `bond_enc_active()` needs `capable AND key`. Bench uses
-  `provision_link_key.py`, which sets both. A beacon-chase fix was tried and
-  **broke pairing entirely** (the keyboard goes deaf transmitting the advert
-  exactly when the ACK arrives) — do not repeat it.
+- **Capability advert never lands** -- FIXED 2026-08-22. The mechanism was not
+  "the advert is lost" but "the advert arrives too late": the receiver commits
+  the bond on the first beacon it hears, and the advert rode only slots 0,1 then
+  one in eight, so a receiver joining mid-stream always met a beacon first.
+  Measured 0/10 in the documented pairing order vs 11/11 with the dongle camped
+  first; after leading every beacon with the advert, 12/12 in both.
+
+  The earlier "beacon-chase" attempt DID break pairing entirely, and the reason
+  is specific and worth keeping: it put the advert AFTER the beacon, inside the
+  quiet window where the pair-ACK arrives, leaving the keyboard deaf
+  (RF_Shut/RF_Tx) exactly then. The rule is therefore NOT "never touch the
+  advert schedule" -- that would forbid the fix that worked -- but:
+  **transmit nothing in the window immediately following a beacon.** Pinned as
+  property P4 in firmware/tests/test_pair_slots.py.
 - **Session announce is fire-and-forget.** The receiver announces a new session
   up to 8 times and never again until the next connect/EV10. A keyboard that
   misses all 8 (e.g. keyed after the mint) can never seal for that whole epoch.
@@ -356,12 +365,20 @@ markers are present; explicit `KBD_RF_CRYPT=0` downgrades deliberately).
 
 ## 8. Bench recipes
 
-**Pairing order is load-bearing.** Select the transport (`A6 30`), put the
-KEYBOARD into pairing FIRST (`A6 51`), and only then restart the dongle — it
-accepts a pair only in the first few seconds after boot, so its window must open
-while the keyboard is already broadcasting. Same ordering for a bonded
-reconnect. Getting this backwards explains every "the CH592 refuses to pair"
-observation in this project.
+**Pairing order is load-bearing FOR THE LINK, and no longer for capability.**
+Select the transport (`A6 30`), put the KEYBOARD into pairing first, and only
+then restart the dongle -- it accepts a pair only in the first few seconds after
+boot, so its window must open while the keyboard is already broadcasting. The
+same ordering applies to a bonded reconnect. Getting this backwards accounts for
+every "the CH592 refuses to pair" observation in this project.
+
+Until 2026-08-22 that same order was ALSO the one in which capability
+negotiation failed: measured 0/10 pairs latched `ENC_CAPABLE` in this order
+against 11/11 with the dongle camped first (Fisher p < 0.00001), because the
+receiver commits on the first beacon it hears and the advert only rode one slot
+in eight. The keyboard now leads every beacon with the advert, so capability
+latches 12/12 in BOTH orders and the pairing order is once again only about
+whether the link comes up.
 
 **Provision keys BEFORE pairing**, or the keyboard cannot verify the announces
 from the mint that happens at connect (§7).

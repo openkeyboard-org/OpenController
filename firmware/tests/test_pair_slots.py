@@ -102,17 +102,40 @@ class PairSlots(unittest.TestCase):
             self.assertEqual(rows[i - 1][1], "A",
                              f"beacon at index {i} is not preceded by an advert")
 
-    def test_p2_a_receiver_joining_anywhere_hears_an_advert_first(self):
+    def test_p2_join_coverage_is_the_advert_lead_not_alternation(self):
+        """Measure the real property: sweep every join instant on a fine grid and
+        ask what the receiver hears FIRST.
+
+        The exposure is exactly the advert->beacon lead: a receiver that starts
+        listening inside that window hears the beacon first and commits without
+        capability. Everywhere else in the slot the next frame is an advert.
+        Asserting mere A/B alternation (an earlier version of this test) would
+        pass even if the lead were widened until the beacon arrived first most
+        of the time, so assert the FRACTION and the exposure bound instead.
+        """
         rows = self._schedule(True)
-        # Skip the first pair so the window is representative of steady state.
-        for start in range(2, len(rows) - 1):
-            nxt = rows[start][1]
-            self.assertEqual(nxt, "A" if start % 2 == 0 else "B",
-                             "schedule is not a strict advert/beacon alternation")
-        # Every beacon is reachable only through the advert that precedes it, so
-        # exposure is zero beacons for a receiver that starts before any advert.
-        first_beacon = next(i for i, (_, k) in enumerate(rows) if k == "B")
-        self.assertEqual(rows[first_beacon - 1][1], "A")
+        # Steady state only: skip the first slot pair.
+        rows = [r for r in rows if r[0] >= rows[2][0]]
+        span_start, span_end = rows[0][0], rows[-1][0]
+        advert_first = total = 0
+        for t10 in range(span_start * 10, span_end * 10):     # 0.1-tick grid
+            t = t10 / 10.0
+            nxt = next(((tt, k) for tt, k in rows if tt >= t), None)
+            if nxt is None:
+                break
+            total += 1
+            if nxt[1] == "A":
+                advert_first += 1
+        self.assertGreater(total, 0, "no join instants sampled")
+        coverage = advert_first / total
+        # 4 of every 32 ticks are the lead -> 28/32 = 87.5% is the design value.
+        self.assertGreaterEqual(
+            coverage, 0.85,
+            f"join coverage fell to {coverage:.1%}; the advert lead is too wide "
+            f"relative to the slot, so receivers increasingly hear a beacon first")
+        # And the exposure must BE the lead, not something larger.
+        self.assertLessEqual(1.0 - coverage, 4.0 / 32.0 + 0.01,
+                             "exposure exceeds the advert lead")
 
     def test_p3_beacon_cadence_and_dwell_are_unchanged(self):
         rows = self._schedule(True)
@@ -121,9 +144,17 @@ class PairSlots(unittest.TestCase):
         self.assertEqual(
             gaps, {32},
             f"beacon-to-beacon spacing changed: {sorted(gaps)} (want 20 ms = 32 ticks)")
-        # A stock receiver classifies by the beacon cadence alone, so this is the
-        # compatibility guarantee.
-        self.assertEqual(len(beacon_ticks) % 1, 0)
+        # The compatibility guarantee is the beacon CADENCE, not its phase: the
+        # encrypted stream opens with an advert so its whole grid is offset by
+        # the lead, which no receiver can observe. A stock receiver classifies
+        # purely by the spacing, so that is what must match.
+        plain = [t for t, k in self._schedule(False)]
+        plain_gaps = [b - a for a, b in zip(plain, plain[1:])]
+        enc_gaps = [b - a for a, b in zip(beacon_ticks, beacon_ticks[1:])]
+        n = min(len(plain_gaps), len(enc_gaps))
+        self.assertEqual(
+            enc_gaps[:n], plain_gaps[:n],
+            "encrypted and plaintext builds no longer share a beacon cadence")
 
     def test_p4_nothing_transmits_in_the_post_beacon_ack_window(self):
         rows = self._schedule(True)

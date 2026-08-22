@@ -154,8 +154,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x52: /* unpair */
         RF_Disconnect();
-        RF_ClearBond();
-        KeyboardUart_SendStatus(0x33);
+        /* Report the DISCONNECT status only when the stored bond is provably
+         * gone. A flash erase that silently failed used to ack success while
+         * the record -- key included -- survived to be reloaded at the next
+         * boot; 0x36 (refused) tells the operator to retry instead. */
+        if (RF_ClearBond()) {
+            KeyboardUart_SendStatus(0x33);
+        } else {
+            KeyboardUart_SendStatus(0x36);
+        }
         break;
 
     case 0x53: /* battery */
@@ -171,7 +178,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x63: /* factory 2.4G pair */
         transport_is_2g4 = 1;
         RF_Disconnect();
-        RF_ClearBond();
+        if (!RF_ClearBond()) {
+            KeyboardUart_SendStatus(0x36);   /* stale bond survives; do not pair */
+            break;
+        }
         RF_EnterPairing();
         KeyboardUart_SendStatus(0x31);
         KeyboardUart_SendStatus(0x23);
