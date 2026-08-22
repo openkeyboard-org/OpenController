@@ -90,14 +90,8 @@
 #define RF_PAIR_BCAST_TICKS       32u      /* 20 ms at 625 us/tick */
 #define RF_PAIR_WINDOW_TICKS      8480u    /* stock pair window is about 5.3 s */
 #define RF_PAIR_DWELL_BCASTS      12u
-#define RF_PAIR_ADVERT_LEAD_TICKS 4u       /* 2.5 ms: advert -> its own beacon.
-                                            * Wide enough for the receiver to
-                                            * parse the LEN-3 frame and re-arm RX
-                                            * (its connected re-arm is well under
-                                            * the 875 us poll interval), and a
-                                            * missed beacon is not a failure --
-                                            * capability is already latched, so
-                                            * the next beacon commits with it. */
+/* Advert lead + slot policy live in kbd_rf_crypt.h so a host test can pin
+ * them; there must be no second copy here. */
 #define RF_CONNECTED_TIMEOUT_TICKS 5000u   /* ~3.1 s; FIXED connection supervision --
                                             * the dongle's advertised timeout field is
                                             * intentionally not honored (stock scales it
@@ -1401,7 +1395,7 @@ static void rf_start_rx(uint8_t channel)
 }
 
 #if KBD_RF_CRYPT
-static void rf_pair_send_cap_advert(void);
+static void rf_pair_send_cap_advert(uint16_t next_delay);
 #endif
 
 static void rf_pair_broadcast(void)
@@ -1442,14 +1436,16 @@ static void rf_pair_broadcast(void)
      * schedule. Adverts ride only the fresh-pair AA: a bonded reconnect's
      * capability is already on the receiver's record. */
     uint8_t advert_enabled = (rf_access_addr == RF_DEFAULT_ACCESS_ADDR) ? 1u : 0u;
-    if (advert_enabled && pair_slot_phase == 0u) {
-        pair_slot_phase = 1u;
-        rf_pair_send_cap_advert();      /* re-arms at RF_PAIR_ADVERT_LEAD_TICKS */
+    uint8_t send_advert = 0u;
+    uint16_t next_delay = kbd_pair_slot_next(advert_enabled, &pair_slot_phase,
+                                             &send_advert);
+    if (send_advert) {
+        rf_pair_send_cap_advert(next_delay);
         return;
     }
-    pair_slot_phase = 0u;
 #else
     const uint8_t advert_enabled = 0u;
+    const uint16_t next_delay = RF_PAIR_BCAST_TICKS;
 #endif
 
     for (uint8_t i = 0; i < 6; i++) {
@@ -1470,10 +1466,8 @@ static void rf_pair_broadcast(void)
     /* Subtract the lead the advert already consumed, so beacon-to-beacon
      * spacing stays exactly RF_PAIR_BCAST_TICKS and the dwell/hop schedule is
      * byte-identical to a build without encryption. */
-    rf_start_task_atomic(RF_EVT_PAIR_BCAST,
-                         (uint16_t)(RF_PAIR_BCAST_TICKS
-                                    - (advert_enabled
-                                       ? RF_PAIR_ADVERT_LEAD_TICKS : 0u)));
+    (void)advert_enabled;
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, next_delay);
 }
 
 #if KBD_RF_CRYPT
@@ -1486,7 +1480,7 @@ static void rf_pair_broadcast(void)
  * completion is asynchronous (TX_MODE_TX_FINISH re-arms RX), so two
  * back-to-back RF_Tx calls in one slot would need sequencing, and the receiver
  * only has to see this once during the pairing window. */
-static void rf_pair_send_cap_advert(void)
+static void rf_pair_send_cap_advert(uint16_t next_delay)
 {
     uint8_t cap[KBD_CRYPT_LEN_CAP];
 
@@ -1498,7 +1492,7 @@ static void rf_pair_send_cap_advert(void)
     rf_configure_if_needed(rf_access_addr);
     (void)RF_Tx(cap, sizeof(cap), 0xFF, 0xFF);
     /* Its beacon follows in the SAME slot, one lead later. */
-    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_ADVERT_LEAD_TICKS);
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, next_delay);
 }
 #endif
 

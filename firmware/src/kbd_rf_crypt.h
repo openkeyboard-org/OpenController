@@ -121,6 +121,42 @@
 #define KBD_CRYPT_LEN_CAP           3u
 #define KBD_CRYPT_CAP_VERSION       1u
 
+/* Pairing slot policy, factored out of rf_task.c so it is host-testable
+ * (firmware/tests/test_pair_slots.py). rf_task.c must hold no second copy.
+ *
+ * Each 20 ms pair slot carries the advert FIRST and its beacon a lead later, so
+ * the first frame a receiver hears is an advert wherever in the stream it joins.
+ * The receiver commits the bond on the first BEACON and never re-arms RX on the
+ * pair AA before promoting, so an advert that follows a beacon is unreachable --
+ * which is why the old "slots 0,1 then one in eight" schedule latched
+ * capability 0/10 in the documented pairing order.
+ *
+ * P4, the property that must never regress: nothing is transmitted in the quiet
+ * window immediately AFTER a beacon, because that is where the pair-ACK arrives.
+ * An advert placed there left the keyboard deaf to the ACK and broke pairing
+ * outright (2026-08). */
+#define KBD_PAIR_BCAST_TICKS       32u   /* 20 ms at 625 us/tick */
+#define KBD_PAIR_ADVERT_LEAD_TICKS  4u   /* 2.5 ms: advert -> its own beacon */
+#define KBD_PAIR_DWELL_BCASTS      12u   /* beacons per channel dwell */
+
+/* Advance one pair slot. Sets *send_advert and returns the tick delay until the
+ * next PAIR_BCAST event. `advert_enabled` is false for a bonded reconnect (whose
+ * capability is already on the receiver's record) and for a plaintext build. */
+static inline uint16_t kbd_pair_slot_next(uint8_t advert_enabled,
+                                          uint8_t *slot_phase,
+                                          uint8_t *send_advert)
+{
+    if (advert_enabled && *slot_phase == 0u) {
+        *slot_phase = 1u;
+        *send_advert = 1u;
+        return KBD_PAIR_ADVERT_LEAD_TICKS;
+    }
+    *slot_phase = 0u;
+    *send_advert = 0u;
+    return (uint16_t)(KBD_PAIR_BCAST_TICKS
+                      - (advert_enabled ? KBD_PAIR_ADVERT_LEAD_TICKS : 0u));
+}
+
 typedef enum {
     KBD_CRYPT_OK = 0,
     KBD_CRYPT_INACTIVE,       /* no key and/or no session installed */
