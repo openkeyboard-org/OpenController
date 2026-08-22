@@ -284,8 +284,9 @@ An independent audit reached the same AES/radio-overlap hypothesis that §0
 proved, and proposed two of the experiments that proved it. Its still-open
 findings, verified against source before the file was retired:
 
-- **Capability negotiation is structurally broken** — three separate claims,
-  now with three different statuses:
+- **Capability negotiation: scheduling FIXED, peer binding still open** — the
+  original entry bundled three claims under one heading; they now have three
+  different statuses:
   - *"the receiver explicitly clears `rf_crypt_peer_capable` when it accepts the
     first fresh/unbonded beacon"* — **FIXED, and this description is now wrong.**
     The accept-time clear was removed: OpenDongle's
