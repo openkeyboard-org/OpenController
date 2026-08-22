@@ -87,14 +87,17 @@ def main():
     # payload with the pre-verify sink forensics; the PRODUCT profile serves
     # 38 bytes -- ok + reasons + the stale-abort hardening telemetry
     # (aes_redo / announce_retry / boot KAT).
-    kind = "bench v4" if n >= 46 else ("product" if n >= 38 else "v1")
+    # Exact lengths, not thresholds: 62 = bench v4, 42 = product (since
+    # plain_drop was promoted 2026-08-22), 38 = product before that. A `>=`
+    # ladder matched a bench reply as product and mislabelled its fields.
+    kind = {62: "bench v4", 42: "product", 38: "product (pre-plain_drop)"}.get(n, "v1")
     print(f"payload {n} B  ({kind})")
     print(f"  verified (ok)      {ok}")
     for i, name in enumerate(REASONS):
         if i == 0:
             continue
         print(f"  drop {name:<14} {reasons[i]}")
-    if n >= 46:
+    if n == 62:
         conn_rx, enc_shape, fifo_full, flush_drop, plain_drop = \
             struct.unpack_from("<5I", r, 30)
         len_max, len_max_tag = r[50], r[51]
@@ -105,13 +108,18 @@ def main():
         print(f"  fifo_full refused  {fifo_full}")
         print(f"  flush_drop         {flush_drop}")
         print(f"  plain_drop         {plain_drop}")
-    elif n >= 38:
+    elif n in (38, 42):
         aes_redo, announce_retry = struct.unpack_from("<2I", r, 30)
         kat_run, kat_fail = r[38], r[39]
         print("  --- stale-abort hardening ---")
         print(f"  aes_redo caught    {aes_redo}")
         print(f"  announce_retry     {announce_retry}")
         print(f"  boot KAT           {'FAIL' if kat_fail else ('ok' if kat_run else 'not run')}")
+        if n == 42:
+            # A refused plaintext downgrade on an active encrypted bond. Product
+            # builds had no counter for this at all before 2026-08-22, so an
+            # active downgrade attempt read as RF flakiness.
+            print(f"  plain_drop refused {struct.unpack_from('<I', r, 40)[0]}")
 
     r = txn(fd, 0x88)
     if r and r[0] == 0x88 and r[1] >= 44:

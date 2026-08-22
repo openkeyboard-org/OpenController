@@ -90,6 +90,14 @@
 #define RF_PAIR_BCAST_TICKS       32u      /* 20 ms at 625 us/tick */
 #define RF_PAIR_WINDOW_TICKS      8480u    /* stock pair window is about 5.3 s */
 #define RF_PAIR_DWELL_BCASTS      12u
+#define RF_PAIR_ADVERT_LEAD_TICKS 4u       /* 2.5 ms: advert -> its own beacon.
+                                            * Wide enough for the receiver to
+                                            * parse the LEN-3 frame and re-arm RX
+                                            * (its connected re-arm is well under
+                                            * the 875 us poll interval), and a
+                                            * missed beacon is not a failure --
+                                            * capability is already latched, so
+                                            * the next beacon commits with it. */
 #define RF_CONNECTED_TIMEOUT_TICKS 5000u   /* ~3.1 s; FIXED connection supervision --
                                             * the dongle's advertised timeout field is
                                             * intentionally not honored (stock scales it
@@ -204,6 +212,12 @@ static uint8_t rf_bond_enc_active(void)
 #endif
 
 static uint8_t pair_bcast_count;
+#if KBD_RF_CRYPT
+/* 0 = the next PAIR_BCAST fires the advert, 1 = it fires that slot's beacon.
+ * Reset wherever pair_bcast_count is, so a pairing attempt always leads with an
+ * advert rather than inheriting the previous attempt's phase. */
+static uint8_t pair_slot_phase;
+#endif
 static uint8_t pair_payload[10];
 
 static uint8_t pending_type_tag;
@@ -1399,23 +1413,43 @@ static void rf_pair_broadcast(void)
     rf_channel = pair_channels[pair_channel_idx];
 
 #if KBD_RF_CRYPT
-    /* One slot in four advertises the encryption capability instead of the
-     * beacon. It must arrive BEFORE the receiver commits the bond, because the
-     * capability is read at commit time and the receiver can accept the very
-     * first beacon it hears -- so lead with two, then repeat occasionally in
-     * case both were lost. Advertising only on a late slot leaves the bond
-     * recorded as not-capable, and encryption then stays off no matter how the
-     * key is provisioned (bench-observed, 2026-08-10).
+    /* LEAD EVERY BEACON with the capability advert, 2.5 ms earlier, on the same
+     * channel. The receiver commits the bond on the FIRST beacon it hears and
+     * never re-arms RX on the pair AA before promoting, so the advert has to
+     * precede whichever beacon that turns out to be -- and a receiver joining
+     * mid-stream has no idea which one that is.
      *
-     * These replace a beacon slot rather than doubling up: TX completion is
-     * asynchronous, so two transmissions in one slot would need sequencing. The
-     * receiver only answers beacons, so an advert slot costs 20 ms of pairing
-     * latency and nothing else. */
-    if (pair_bcast_count < 2u || (pair_bcast_count & 0x07u) == 0x07u) {
-        pair_bcast_count++;
-        rf_pair_send_cap_advert();
+     * The previous schedule (slots 0,1 then one in eight) assumed both ends
+     * start together. They do not: the documented order puts the KEYBOARD into
+     * pairing first and restarts the dongle into an already-running broadcast.
+     * With the dongle camped on a fixed channel and the keyboard hopping three,
+     * every audible dwell after the first then OPENED with three consecutive
+     * beacons, so capability landed 0/10 in that order against 11/11 with the
+     * dongle listening first (Fisher p < 0.00001, 2026-08-22). Leading every
+     * beacon makes the first audible frame an advert wherever the receiver
+     * joins.
+     *
+     * THE ORDER IS THE SAFETY PROPERTY, not the density. A 2026-08 attempt put
+     * the advert AFTER the beacon and broke pairing outright: the pair-ACK
+     * arrives in the quiet window right after a beacon, and an advert there left
+     * the keyboard deaf (RF_Shut/RF_Tx) exactly then. Leading the beacon keeps
+     * that window as empty as it has always been -- keyboard TX-busy during
+     * either ACK is unchanged at 0%. Do not move the advert after the beacon.
+     * firmware/tests/test_pair_slots.py pins this as property P4.
+     *
+     * The beacon keeps its own 20 ms cadence and its channel is still chosen
+     * from the BEACON index, so a stock receiver sees a byte-identical beacon
+     * schedule. Adverts ride only the fresh-pair AA: a bonded reconnect's
+     * capability is already on the receiver's record. */
+    uint8_t advert_enabled = (rf_access_addr == RF_DEFAULT_ACCESS_ADDR) ? 1u : 0u;
+    if (advert_enabled && pair_slot_phase == 0u) {
+        pair_slot_phase = 1u;
+        rf_pair_send_cap_advert();      /* re-arms at RF_PAIR_ADVERT_LEAD_TICKS */
         return;
     }
+    pair_slot_phase = 0u;
+#else
+    const uint8_t advert_enabled = 0u;
 #endif
 
     for (uint8_t i = 0; i < 6; i++) {
@@ -1433,7 +1467,13 @@ static void rf_pair_broadcast(void)
 
     RF_DIAG_INC(rf_pair_bcast_count);
     pair_bcast_count++;
-    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
+    /* Subtract the lead the advert already consumed, so beacon-to-beacon
+     * spacing stays exactly RF_PAIR_BCAST_TICKS and the dwell/hop schedule is
+     * byte-identical to a build without encryption. */
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST,
+                         (uint16_t)(RF_PAIR_BCAST_TICKS
+                                    - (advert_enabled
+                                       ? RF_PAIR_ADVERT_LEAD_TICKS : 0u)));
 }
 
 #if KBD_RF_CRYPT
@@ -1457,7 +1497,8 @@ static void rf_pair_send_cap_advert(void)
     RF_Shut();
     rf_configure_if_needed(rf_access_addr);
     (void)RF_Tx(cap, sizeof(cap), 0xFF, 0xFF);
-    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
+    /* Its beacon follows in the SAME slot, one lead later. */
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_ADVERT_LEAD_TICKS);
 }
 #endif
 
@@ -1756,6 +1797,9 @@ void RF_TaskInit(void)
         rf_access_addr = stored_session_aa;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
+        #if KBD_RF_CRYPT
+        pair_slot_phase = 0u;
+        #endif
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     } else {
         rf_set_event_atomic(RF_EVT_START);
@@ -1774,6 +1818,9 @@ uint8_t RF_Select2G4(void)
         rf_access_addr = stored_session_aa;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
+        #if KBD_RF_CRYPT
+        pair_slot_phase = 0u;
+        #endif
         rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     }
@@ -1797,6 +1844,9 @@ void RF_EnterPairing(void)
     rf_access_addr = RF_DEFAULT_ACCESS_ADDR;
     rf_channel = pair_channels[0];
     pair_bcast_count = 0;
+    #if KBD_RF_CRYPT
+    pair_slot_phase = 0u;
+    #endif
     rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     rf_start_task_atomic(RF_EVT_PAIR_TIMEOUT, RF_PAIR_WINDOW_TICKS);
 }
