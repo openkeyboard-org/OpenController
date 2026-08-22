@@ -90,8 +90,10 @@ export PATH := $(MRS_TOOLCHAIN):$(PATH)
 TOOL_PREFIXES := riscv32-wch-elf- riscv-wch-elf-
 PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
     if [ -x "$(MRS_TOOLCHAIN)/$${p}gcc" ]; then printf '%s' "$$p"; break; fi; done)
+# `test` is host-only (it compiles harnesses with the HOST cc), so it must not
+# demand the WCH cross toolchain -- that is what lets CI run the suite at all.
 NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
-                   openboot-image openboot-test info gdbserver
+                   openboot-image openboot-test info gdbserver test
 NEED_TOOLCHAIN := 1
 ifneq ($(MAKECMDGOALS),)
 ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
