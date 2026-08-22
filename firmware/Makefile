@@ -281,16 +281,38 @@ endif
 # KBD_RF_CRYPT=0 explicitly, which also clears the markers so later defaulted
 # updates stop tripping this.
 CRYPT_BUILD_MARKERS := $(wildcard build/ch592f-slot*/kbd_rf_crypt.o)
-ifneq ($(filter update flash-factory,$(MAKECMDGOALS)),)
+# Cover every goal that PRODUCES a flashable artifact, not just the two that
+# flash one: `bundle` emits the .obb the OpenBoot CLI flashes directly and
+# `factory` emits the SWD whole-chip image, so both could silently hand over a
+# plaintext build. (Prerequisites still never appear in MAKECMDGOALS, so the
+# original reasoning holds for bundle-as-a-prerequisite-of-update.)
+CRYPT_GUARDED_GOALS := update flash-factory bundle factory
+ifneq ($(filter $(CRYPT_GUARDED_GOALS),$(MAKECMDGOALS)),)
 ifeq ($(KBD_RF_CRYPT),0)
 ifneq ($(CRYPT_BUILD_MARKERS),)
 ifeq ($(origin KBD_RF_CRYPT),command line)
-$(shell rm -f build/ch592f-slot*/kbd_rf_crypt.o)
+# Consent is recorded by a RECIPE, never by a parse-time $(shell): make expands
+# those during the read phase regardless of -n, so `make -n KBD_RF_CRYPT=0
+# update` -- a dry run, contractually side-effect-free -- used to delete the
+# markers and permanently disarm this guard for every later defaulted build.
+CRYPT_DOWNGRADE_ACK := 1
 else
 $(error the last build was ENCRYPTED and this goal would rebuild and flash PLAINTEXT. Pass the knobs on THIS command (e.g. `make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1 update OB_PORT=...`), or downgrade deliberately with an explicit KBD_RF_CRYPT=0)
 endif
 endif
 endif
+endif
+
+# This target is defined above `all`, so name the default goal explicitly or the
+# first target in the file silently becomes it.
+.DEFAULT_GOAL := all
+
+# Clearing the markers is a real build step: it runs only when the goal actually
+# executes, and `make -n` prints it instead of doing it.
+.PHONY: crypt-downgrade-ack
+crypt-downgrade-ack:
+ifeq ($(CRYPT_DOWNGRADE_ACK),1)
+	rm -f build/ch592f-slot*/kbd_rf_crypt.o
 endif
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
@@ -424,7 +446,7 @@ GDB        := $(PREFIX)gdb
 KBD_PROBE ?=
 PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
-.PHONY: all clean size size-check info gdbserver debug factory flash-factory \
+.PHONY: all clean size size-check info gdbserver debug factory flash-factory test \
         bundle update check-deps check-openboot-toolchain check-factory-slot \
         openboot-image openboot-test FORCE
 
@@ -502,6 +524,14 @@ size-check: $(BUILD)/$(TARGET).bin
 # clean. --skip-toolchain because verifying a SHA must not require GCC12 to
 # be installed. (The WCH SDK is vendored in-tree - see vendor/README.md - so
 # there is no SDK-revision half to this check.)
+# Host-only gate: no cross toolchain, no hardware, so it can run anywhere --
+# which is the point, because until now nothing ran this suite automatically and
+# the pins in it were only as good as someone remembering. Mirrors OpenDongle's
+# `make -C firmware test`. Not a release gate: shipping still needs the pinned
+# toolchains and the hardware matrix.
+test:
+	cd tests && $(PYTHON) -m unittest discover
+
 check-deps:
 	$(PYTHON) -I $(OPENBOOT)/firmware/check_dependencies.py \
 	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
@@ -592,7 +622,7 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
 	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
 
-factory: $(FACTORY_BIN)
+factory: crypt-downgrade-ack $(FACTORY_BIN)
 
 # Whole-chip factory install over SWD. Erases the code flash (NOT DataFlash:
 # the KBD2 bond at physical 0x74000 survives -E), writes the factory image at
@@ -600,7 +630,7 @@ factory: $(FACTORY_BIN)
 # values and its verify is disabled), then does a REAL power cycle: -b reboots
 # out of halt without re-running the boot path, so it would prove nothing
 # about first-power-on behavior.
-flash-factory: factory
+flash-factory: crypt-downgrade-ack factory
 	@command -v "$(MINICHLINK)" >/dev/null 2>&1 || { \
 	  echo "minichlink not found: $(MINICHLINK)" >&2; exit 1; }
 	@test -n "$(strip $(KBD_PROBE))" || { \
@@ -646,7 +676,7 @@ flash-factory: factory
 # the factory rule do not coordinate target ownership with each other, and
 # both recurse into the shared OpenBoot submodule build directory - run such
 # goals as separate invocations.
-bundle:
+bundle: crypt-downgrade-ack
 	+$(MAKE) SLOT=A $(SLOT_A_BIN)
 	+$(MAKE) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \
@@ -664,7 +694,7 @@ bundle:
 # OpenBoot's COMMIT attests only length+CRC, so this is the only guard
 # against cross-flashing a dongle CH592 image on a shared bench.
 OB_PORT ?=
-update: bundle
+update: crypt-downgrade-ack bundle
 	@test -n "$(strip $(OB_PORT))" || { \
 	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
 	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \
