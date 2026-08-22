@@ -284,16 +284,27 @@ An independent audit reached the same AES/radio-overlap hypothesis that §0
 proved, and proposed two of the experiments that proved it. Its still-open
 findings, verified against source before the file was retired:
 
-- **Capability negotiation is structurally broken, with a sharper mechanism
-  than "the advert never lands":** the receiver latches the pre-beacon
-  capability advert and then explicitly clears `rf_crypt_peer_capable` when it
-  accepts the first fresh/unbonded beacon (OpenDongle `rf_task.c`, the
-  peer-change accept path) — the pairing sequence erases the very latch it was
-  meant to set. The advert carries no keyboard MAC, so the receiver cannot
-  safely bind a pre-beacon advert to the identity that follows; the redesign
-  must bind capability to the peer, not to arrival order. Also: the "one
-  advert in four" comment does not match the code (first two slots, then one
-  in eight — `pair_bcast_count & 0x07`).
+- **Capability negotiation is structurally broken** — three separate claims,
+  now with three different statuses:
+  - *"the receiver explicitly clears `rf_crypt_peer_capable` when it accepts the
+    first fresh/unbonded beacon"* — **FIXED, and this description is now wrong.**
+    The accept-time clear was removed: OpenDongle's
+    `rf_crypt_beacon_accept_latches()` deliberately does NOT touch
+    `peer_capable` (`(void)peer_capable;` is the contract), pinned by
+    `firmware/tests/test_rf_negotiation.py`. Do not re-derive a fix from this
+    sentence.
+  - *the "one advert in four" comment does not match the code* — **correct, and
+    FIXED 2026-08-22.** The real schedule was slots 0,1 then one in eight, and
+    that was the actual defect: a receiver commits on the first beacon it hears,
+    so an advert one slot in eight usually arrived too late. Measured 0/10 in
+    the documented pairing order. The advert now leads every beacon; 12/12 in
+    both orders.
+  - *the advert carries no keyboard MAC, so capability cannot be bound to the
+    peer that follows* — **STILL OPEN.** Arrival order now works reliably, but
+    the advert remains anonymous and unauthenticated, so it is a hint rather
+    than a binding. Binding capability to a proven peer identity is KEXv1's job
+    (see `OpenDongle/firmware/docs/key-establishment.md`), not a schedule
+    change.
 - **Receiver `BondWrite` persists but does not activate.** IAP `BondWrite`
   calls only `bond_save()`: no key install, no `rf_crypt_bond_enc`, no fresh
   session. Runtime state is populated only at bond LOAD (boot). The

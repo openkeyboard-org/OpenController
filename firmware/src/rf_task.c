@@ -1507,10 +1507,19 @@ static void rf_pair_broadcast(void)
  * byte and the receiver classifies pair traffic by length, so this LEN-3 frame
  * is a separate transmission that a receiver without the feature ignores.
  *
- * It rides one broadcast slot in four rather than doubling every slot: TX
- * completion is asynchronous (TX_MODE_TX_FINISH re-arms RX), so two
- * back-to-back RF_Tx calls in one slot would need sequencing, and the receiver
- * only has to see this once during the pairing window. */
+ * It LEADS every beacon by KBD_PAIR_ADVERT_LEAD_TICKS on the same channel, so
+ * the first frame a receiver hears is an advert wherever in the stream it
+ * joins. Both halves of the slot are separate PAIR_BCAST firings -- TX
+ * completion is asynchronous (TX_MODE_TX_FINISH re-arms RX), so two RF_Tx calls
+ * cannot be chained inside one firing; the schedule sequences them instead, and
+ * kbd_pair_slot_next() owns that policy.
+ *
+ * The old comment here said the receiver "only has to see this once during the
+ * pairing window". That was the defect: the receiver commits the bond on the
+ * FIRST beacon it hears and never re-arms RX on the pair AA again before
+ * promoting, so the advert must precede THAT beacon, not merely appear
+ * sometime. Under the old one-in-eight schedule it usually did not --
+ * capability latched 0/10 in the documented pairing order. */
 static void rf_pair_send_cap_advert(uint16_t next_delay)
 {
     uint8_t cap[KBD_CRYPT_LEN_CAP];
