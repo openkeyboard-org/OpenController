@@ -176,18 +176,23 @@ void KeyboardUart_SendCryptFail(uint8_t latched, uint8_t len, uint32_t session,
     uart_send_byte(chk);
 }
 
-void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n)
+#endif
+#if KBD_CRYPT_BENCH_KEY || KBD_TX_OUTCOME
+/* [lead][n x u32 LE][chk], chk seeded WITH the lead byte (so the host can just
+ * sum the whole frame except its last byte). Shared by every u32-vector reply
+ * so a second one cannot drift from the first's checksum rule. */
+static void uart_send_u32_frame(uint8_t lead, const uint32_t *v, uint8_t n)
 {
-    uint8_t chk = 0x5D;
+    uint8_t chk = lead;
     uint8_t i, b;
 
-    if (!uart_send_byte(0x5D)) {
+    if (!uart_send_byte(lead)) {
         return;
     }
     for (i = 0; i < n; i++) {
         uint8_t k;
         for (k = 0; k < 4u; k++) {
-            b = (uint8_t)(counters[i] >> (8u * k));
+            b = (uint8_t)(v[i] >> (8u * k));
             if (!uart_send_byte(b)) {
                 return;   /* TX wedged: abandon rather than desync the checksum */
             }
@@ -195,6 +200,20 @@ void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n)
         }
     }
     uart_send_byte(chk);
+}
+
+#endif
+#if KBD_CRYPT_BENCH_KEY
+void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n)
+{
+    uart_send_u32_frame(0x5Du, counters, n);
+}
+#endif
+
+#if KBD_TX_OUTCOME
+void KeyboardUart_SendTxOutcome(const uint32_t *counters, uint8_t n)
+{
+    uart_send_u32_frame(0x62u, counters, n);
 }
 #endif
 
@@ -221,6 +240,10 @@ static uint8_t expected_for_header(uint8_t b)
         return 2;    /* [B0][chk] -- read-only, no body */
     case KBD_UART_CMD_CRYPT_VERIFY:
         return 3;    /* [B1][mode][chk] */
+#endif
+#if KBD_TX_OUTCOME
+    case KBD_UART_CMD_TX_OUTCOME:
+        return 2;    /* [B2][chk] -- read-only, no body */
 #endif
     case 0xA9:
         /* BLE device-name frames are FIXED 21 bytes on the wire: the host
@@ -250,6 +273,10 @@ static uint8_t frame_is_valid(void)
                 checksum(rx_buf, chk_idx) == rx_buf[chk_idx]);
     } else if (cmd == 0x61) {
         return rx_buf[1] == 0x0D && rx_buf[2] == 0x0A;
+#if KBD_TX_OUTCOME
+    } else if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        return checksum(rx_buf, 1) == rx_buf[1];
+#endif
 #if KBD_CRYPT_BENCH_KEY
     } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
         return checksum(rx_buf, 17) == rx_buf[17];
@@ -305,6 +332,13 @@ static void dispatch_frame(void)
         KeyboardUart_SendAck();
         if (frame_cb) {
             frame_cb(KBD_UART_CMD_CRYPT_VERIFY, rx_buf[1], 0, 0);
+        }
+#endif
+#if KBD_TX_OUTCOME
+    } else if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        /* Same no-ack contract as 0xAF: the 0x62 reply IS the response. */
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_TX_OUTCOME, 0, 0, 0);
         }
 #endif
     } else {

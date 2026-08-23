@@ -99,6 +99,32 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         return;
     }
 
+#if KBD_TX_OUTCOME
+    if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        /* Order MUST match the layout documented in keyboard_uart.h. Flattened
+         * here rather than memcpy'd so the ordering is visible at the one place
+         * a reader checks it against the host parser. */
+        uint32_t v[56];
+        uint8_t i, j;
+
+        for (i = 0; i < 4u; i++) {
+            v[i]        = txo_start[i];
+            v[4u + i]   = txo_refuse[i];
+            v[8u + i]   = txo_finish[i];
+            v[12u + i]  = txo_fail[i];
+            v[16u + i]  = txo_noterm[i];
+            v[20u + i]  = txo_other[i];
+        }
+        for (i = 0; i < 4u; i++) {
+            for (j = 0; j < 8u; j++) {
+                v[24u + (i * 8u) + j] = txo_dpoll[i][j];
+            }
+        }
+        KeyboardUart_SendTxOutcome(v, 56u);
+        return;
+    }
+#endif
+
     if (cmd == KBD_UART_CMD_CRYPT_FAIL) {
         KeyboardUart_SendCryptFail(kbd_crypt_selfck_latched,
                                    kbd_crypt_selfck_len,

@@ -49,4 +49,19 @@ extern volatile uint32_t kbd_crypt_sess_ok;
 extern volatile uint32_t kbd_crypt_sess_rx;
 #endif
 
+#if KBD_TX_OUTCOME
+/* Transmit-outcome counters. Indexed by len_class: 0 = 1-byte bare ack,
+ * 1 = 10-byte plaintext report, 2 = 22-byte sealed frame, 3 = other. Written
+ * only AFTER RF_Tx has been committed, so reading or adding to them cannot
+ * delay a response. See KBD_UART_CMD_TX_OUTCOME in keyboard_uart.h for the
+ * wire layout, and the block comment in rf_task.c for why they exist. */
+extern volatile uint32_t txo_start[4];
+extern volatile uint32_t txo_refuse[4];
+extern volatile uint32_t txo_finish[4];
+extern volatile uint32_t txo_fail[4];
+extern volatile uint32_t txo_noterm[4];
+extern volatile uint32_t txo_other[4];
+extern volatile uint32_t txo_dpoll[4][8];
+#endif
+
 #endif

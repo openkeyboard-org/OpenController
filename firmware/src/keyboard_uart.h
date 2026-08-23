@@ -82,6 +82,44 @@ uint8_t KeyboardUart_TxIdle(void);
  * in-situ A/B that separates "the verify's timing shift masks the defect"
  * from "something else changed". */
 #define KBD_UART_CMD_CRYPT_VERIFY 0xB1u
+
 #endif
 
+#if KBD_TX_OUTCOME
+/* BENCH ONLY (KBD_TX_OUTCOME): read the transmit-outcome counters.
+ *
+ *   request [0xB2][chk]
+ *   reply   [0x62][56 x u32 LE][chk]      226 bytes, chk seeded with 0x62
+ *
+ * Reply order, all u32 LE, every 4-wide group indexed by len_class
+ * (0 = 1-byte bare ack, 1 = 10-byte plaintext report, 2 = 22-byte sealed
+ * frame, 3 = other):
+ *
+ *   [ 0.. 3] txo_start    RF_Tx accepted the frame
+ *   [ 4.. 7] txo_refuse   RF_Tx refused synchronously
+ *   [ 8..11] txo_finish   TX_MODE_TX_FINISH consumed it
+ *   [12..15] txo_fail     TX_MODE_TX_FAIL consumed it
+ *   [16..19] txo_noterm   superseded with no terminal callback at all
+ *   [20..23] txo_other    terminated via the catch-all sta branch
+ *   [24..55] txo_dpoll    poll-arrival -> RF_Tx latency, 8 buckets per class,
+ *                         136.5 us each (bucket 7 saturates). The connection
+ *                         interval is 875 us, so bucket 6+ means the frame
+ *                         went out having already missed most of its slot.
+ *
+ * Class 2 against class 0 is the built-in control: bare acks and sealed frames
+ * leave the same slot through the same code, so any difference between them
+ * cannot be blamed on the radio or the host.
+ *
+ * COST: 226 bytes busy-waited through the UART FIFO from the same cooperative
+ * main loop that services the poll response -- roughly 18 ms at 115200 baud.
+ * Read it BETWEEN trials, never during one, or the reply perturbs the very
+ * timing being measured. */
+#define KBD_UART_CMD_TX_OUTCOME 0xB2u
+
+/* Emit [0x62][n x u32 LE][checksum]. See KBD_UART_CMD_TX_OUTCOME below.
+ * Gated on KBD_TX_OUTCOME alone, NOT on KBD_CRYPT_BENCH_KEY: the whole point is
+ * to build a PLAINTEXT control with the same instrument, and a plaintext build
+ * has no bench key surface at all. */
+void KeyboardUart_SendTxOutcome(const uint32_t *counters, uint8_t n);
+#endif
 #endif

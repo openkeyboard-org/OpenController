@@ -45,6 +45,12 @@
 #ifndef STOCK_ISR_FAST_RESPONSE
 #define STOCK_ISR_FAST_RESPONSE 0
 #endif
+/* Omit the RF_Shut() before the response TX. Prerequisite for
+ * STOCK_ISR_FAST_RESPONSE: see the call site for why RF_Shut is what makes the
+ * ISR path unsafe. Default off until soaked. */
+#ifndef RESP_TX_NO_SHUT
+#define RESP_TX_NO_SHUT 0
+#endif
 /* Fast-response fix (matches stock firmwareB.bin 0x20000f06): skip the redundant
  * RF_SetChannel before the response TX -- the radio is already on the poll channel;
  * re-setting it costs a ~150us PLL relock that misses the stock dongle's RX window. */
@@ -447,6 +453,71 @@ static uint8_t mac_equal(const uint8_t *a, const uint8_t *b)
     }
     return 1;
 }
+
+#if KBD_TX_OUTCOME
+/* Transmit-outcome instrumentation. Answers ONE question about the encrypted
+ * link's measured HID loss (26% of burst-adjacent report changes, 4.3% of
+ * isolated ones, versus 0% on plaintext): are the missing frames NEVER
+ * TRANSMITTED, or transmitted into a phase that misses the receiver's
+ * post-poll RX window? kbd_crypt_tx_sealed cannot answer it -- it increments
+ * BEFORE RF_Tx is called.
+ *
+ * DISCIPLINE, because this instruments the very path whose timing is the
+ * suspect:
+ *   - NOTHING is added between rf_do_response_tx() entry and the RF_Tx call.
+ *     Every counter below is written AFTER RF_Tx has returned, deriving what
+ *     it needs from tx_len, which is still live. The measured path is
+ *     bit-identical to the uninstrumented build up to the transmit.
+ *   - No callable helper anywhere in the response path or the radio callback.
+ *     A flash-resident helper reached from a __HIGH_CODE path is exactly the
+ *     shape that degraded the dongle link (an XIP call in the radio IRQ);
+ *     these are macros so they stay in SRAM with their caller.
+ *   - Plain .bss, NOT .diag_safe: that window has one u32 left, and keeping
+ *     out of it also keeps both_ends.py's absolute addresses stable.
+ *
+ * len_class indexes every array: 0 = 1-byte bare ack, 1 = 10-byte plaintext
+ * report, 2 = 22-byte sealed frame, 3 = anything else. Comparing class 2
+ * against class 0 on the SAME link is the control: both are transmitted from
+ * the same slot by the same code, so a difference between them is not
+ * attributable to the radio or the host. */
+volatile uint32_t txo_start[4];      /* RF_Tx accepted the frame            */
+volatile uint32_t txo_refuse[4];     /* RF_Tx refused synchronously         */
+volatile uint32_t txo_finish[4];     /* TX_MODE_TX_FINISH consumed it       */
+volatile uint32_t txo_fail[4];       /* TX_MODE_TX_FAIL consumed it         */
+volatile uint32_t txo_noterm[4];     /* superseded with no terminal callback */
+/* The catch-all `sta` branch. Instrumented for the same reason the two named
+ * ones are: a transmit that terminates here would otherwise leave txo_inflight
+ * set, and the NEXT transmit would charge it to txo_noterm -- turning an
+ * ordinary alternate completion into fabricated evidence of a lost frame. */
+volatile uint32_t txo_other[4];
+/* Poll-arrival -> RF_Tx latency, per len_class, in 8 buckets of 8192 SysTick
+ * ticks (136.5 us at 60 MHz); bucket 7 saturates. The connection interval is
+ * 875 us, so a frame landing in bucket 6+ has missed most of its slot. This is
+ * the direct test of "transmitted, but too late". */
+volatile uint32_t txo_dpoll[4][8];
+/* bit0 = a transmit is in flight; bits[2:1] = its len_class. Lets the radio
+ * status callback attribute TX_FINISH/TX_FAIL to the right class without the
+ * callback having to know anything about the frame. */
+volatile uint8_t  txo_inflight;
+
+/* 22 is spelled out rather than taken from KBD_CRYPT_LEN_BOOT_KBD so this
+ * builds in a PLAINTEXT image too -- the instrumented plaintext control is the
+ * whole reason the counters exist, and that build has no crypt header. */
+#define TXO_LEN_SEALED 22u
+/* Consume an in-flight frame from the radio callback. The txo_inflight test is
+ * load-bearing: these callbacks also fire for transmissions this module never
+ * armed, and counting those would inflate the terminal totals. */
+#define TXO_TERM(arr)                                                         \
+    do {                                                                      \
+        if (txo_inflight & 1u) {                                              \
+            arr[(txo_inflight >> 1) & 3u]++;                                  \
+            txo_inflight = 0u;                                                \
+        }                                                                     \
+    } while (0)
+#else
+#define TXO_TERM(arr) do { } while (0)
+#endif
+
 
 static uint32_t rtc_read_32k(void)
 {
@@ -1082,6 +1153,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FINISH) {
         RF_DIAG_INC(rf_cb_count[3]);
+        TXO_TERM(txo_finish);
         response_pending = 0;   /* response done -> hop may retune again */
 #if KBD_RF_CRYPT
         /* The radio is quiet now: release the deferred seal arm (see
@@ -1098,6 +1170,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FAIL) {
         RF_DIAG_INC(rf_cb_count[4]);
+        TXO_TERM(txo_fail);
         response_pending = 0;
 #if KBD_RF_CRYPT
         if (crypt_arm_after_tx) {
@@ -1110,6 +1183,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
     }
 
     RF_DIAG_INC(rf_cb_count[5]);
+    TXO_TERM(txo_other);
     rf_set_event_atomic(RF_EVT_RX_RESTART);
 }
 
@@ -1200,7 +1274,27 @@ static void rf_do_response_tx(void)
         hid_resend--;
     }
     RF_DIAG_SET(last_rf_op, 3);
+#if !RESP_TX_NO_SHUT
+    /* Stop the armed RX so the radio can turn around and transmit.
+     *
+     * This is the blocker for moving the response into the TMR0 turnaround ISR:
+     * RF_Shut() reaches tmos_stop_task() and tmos_memory_free(), and the vendor
+     * TMOS mutators guard themselves by masking IRQ 21 only -- TMR0 is IRQ 16.
+     * A TMR0 ISR landing inside a main-loop tmos_* critical section would
+     * re-enter the allocator and the timer list on half-mutated state. Removing
+     * this call is a PREREQUISITE for that experiment -- it does not by itself
+     * make RF_Tx ISR-safe, which is still unproven: RF_Tx touches substantial
+     * vendor RF state and calls TMOS_SysRegister.
+     *
+     * It is redundant here. Disassembly of LIBCH59xBLE.a shows RF_Tx calls
+     * phy_status_clear(), which inspects the live LLE state and issues
+     * ble_ll_hw_api_shut() itself when it is not idle -- and under LLE_MODE_BASIC
+     * the radio is ALREADY idle by this point, because rf_rx_basic_rxProcess
+     * calls rf_stop() before it invokes RF_2G4StatusCallBack. What RF_Tx does
+     * NOT duplicate is RF_Shut's software cleanup; the RX re-arm in
+     * rf_start_rx() begins with its own RF_Shut, which normalises that. */
     RF_Shut();
+#endif
 #if !STOCK_RESP_NO_SETCH
     /* Redundant: the radio is already on the poll channel from rf_start_rx, and
      * re-setting it forces a ~150us PLL relock -- pushing the response outside the
@@ -1211,6 +1305,53 @@ static void rf_do_response_tx(void)
     uint8_t tx_status = RF_Tx(tx_payload, tx_len, 0xFF, 0xFF);
     RF_DIAG_SET(rf_last_tx_status, tx_status);
     RF_DIAG_INC(rf_connected_tx_count);
+#if KBD_TX_OUTCOME
+    /* Post-commit only: the transmit is already handed to the radio, so none
+     * of this can delay it. ll_rx_cb_last_sys is the SysTick stamp taken when
+     * this poll arrived (already maintained under RF_DIAG_COUNTERS), so the
+     * latency comes for free. */
+    {
+        /* Classify with an explicit if-chain, not a ternary cascade: GCC turned
+         * the cascade into a .rodata jump table, and reading it here is an XIP
+         * FLASH access while this SRAM-resident routine sits inside an
+         * in-progress transmission -- the same shape that degraded the dongle
+         * link when a helper went flash-resident in its radio IRQ path. */
+        uint8_t cls = 3u;
+        uint32_t d, b;
+
+        if (tx_len == 1u) {
+            cls = 0u;
+        } else if (tx_len == 10u) {
+            cls = 1u;
+        } else if (tx_len == TXO_LEN_SEALED) {
+            cls = 2u;
+        }
+
+        /* Claim the in-flight slot FIRST. TX_FINISH/TX_FAIL can arrive as soon
+         * as RF_Tx returns, and a terminal that lands before this store is
+         * silently dropped -- which would then be charged to txo_noterm on the
+         * next transmit, fabricating evidence of a lost frame. The remaining
+         * window is a couple of instructions against an ~88 us transmission,
+         * but it costs nothing to make it as small as possible. */
+        if (txo_inflight & 1u) {
+            /* Previous frame produced no terminal callback we recognised
+             * before this slot superseded it. */
+            txo_noterm[(txo_inflight >> 1) & 3u]++;
+        }
+        txo_inflight = (tx_status != 0) ? 0u : (uint8_t)(1u | (cls << 1));
+
+        if (tx_status != 0) {
+            txo_refuse[cls]++;
+        } else {
+            txo_start[cls]++;
+        }
+        /* Latency LAST: it is the only part that reads a peripheral, and it is
+         * pure telemetry -- nothing downstream depends on it. */
+        d = systick_read() - ll_rx_cb_last_sys;
+        b = d >> 13;
+        txo_dpoll[cls][b > 7u ? 7u : b]++;
+    }
+#endif
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
         response_pending = 0;

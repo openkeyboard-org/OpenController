@@ -236,6 +236,13 @@ CFLAGS += -DRF_TURNAROUND_COUNT=$(RF_TURNAROUND_COUNT)
 # already on the just-received poll channel, and re-setting it misses stock RX.
 STOCK_RESP_NO_SETCH ?= 1
 CFLAGS += -DSTOCK_RESP_NO_SETCH=$(STOCK_RESP_NO_SETCH)
+# Omit the RF_Shut() before the response TX. This is the prerequisite for ever
+# transmitting the response from the TMR0 ISR: RF_Shut reaches tmos_stop_task /
+# tmos_memory_free, whose vendor guards mask IRQ 21 only while TMR0 is IRQ 16.
+# A real knob (not an EXTRA_CFLAGS define) so the A/B rebuilds are honest --
+# CONFIG_FINGERPRINT picks it up and the two images cannot be confused.
+RESP_TX_NO_SHUT ?= 0
+CFLAGS += -DRESP_TX_NO_SHUT=$(RESP_TX_NO_SHUT)
 # Stock-interop fix: pair-ACK type tag is the previous connected-hop seed; the
 # first connected poll is seed+1. Override only for bench regressions.
 STOCK_CONNECT_IDX_BIAS ?= 1
@@ -268,9 +275,23 @@ CFLAGS += -DKBD_CRYPT_BENCH_KEY=$(KBD_CRYPT_BENCH_KEY)
 # PCB wires the PB12/PB13 remap, which remains the default.
 KBD_UART1_DEFAULT_PINS ?= 0
 CFLAGS += -DKBD_UART1_DEFAULT_PINS=$(KBD_UART1_DEFAULT_PINS)
+# BENCH ONLY: transmit-outcome counters (UART 0xB2). Answers whether a response
+# frame the keyboard believes it sent was ever accepted by the radio, and how
+# late in its poll slot it went out -- neither of which kbd_crypt_tx_sealed can
+# say, because that increments BEFORE RF_Tx is called. Every counter is written
+# AFTER the transmit is committed, so the measured path is unchanged.
+# Deliberately independent of KBD_CRYPT_BENCH_KEY so the same tree can be built
+# with and without it for an A/B against the same metric.
+KBD_TX_OUTCOME ?= 0
+CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
 ifeq ($(KBD_CRYPT_BENCH_KEY),1)
 ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
+endif
+endif
+ifeq ($(KBD_TX_OUTCOME),1)
+ifneq ($(RF_DIAG_COUNTERS),1)
+$(error KBD_TX_OUTCOME=1 needs RF_DIAG_COUNTERS=1 - the poll-arrival timestamp it measures latency against (ll_rx_cb_last_sys) is maintained only there)
 endif
 endif
 # `make update` REBUILDS both slots (update: bundle), so invoking it without
