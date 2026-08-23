@@ -104,7 +104,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         /* Order MUST match the layout documented in keyboard_uart.h. Flattened
          * here rather than memcpy'd so the ordering is visible at the one place
          * a reader checks it against the host parser. */
-        uint32_t v[56];
+        uint32_t v[64];
         uint8_t i, j;
 
         for (i = 0; i < 4u; i++) {
@@ -120,7 +120,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                 v[24u + (i * 8u) + j] = txo_dpoll[i][j];
             }
         }
-        KeyboardUart_SendTxOutcome(v, 56u);
+        for (i = 0; i < 8u; i++) {
+            v[56u + i] = txo_arm[i];
+        }
+        KeyboardUart_SendTxOutcome(v, 64u);
         return;
     }
 #endif

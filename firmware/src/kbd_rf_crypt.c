@@ -596,10 +596,19 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
      * one counter -- the invariant the old read-then-clear only held because
      * both halves ran in the same cooperative context. The acquire stops the
      * slot loads being hoisted above the claim. */
-    uint32_t idx = __atomic_exchange_n(&seal_live, SEAL_NONE, __ATOMIC_ACQUIRE);
+    uint32_t idx;
     const seal_slot_t *slot;
 
-    if (idx > 1u || out == 0 || out_len == 0) {
+    /* Validate the CALLER before claiming. Consuming a published frame and then
+     * rejecting the call would destroy a good frame on a caller error -- the
+     * pre-two-slot code checked its arguments first and this must not regress
+     * that. Only the ctrl-shape check below may consume, because that one is a
+     * property of the frame rather than of the caller. */
+    if (out == 0 || out_len == 0) {
+        return KBD_CRYPT_SHAPE;
+    }
+    idx = __atomic_exchange_n(&seal_live, SEAL_NONE, __ATOMIC_ACQUIRE);
+    if (idx > 1u) {
         return KBD_CRYPT_SHAPE;
     }
     slot = &seal_slot[idx];

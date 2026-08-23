@@ -62,6 +62,7 @@ extern volatile uint32_t txo_fail[4];
 extern volatile uint32_t txo_noterm[4];
 extern volatile uint32_t txo_other[4];
 extern volatile uint32_t txo_dpoll[4][8];
+extern volatile uint32_t txo_arm[8];
 #endif
 
 #endif

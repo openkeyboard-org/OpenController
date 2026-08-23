@@ -89,7 +89,7 @@ uint8_t KeyboardUart_TxIdle(void);
 /* BENCH ONLY (KBD_TX_OUTCOME): read the transmit-outcome counters.
  *
  *   request [0xB2][chk]
- *   reply   [0x62][56 x u32 LE][chk]      226 bytes, chk seeded with 0x62
+ *   reply   [0x62][64 x u32 LE][chk]      258 bytes, chk seeded with 0x62
  *
  * Reply order, all u32 LE, every 4-wide group indexed by len_class
  * (0 = 1-byte bare ack, 1 = 10-byte plaintext report, 2 = 22-byte sealed
@@ -101,6 +101,9 @@ uint8_t KeyboardUart_TxIdle(void);
  *   [12..15] txo_fail     TX_MODE_TX_FAIL consumed it
  *   [16..19] txo_noterm   superseded with no terminal callback at all
  *   [20..23] txo_other    terminated via the catch-all sta branch
+ *   [56..63] txo_arm      why rf_crypt_arm() left no frame, indexed by
+ *                         kbd_crypt_status_t (0 OK, 1 SHAPE, 2 INACTIVE,
+ *                         3 BUSY, 4 EXHAUSTED, 5 FAULT_ENGINE)
  *   [24..55] txo_dpoll    poll-arrival -> RF_Tx latency, 8 buckets per class,
  *                         136.5 us each (bucket 7 saturates). The connection
  *                         interval is 875 us, so bucket 6+ means the frame
@@ -110,7 +113,7 @@ uint8_t KeyboardUart_TxIdle(void);
  * leave the same slot through the same code, so any difference between them
  * cannot be blamed on the radio or the host.
  *
- * COST: 226 bytes busy-waited through the UART FIFO from the same cooperative
+ * COST: 258 bytes busy-waited through the UART FIFO from the same cooperative
  * main loop that services the poll response -- roughly 18 ms at 115200 baud.
  * Read it BETWEEN trials, never during one, or the reply perturbs the very
  * timing being measured. */

@@ -261,6 +261,9 @@ static void rf_crypt_arm(uint8_t ctrl_hint)
 #endif
     st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD,
                               hid_report, sizeof(hid_report));
+#if KBD_TX_OUTCOME
+    txo_arm[(unsigned)st < 8u ? (unsigned)st : 7u]++;
+#endif
     if (st == KBD_CRYPT_FAULT_ENGINE || st == KBD_CRYPT_EXHAUSTED) {
         kbd_crypt_end_session();
     }
@@ -499,6 +502,12 @@ volatile uint32_t txo_dpoll[4][8];
  * status callback attribute TX_FINISH/TX_FAIL to the right class without the
  * callback having to know anything about the frame. */
 volatile uint8_t  txo_inflight;
+/* Why rf_crypt_arm() failed to leave a frame ready. seal_miss says a slot wanted
+ * a sealed frame and had none; it cannot say whether the arm was never run, ran
+ * and was refused, or ran and killed the session. Indexed by kbd_crypt_status_t
+ * (0 OK, 1 SHAPE, 2 INACTIVE, 3 BUSY, 4 EXHAUSTED, 5 FAULT_ENGINE), with any
+ * out-of-range status folded into the last bucket. */
+volatile uint32_t txo_arm[8];
 
 /* 22 is spelled out rather than taken from KBD_CRYPT_LEN_BOOT_KBD so this
  * builds in a PLAINTEXT image too -- the instrumented plaintext control is the
