@@ -467,9 +467,11 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
      * its bare ack), and the caller's re-arm tries again in the next cycle --
      * never a poisoned frame, and never a torn-down session for a transient. */
     for (uint8_t attempt = 0; ; attempt++) {
-        uint8_t s0b[16];
+#if !KBD_AES_SOFTWARE
+        uint8_t s0b[16];   /* pass-2 scratch; no pass 2 with the software cipher */
         uint8_t xb[16];
         uint8_t diff;
+#endif
 
         /* Pass 1: S_0 masks the tag; S_1 is the payload keystream (bodies are
          * <= 8 bytes, so exactly one keystream block). B0 depends only on the
@@ -510,6 +512,17 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
             }
         }
 
+#if KBD_AES_SOFTWARE
+        /* Pass 2 is skipped entirely with the software cipher. The whole
+         * double-compute exists to catch the CH592 accelerator returning a
+         * preempted block's stale output; a pure-C cipher has no engine state
+         * for the radio to corrupt, so an honest recompute could only ever
+         * agree. Skipping it halves the seal from 22 blocks to 11 AND removes
+         * the retry, which on this bench fired on 39-44% of seals and roughly
+         * doubled the seal's duration -- the variance that leaves a response
+         * slot with no frame ready. */
+        break;
+#else
         /* Pass 2: re-derive every block into scratch and accumulate the
          * differences (no early exit; the comparison is not secret-dependent
          * in a way that matters, but staying branch-free is free here). */
@@ -564,6 +577,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
             kbd_crypt_release();
             return KBD_CRYPT_BUSY;
         }
+#endif
     }
 
     slot->tag = tag;

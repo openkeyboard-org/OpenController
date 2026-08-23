@@ -27,7 +27,7 @@ import ccm_ref
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent / "src"
 CRYPT_C = SRC / "kbd_rf_crypt.c"
-AES_SW_C = HERE / "aes_sw.c"
+AES_SW_C = SRC / "aes_sw.c"
 
 TAG_BOOT, TAG_CONSUMER, TAG_MOUSE = 0xA1, 0xA3, 0xA8
 TAG_SESSION = 0xA5

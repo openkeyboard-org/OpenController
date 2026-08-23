@@ -202,6 +202,15 @@ void aes_sw_expand_key(aes_sw_ctx_t *ctx, const uint8_t key[16])
                 (((w[4*r+3] >> (8*row)) & 0xff) << 24);
 }
 
+/* SRAM-resident on the target. Measured on CH5xx silicon this cipher costs
+ * 30,721 cycles flash-resident against 1,680 relocated -- 18x, because the
+ * dominant cost is instruction fetch, not instructions. Left in flash it would
+ * be ~512 us per block at 60 MHz and utterly unusable inside a poll slot.
+ * KBD_AES_SW_HIGHCODE is empty for host builds, which have no .highcode. */
+#ifndef KBD_AES_SW_HIGHCODE
+#define KBD_AES_SW_HIGHCODE
+#endif
+KBD_AES_SW_HIGHCODE
 void aes_sw_encrypt_block(const aes_sw_ctx_t *ctx, const uint8_t in[16],
                           uint8_t out[16])
 {

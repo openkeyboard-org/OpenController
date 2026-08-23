@@ -385,7 +385,30 @@ APP_SRC += src/kbd_image_id.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # Link encryption (see KBD_RF_CRYPT above). Compiled only when enabled.
 ifeq ($(KBD_RF_CRYPT),1)
+# AES backend behind the hal_aes seam.
+#
+#   hw (default) -- the CH592 accelerator. Fast per block (~14.5 us) but it
+#     silently returns the PREVIOUS block's output when preempted by the BLEB
+#     radio interrupt, which is why kbd_rf_crypt.c double-computes every seal
+#     and retries. Measured 39-44% of seals hit that collision.
+#   sw -- the portable cipher, SRAM-resident (~28 us/block at 60 MHz). No engine
+#     state to corrupt, so no double-compute and no retry: a seal goes from
+#     22-plus blocks of variable cost to 11 of fixed cost.
+#
+# The cipher MUST be relocated into .highcode: flash-resident it measures 18x
+# slower (~512 us/block), which is unusable inside an 875 us poll slot.
+KBD_AES_BACKEND ?= hw
+ifeq ($(KBD_AES_BACKEND),hw)
 APP_SRC += src/hal_aes_ch592.c
+else ifeq ($(KBD_AES_BACKEND),sw)
+APP_SRC += src/hal_aes_sw.c src/aes_sw.c
+# Spell the attribute out rather than reusing __HIGH_CODE: aes_sw.c is shared,
+# header-free portable C and must not have to include a CH592 SDK header.
+CFLAGS += -DKBD_AES_SW_HIGHCODE='__attribute__((section(".highcode")))'
+CFLAGS += -DKBD_AES_SOFTWARE=1
+else
+$(error KBD_AES_BACKEND must be hw or sw, got '$(KBD_AES_BACKEND)')
+endif
 APP_SRC += src/kbd_rf_crypt.c
 endif
 
