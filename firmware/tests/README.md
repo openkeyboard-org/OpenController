@@ -41,6 +41,14 @@ these copies go stale and the tests would happily grade the keyboard against a
 format nothing speaks. Re-copy them whenever the OpenDongle crypt branch moves,
 and treat a disagreement as the receiver being right.
 
+`test_vendored_references.py` checks the trust chain this table claims, which
+until then was asserted but never exercised: nothing in this repo consumed
+`aes_vectors.py` at all. It grades `ccm_ref.py` against the FIPS-197 ECB and
+RFC 3610 CCM vectors, and asserts those vectors really are at the link's CCM
+parameters (M=8, L=2) -- so a re-copy that brings across a mangled reference or
+a different parameter set fails here instead of silently mis-grading the
+keyboard.
+
 The pinned end-to-end vector in `test_pinned_on_silicon_vector` is the one
 assertion immune to that drift: it is a fixed byte string taken from
 OpenDongle's on-silicon suite (`firmware/validation/aes_validate.c`), so it

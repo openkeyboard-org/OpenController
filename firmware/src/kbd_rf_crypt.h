@@ -34,11 +34,19 @@
  * kbd_crypt_seal_finish() -- which runs in the response path -- selects one and
  * emits the frame WITHOUT CALLING THE AES ENGINE AT ALL.
  *
- * That is worth the eight extra block encryptions. It keeps the 100 us
+ * That is worth the extra block encryptions. It keeps the 100 us
  * poll-to-response turnaround free of crypto entirely, and it removes any
  * possibility of the response path racing main-loop use of a cipher that is
- * explicitly not reentrant. The extra work lands where there is no deadline:
- * ~160 us per report against a poll interval of ~17.5 ms.
+ * explicitly not reentrant. The extra work lands where there is no deadline.
+ *
+ * The cost figures here USED to say "eight extra block encryptions" and
+ * "~160 us per report". Both predate the seal double-compute
+ * (kbd_crypt_seal_begin computes the whole seal twice and requires the passes
+ * to agree). One pass is B0 + CTRL_VARIANTS x (AAD + MSG) + two CTR blocks
+ * = 1 + 4x2 + 2 = 11 blocks, so a normal seal is now ~22 and a caught
+ * disagreement (kbd_crypt_seal_redo) costs another pass on top.
+ * [MEASUREMENT REQUIRED] for the microsecond figure -- do not quote the old
+ * ~160 us, it is roughly half the current work.
  *
  * COUNTER DISCIPLINE -- two rules, both load-bearing for nonce uniqueness.
  *
@@ -198,8 +206,12 @@ void kbd_crypt_init(void);
 void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES],
                            uint32_t ctr_start);
 
-/* Largest permitted counter start, leaving >= 2^31 values -- about two years of
- * continuous transmission at the keepalive rate. A larger start is clamped. */
+/* Bound on the counter, leaving >= 2^31 values -- about two years of continuous
+ * transmission at the keepalive rate. A start at or above this is CLAMPED (to
+ * this value minus one, since the stored counter is the last one consumed and
+ * the next seal transmits +1, so the first transmitted counter stays <= this
+ * bound). Clamped, not masked: masking turned a start just past the bound into
+ * a near-zero one. */
 #define KBD_CRYPT_CTR_START_MAX 0x7FFFFFFFu
 
 /* Adopt a session_id. Call ONLY after kbd_crypt_verify_session() has

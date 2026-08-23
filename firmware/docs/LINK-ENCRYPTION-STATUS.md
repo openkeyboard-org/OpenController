@@ -50,9 +50,18 @@ is genuinely zero-impact.
 - **CCM counter persistence across reboot.** The per-boot random start
   (`4ef00be`) makes keystream reuse unlikely but does not guarantee it. Reserved
   counter ranges in flash, or per-session keys, is the real answer.
-- Three open Codex findings: the ISR race on `seal_*` (only reachable under
-  `STOCK_ISR_FAST_RESPONSE=1`, which is not the default), seal timing, and
-  `rf_clear_bond_flash` discarding the `EEPROM_ERASE` result.
+- One remaining Codex finding: the ISR race on `seal_*`, only reachable under
+  `STOCK_ISR_FAST_RESPONSE=1`, which is not the default.
+
+  The other two from that set are **closed**, and this list used to keep
+  reporting them as open — operators were being pointed at finished work:
+  - *Seal timing* — landed in two halves (arm from TX_FINISH; `seal_begin`
+    derives every block twice and requires agreement) and validated
+    2026-08-16 over 300 s idle soaks, 0 MAC failures with `seal_redo` catching
+    742 / 2273 live collisions. See `TODO.md` section 0.
+  - *`rf_clear_bond_flash` discarding the `EEPROM_ERASE` result* — now checks
+    the erase and re-reads to confirm, and `RF_ClearBond()` reports failure so
+    `A6 52` answers `0x36` instead of falsely acking.
 
 ## The measurement that reframed everything
 

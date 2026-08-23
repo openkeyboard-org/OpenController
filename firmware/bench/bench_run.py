@@ -28,7 +28,12 @@ import sys
 import threading
 import time
 
-sys.path.insert(0, "/home/emolitor/Development/openkeyboard/OpenController/firmware/bench")
+import os                                                          # noqa: E402
+
+# Resolve the sibling module from this file's own directory. The absolute path
+# that used to be hardcoded here only existed in one developer's checkout, so
+# the import failed for everyone else.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rx_uart_diag import FRAME_LEN, PAYLOAD_LEN, SOF, parse, show  # noqa: E402
 import serial  # noqa: E402
 
@@ -83,6 +88,11 @@ class KbdEvents:
                     continue
                 pkt = self.buf[i:i + need]
                 if (sum(pkt[:-1]) & 0xFF) != pkt[-1]:
+                    # Not a real frame start. Leaving the byte in place blocks
+                    # every later packet with the same lead behind it until the
+                    # buffer is truncated, so drop just this one and re-scan.
+                    self.buf = self.buf[:i] + self.buf[i + 1:]
+                    changed = True
                     continue
                 if lead == 0x5D:
                     self.diag = struct.unpack_from(f"<{KBD_DIAG_N}I", pkt, 1)

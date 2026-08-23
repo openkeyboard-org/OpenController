@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: Apache-2.0 */
 /*
  * OpenKeyboard.org OpenDongle -- software AES-128 forward cipher.
  * Copyright 2026 Eric Molitor (EMulator)

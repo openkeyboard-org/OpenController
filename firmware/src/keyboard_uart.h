@@ -57,13 +57,22 @@ uint8_t KeyboardUart_TxIdle(void);
  * read it out of band; this is that channel for the keyboard, matching what
  * CMD_CRYPT_DIAG already does for the receiver.
  *
- * Reply: [0x5D][20 bytes: seal_miss, tx_sealed, sess_bad, sess_ok, sess_rx,
- * each u32 LE][checksum]. Read-only, and gated with the bench key command so a
+ * Reply: [0x5D][n x u32 LE][checksum] -- VARIABLE length, not a fixed 20 bytes.
+ * main.c currently sends n = 9, i.e. a 36-byte payload:
+ *   seal_miss, tx_sealed, sess_bad, sess_ok, sess_rx,        (the original 5)
+ *   selfck_ok, selfck_bad, bb_during_aes, seal_redo.         (bench self-verify)
+ * The bench counters are appended AFTER the original five precisely so an
+ * older reader still parses the prefix; decode by the frame's own length
+ * rather than assuming a count. Keep this list in step with the `counters[]`
+ * array in main.c. Read-only, and gated with the bench key command so a
  * shipping build has neither. */
 #define KBD_UART_CMD_CRYPT_DIAG 0xAFu
-/* [B0][chk] -> [0x5F][latched][len][session:u32 LE][seal_bb][frame:22][good_tag:8][chk]:
+/* [B0][chk] -> [0x5F][latched][len][session:u32 LE][seal_bb][frame:22]
+ *              [good_tag:8][plain:8][s1:8][s0:8][chk]:
  * the first self-verify-failed sealed frame this boot, with the recomputed
- * (correct) tag and the count of RF callbacks that landed inside its seal. */
+ * (correct) tag and the count of RF callbacks that landed inside its seal.
+ * The trailing plain/s1/s0 vectors are the double-compute evidence and were
+ * missing from this comment (KeyboardUart_SendCryptFail takes all four). */
 #define KBD_UART_CMD_CRYPT_FAIL 0xB0u
 /* [B1][mode][chk] -> ack: runtime toggle of the bench pre-seal self-verify
  * (mode 0 = off, 1 = on). The verify adds ~73 us of AES immediately before

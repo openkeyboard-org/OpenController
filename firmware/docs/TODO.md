@@ -255,7 +255,12 @@ Two compounding traps:
 The sound channels, both in place now:
 
 - Receiver: `CMD_CRYPT_DIAG` (IAP `0x94`) over USB.
-- Keyboard: `0xAF` → `[0x5D][5 × u32 LE][checksum]` over UART (`a2ed588`).
+- Keyboard: `0xAF` → `[0x5D][n × u32 LE][checksum]` over UART (`a2ed588`).
+  n is variable and is currently **9**: the original `seal_miss, tx_sealed,
+  sess_bad, sess_ok, sess_rx` plus the bench self-verify counters
+  `selfck_ok, selfck_bad, bb_during_aes, seal_redo`. The bench four are
+  appended after the original five so an older reader still parses the
+  prefix — decode by the frame's length, never by an assumed count.
 
 WCH OpenOCD does **not** help here: per the same README, attaching to a running
 application resets it, so it cannot observe live state either. Firmware
@@ -392,8 +397,13 @@ in eight. The keyboard now leads every beacon with the advert, so capability
 latches 12/12 in BOTH orders and the pairing order is once again only about
 whether the link comes up.
 
-**Provision keys BEFORE pairing**, or the keyboard cannot verify the announces
-from the mint that happens at connect (§7).
+**Provision the key before the ENCRYPTED RECONNECT**, not before pairing. The
+key has nothing to attach to until a bond exists, so the actual order is: pair,
+then provision (receiver over IAP, keyboard over `0xAE`), then bring the
+encrypted session up — `bench_run.py` sends `0xAE` only after it observes
+CONNECTED, and the fresh-pair recipe restarts the receiver afterwards to mint
+the session. What must not happen is reaching the mint with only one end keyed,
+because the keyboard then cannot verify the announces (§7).
 
 Update over OBP, not `flash-factory` — **the bond survives an OBP update** and a
 factory flash erases it. Retry through two transients rather than racing them:

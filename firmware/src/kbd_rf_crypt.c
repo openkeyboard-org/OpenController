@@ -200,8 +200,18 @@ void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES],
     crypt_session_id = 0u;
     /* Clamped so a high start cannot strand us near exhaustion -- see the
      * header for why the start varies at all. */
-    crypt_tx_ctr = (ctr_start > KBD_CRYPT_CTR_START_MAX)
-                 ? (ctr_start & KBD_CRYPT_CTR_START_MAX)
+    /* A real clamp, not a mask, and it saturates one BELOW the cap.
+     *
+     * `& KBD_CRYPT_CTR_START_MAX` merely cleared the top bit, so a start just
+     * past the cap (0x80000001) collapsed to 1 -- nothing like the cap the
+     * header promises, and unpredictable rather than bounded.
+     *
+     * MAX - 1 rather than MAX because this variable is the LAST counter
+     * CONSUMED and the next seal transmits +1: saturating at MAX would put the
+     * first transmitted counter at 0x80000000, past the cap the whole bound
+     * exists to enforce. Starting at MAX - 1 still leaves > 2^31 values. */
+    crypt_tx_ctr = (ctr_start >= KBD_CRYPT_CTR_START_MAX)
+                 ? (KBD_CRYPT_CTR_START_MAX - 1u)
                  : ctr_start;
     seal_pending = 0u;
 }

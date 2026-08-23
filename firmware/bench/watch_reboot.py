@@ -1,12 +1,27 @@
 #!/usr/bin/env python3
-"""Is the keyboard rebooting when the encrypted link drops?
+"""Is the keyboard rebooting when the encrypted link drops? -- OBSOLETE, OPT-IN.
 
 kbd_crypt_tx_sealed lives in .diag_safe and is zeroed only by RF_TaskInit(),
-which runs once per boot. It otherwise increases monotonically. So a DECREASE
-between two samples is a reboot, full stop -- no extra symbol knowledge needed.
-SWD reads have been verified not to reset the target (two consecutive reads of
-ll_boot_count returned identical values), so the probe is not the thing being
-measured here.
+which runs once per boot. It otherwise increases monotonically, so a DECREASE
+between two samples is a reboot. That part still holds.
+
+**The measurement method does not.** This script polls the counter over SWD with
+`minichlink -r`, and the docstring used to claim "SWD reads have been verified
+not to reset the target (two consecutive reads of ll_boot_count returned
+identical values)". That is not evidence: two equal reads are exactly what a
+probe that resets the target and re-reads a freshly zeroed counter would also
+produce. It contradicts this repo's own docs/TODO.md section 6 and
+bench/README.md, both of which say probe attach resets the target and CH5xx SWD
+reads are unreliable -- so this tool can manufacture the very reboots it
+reports. Measured 2026-08-23 on the OpenDongle bench, minichlink cannot connect
+to a CH5xx part at all (rc=223), so `read_kbd()` here simply fails.
+
+Use the UART `0xAF` crypt-diag telemetry instead (`rx_uart_diag.py`,
+`bench_run.py`), which reads the same counters without touching the debug port.
+
+Kept only for reference. It refuses to run unless you set
+WATCH_REBOOT_I_KNOW_SWD_RESETS=1, so nobody re-derives a reboot rate from it by
+accident.
 """
 import os
 import re
@@ -19,7 +34,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from crypt_diag import find_hidraw, txn  # noqa: E402
 import serial  # noqa: E402
 
-MINICHLINK = "/home/emolitor/Development/Personal/WCH/ch32fun/minichlink/minichlink"
+if os.environ.get("WATCH_REBOOT_I_KNOW_SWD_RESETS") != "1":
+    sys.exit(
+        "watch_reboot.py is obsolete: it polls the keyboard over SWD, and probe\n"
+        "attach resets the target (docs/TODO.md section 6, bench/README.md), so\n"
+        "it can manufacture the reboots it reports. minichlink also cannot reach\n"
+        "a CH5xx part at all on this bench.\n"
+        "Use the UART 0xAF telemetry instead: rx_uart_diag.py / bench_run.py.\n"
+        "To run it anyway: WATCH_REBOOT_I_KNOW_SWD_RESETS=1 watch_reboot.py")
+
+MINICHLINK = os.environ.get(
+    "MINICHLINK",
+    os.path.expanduser("~/Development/Personal/WCH/ch32fun/minichlink/minichlink"))
 KBD_PROBE = "CEBD8F0653EF"
 KBD = "/dev/serial/by-id/usb-wch.cn_WCH-Link_CEBD8F0653EF-if01"
 KBD_BASE = 0x200059DC
