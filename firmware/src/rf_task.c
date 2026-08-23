@@ -2071,6 +2071,22 @@ uint8_t RF_HasBond(void)
 void RF_QueueHIDReport(const uint8_t report[8])
 {
     uint8_t changed = 0;
+    /* IRQs off across the whole update.
+     *
+     * hid_report is read byte-by-byte by the response path and hid_resend is a
+     * read-modify-write there. Today both run in this same cooperative context,
+     * so the 8-byte copy is atomic by construction -- but under
+     * STOCK_ISR_FAST_RESPONSE the responder becomes the TMR0 ISR, which can then
+     * land in the middle of this loop and put HALF THE OLD REPORT and half the
+     * new one on air. Masking here costs a few microseconds in a
+     * non-time-critical path and makes the update atomic under either responder,
+     * which is a precondition for that experiment being safe to run at all.
+     *
+     * The mask also covers hid_resend and the seal discard below, so the
+     * responder can never observe "new report, stale resend count" or the
+     * reverse. */
+    uint32_t irq = rf_irq_save();
+
     for (uint8_t i = 0; i < 8; i++) {
         if (hid_report[i] != report[i]) {
             changed = 1;
@@ -2104,6 +2120,7 @@ void RF_QueueHIDReport(const uint8_t report[8])
         kbd_crypt_seal_discard();
 #endif
     }
+    rf_irq_restore(irq);
 }
 
 #if KBD_RF_CRYPT

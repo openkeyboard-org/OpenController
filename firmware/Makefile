@@ -243,6 +243,14 @@ CFLAGS += -DSTOCK_RESP_NO_SETCH=$(STOCK_RESP_NO_SETCH)
 # CONFIG_FINGERPRINT picks it up and the two images cannot be confused.
 RESP_TX_NO_SHUT ?= 0
 CFLAGS += -DRESP_TX_NO_SHUT=$(RESP_TX_NO_SHUT)
+# Transmit the poll response directly from the TMR0 turnaround ISR instead of
+# posting RF_EVT_RESPOND to the cooperative main loop. A REAL knob, not an
+# EXTRA_CFLAGS define: `make STOCK_ISR_FAST_RESPONSE=1` previously built the
+# DEFAULT image in silence, so an A/B measured the same binary twice.
+# Requires RESP_TX_NO_SHUT=1 -- RF_Shut() reaches tmos_stop_task and
+# tmos_memory_free, whose vendor guards mask IRQ 21 while TMR0 is IRQ 16.
+STOCK_ISR_FAST_RESPONSE ?= 0
+CFLAGS += -DSTOCK_ISR_FAST_RESPONSE=$(STOCK_ISR_FAST_RESPONSE)
 # Stock-interop fix: pair-ACK type tag is the previous connected-hop seed; the
 # first connected poll is seed+1. Override only for bench regressions.
 STOCK_CONNECT_IDX_BIAS ?= 1
@@ -287,6 +295,11 @@ CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
 ifeq ($(KBD_CRYPT_BENCH_KEY),1)
 ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
+endif
+endif
+ifeq ($(STOCK_ISR_FAST_RESPONSE),1)
+ifneq ($(RESP_TX_NO_SHUT),1)
+$(error STOCK_ISR_FAST_RESPONSE=1 needs RESP_TX_NO_SHUT=1 - RF_Shut() in the response path reaches tmos_stop_task/tmos_memory_free, and the vendor TMOS guards mask IRQ 21 while TMR0 is IRQ 16, so the ISR would re-enter the allocator on half-mutated state)
 endif
 endif
 ifeq ($(KBD_TX_OUTCOME),1)

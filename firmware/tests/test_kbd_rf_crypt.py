@@ -438,23 +438,46 @@ class KbdCryptTest(unittest.TestCase):
 
 
     def test_late_engine_fault_cannot_poison_a_pending_seal(self):
-        """A seal that fails partway must leave NO frame, not a half-built one.
+        """A seal that fails partway must never publish a half-built frame.
 
-        seal_begin() replaces an already-pending frame, so it overwrites the
-        counter and ciphertext before the MAC variants are done. If the engine
-        fails on a later block and the pending flag survived, finish() would
-        publish the new ciphertext under a stale tag -- and, because the counter
-        is only committed on success, the next seal would re-issue that same
-        counter and reuse the CTR keystream.
+        seal_begin() consumes a fresh counter and writes ciphertext before the
+        MAC variants are done. If a partial build could ever become publishable,
+        finish() would emit new ciphertext under a stale tag -- and, because the
+        counter is only committed on success, the next seal would re-issue that
+        same counter and reuse the CTR keystream.
+
+        The two-slot publication makes that structurally impossible rather than
+        merely guarded: a build in progress goes to the SHADOW slot and only an
+        atomic publish makes it visible, so a failure simply never publishes.
+
+        A deliberate consequence, and the reason for the two slots: the frame
+        prepared BEFORE the failure stays emittable. It is not stale -- a failed
+        seal does not mean the report changed (a changed report revokes
+        explicitly via kbd_crypt_seal_discard) -- and it is still unemitted,
+        because finish() consumes what it takes. Under the old single buffer a
+        failed seal blinded the responder for a whole slot for no reason. So the
+        assertion here is the strong one: what comes out is the earlier frame
+        BYTE-FOR-BYTE, which a poisoned mix could not be.
         """
         body_a = bytes(range(8))
         body_b = bytes(range(0x80, 0x88))
+
+        # Control: what frame A looks like when nothing interferes.
         self.assertEqual(self.h.cmd(f"begin 02 a1 {body_a.hex()}"), "OK")
-        # Replace it, failing on the 6th block -- inside the MAC variant loop,
-        # well after the counter and ciphertext have been rewritten.
+        want_a = self.h.cmd("finish 02")
+        self.assertTrue(want_a.startswith("OK "), want_a)
+
+        # Same sequence, but a replacement seal dies on the 6th block -- inside
+        # the MAC variant loop, well after a counter and ciphertext would have
+        # been written.
+        self.fresh()
+        self.assertEqual(self.h.cmd(f"begin 02 a1 {body_a.hex()}"), "OK")
         self.h.cmd("failafter 5")
         self.assertEqual(self.h.cmd(f"begin 02 a1 {body_b.hex()}"), "ENGINE")
-        # Nothing may be publishable: the old frame is gone, the new one failed.
+
+        # Frame A, intact. Not a mix of B's ciphertext and A's tag.
+        self.assertEqual(self.h.cmd("finish 02"), want_a)
+        # And it is consumed exactly once.
         self.assertEqual(self.h.cmd("finish 02"), "SHAPE")
 
     def test_counter_never_repeats_after_a_failed_seal(self):

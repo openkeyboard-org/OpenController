@@ -67,16 +67,47 @@ static uint8_t  bench_pend_frame[KBD_CRYPT_LEN_BOOT_KBD];
 #define KBD_BENCH_AES_END()   do { } while (0)
 #endif
 
-/* seal_begin() -> seal_finish() carry state. seal_mic holds one finished tag per
+/* seal_begin() -> seal_finish() carry state. mic holds one finished tag per
  * reachable ctrl value, which is what lets seal_finish() run without touching
- * the AES engine at all -- see the header's note on the response path. */
-static uint8_t  seal_pending;
-static uint8_t  seal_tag;
-static uint8_t  seal_body_len;
-static uint32_t seal_ctr;
-static uint8_t  seal_ctrl_base;                  /* ctrl bits above the ARQ pair */
-static uint8_t  seal_cipher[KBD_CRYPT_MAX_BODY];
-static uint8_t  seal_mic[KBD_CRYPT_CTRL_VARIANTS][KBD_CRYPT_TAG_BYTES];
+ * the AES engine at all -- see the header's note on the response path.
+ *
+ * TWO slots with a single volatile publish word, because seal_begin() runs in
+ * task context while seal_finish() may run in the TMR0 turnaround ISR (under
+ * STOCK_ISR_FAST_RESPONSE). A single buffer guarded by a plain flag was only
+ * incidentally safe: nothing stopped the compiler sinking the tag stores past
+ * the flag store, and a 319-710 us seal overlapping the ISR would have had to
+ * invalidate the frame the ISR might be emitting right now.
+ *
+ * The contract is one word:
+ *   - the task only ever writes seal_slot[seal_build];
+ *   - the ISR only ever reads seal_slot[seal_live], and takes it with an atomic
+ *     exchange so a frame can never be emitted twice;
+ *   - seal_build flips immediately after each publish, so the two indices are
+ *     never equal and a seal in progress cannot disturb a published frame.
+ * seal_live is uint32_t, not uint8_t: RV32A has no byte AMO, so a byte would
+ * force an lr.w/sc.w retry loop where a word gets a single amoswap.w. */
+#define SEAL_NONE 0xFFFFFFFFu
+
+typedef struct {
+    uint32_t ctr;
+    uint8_t  tag;
+    uint8_t  body_len;
+    uint8_t  ctrl_base;                          /* ctrl bits above the ARQ pair */
+    uint8_t  _pad;
+    uint8_t  cipher[KBD_CRYPT_MAX_BODY];
+    uint8_t  mic[KBD_CRYPT_CTRL_VARIANTS][KBD_CRYPT_TAG_BYTES];
+} seal_slot_t;
+
+static seal_slot_t       seal_slot[2];
+static uint8_t           seal_build;             /* task-private: the shadow slot */
+static volatile uint32_t seal_live = SEAL_NONE;  /* the only task->ISR handoff */
+
+/* Revoke whatever is published. Safe from any context: it is one word, and an
+ * ISR already past its claim owns a slot the task will not touch. */
+static inline void seal_revoke(void)
+{
+    __atomic_store_n(&seal_live, SEAL_NONE, __ATOMIC_RELAXED);
+}
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -213,7 +244,7 @@ void kbd_crypt_install_key(const uint8_t key[KBD_CRYPT_KEY_BYTES],
     crypt_tx_ctr = (ctr_start >= KBD_CRYPT_CTR_START_MAX)
                  ? (KBD_CRYPT_CTR_START_MAX - 1u)
                  : ctr_start;
-    seal_pending = 0u;
+    seal_revoke();
 }
 
 void kbd_crypt_adopt_session(uint32_t session_id)
@@ -257,7 +288,7 @@ void kbd_crypt_adopt_session(uint32_t session_id)
      * long-lived key). Per-session keys from the establishment phase void it. */
     crypt_session_id = session_id;
     crypt_session_ready = 1u;
-    seal_pending = 0u;         /* any half-built frame belongs to the old session */
+    seal_revoke();             /* any half-built frame belongs to the old session */
 }
 
 void kbd_crypt_end_session(void)
@@ -277,7 +308,7 @@ void kbd_crypt_end_session(void)
      * session id. Closing that needs a persisted counter or per-session keys. */
     crypt_session_ready = 0u;
     crypt_session_id = 0u;
-    seal_pending = 0u;
+    seal_revoke();
 }
 
 void kbd_crypt_clear(void)
@@ -290,14 +321,17 @@ void kbd_crypt_clear(void)
     crypt_session_ready = 0u;
     crypt_session_id = 0u;
     crypt_tx_ctr = 0u;
-    seal_pending = 0u;
-    for (i = 0; i < KBD_CRYPT_MAX_BODY; i++) {
-        seal_cipher[i] = 0u;
-    }
-    for (i = 0; i < KBD_CRYPT_CTRL_VARIANTS; i++) {
+    seal_revoke();
+    for (i = 0; i < 2u; i++) {
         uint8_t j;
-        for (j = 0; j < KBD_CRYPT_TAG_BYTES; j++) {
-            seal_mic[i][j] = 0u;
+        for (j = 0; j < KBD_CRYPT_MAX_BODY; j++) {
+            seal_slot[i].cipher[j] = 0u;
+        }
+        for (j = 0; j < KBD_CRYPT_CTRL_VARIANTS; j++) {
+            uint8_t k;
+            for (k = 0; k < KBD_CRYPT_TAG_BYTES; k++) {
+                seal_slot[i].mic[j][k] = 0u;
+            }
         }
     }
 }
@@ -376,6 +410,9 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
     uint8_t v;
     uint8_t i;
 
+    seal_slot_t *slot;
+    uint32_t seal_ctr;      /* was a static; now purely local to this build */
+
     if (!kbd_crypt_active()) {
         return KBD_CRYPT_INACTIVE;
     }
@@ -399,14 +436,13 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
     /* Invalidate any frame already waiting BEFORE overwriting the state it is
      * made of. This call replaces a pending seal, and every early return below
      * leaves that state half-rewritten: new counter and ciphertext, MAC
-     * variants from the previous frame. Leaving seal_pending set across that
-     * would let seal_finish() publish the new ciphertext under a stale tag, and
-     * -- because crypt_tx_ctr is only committed on success -- the next seal
-     * would hand out the same counter again, reusing the CTR keystream. Clear
-     * first, so a failed seal yields no frame at all rather than a poisoned
-     * one. Re-issuing the counter after this point is safe precisely because
-     * nothing was ever published under it. */
-    seal_pending = 0u;
+     * variants from the previous frame -- but they land in the SHADOW slot, so
+     * a failed seal simply never publishes and the previously published frame
+     * stays emittable. That is the point of two slots: a 319-710 us seal no
+     * longer has to blind the responder for its whole duration. The counter is
+     * still consumed only on success, so nothing is ever published under a
+     * counter that gets re-issued. */
+    slot = &seal_slot[seal_build];
 
     seal_ctr = crypt_tx_ctr + 1u;
     build_nonce(nonce, crypt_session_id, KBD_CRYPT_DIR_KB_TO_DONGLE, seal_ctr);
@@ -447,7 +483,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
         }
 
         for (i = 0; i < body_len; i++) {
-            seal_cipher[i] = (uint8_t)(plain[i] ^ s1[i]);
+            slot->cipher[i] = (uint8_t)(plain[i] ^ s1[i]);
         }
 
         /* Finish the MAC for EVERY reachable ctrl value, not just the one we
@@ -456,12 +492,12 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
          * all. Only the two ARQ bits vary (rf_task.c seeds tx_ctrl and
          * thereafter replaces bit 0 and toggles bit 1, never touching the
          * rest), so four tags cover it. */
-        seal_ctrl_base = (uint8_t)(ctrl_hint & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK);
+        slot->ctrl_base = (uint8_t)(ctrl_hint & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK);
         for (v = 0; v < KBD_CRYPT_CTRL_VARIANTS; v++) {
             for (i = 0; i < 16u; i++) {
                 x[i] = x1[i];
             }
-            aad[0] = (uint8_t)(seal_ctrl_base | v);
+            aad[0] = (uint8_t)(slot->ctrl_base | v);
             aad[1] = tag;
             if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
                 cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
@@ -470,7 +506,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
                 return KBD_CRYPT_FAULT_ENGINE;
             }
             for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
-                seal_mic[v][i] = (uint8_t)(x[i] ^ s0[i]);
+                slot->mic[v][i] = (uint8_t)(x[i] ^ s0[i]);
             }
         }
 
@@ -488,7 +524,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
             diff |= (uint8_t)(s0[i] ^ s0b[i]);
         }
         for (i = 0; i < body_len; i++) {
-            diff |= (uint8_t)(seal_cipher[i] ^ (uint8_t)(plain[i] ^ xb[i]));
+            diff |= (uint8_t)(slot->cipher[i] ^ (uint8_t)(plain[i] ^ xb[i]));
         }
         if (cbc_mac_b0(nonce, 2u, body_len, xb) != HAL_AES_OK) {
             KBD_BENCH_AES_END();
@@ -502,7 +538,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
             for (i = 0; i < 16u; i++) {
                 x[i] = x1[i];
             }
-            aad[0] = (uint8_t)(seal_ctrl_base | v);
+            aad[0] = (uint8_t)(slot->ctrl_base | v);
             aad[1] = tag;
             if (cbc_mac_aad(x, aad, 2u) != HAL_AES_OK ||
                 cbc_mac_msg(x, plain, body_len) != HAL_AES_OK) {
@@ -511,7 +547,7 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
                 return KBD_CRYPT_FAULT_ENGINE;
             }
             for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
-                diff |= (uint8_t)(seal_mic[v][i] ^ (uint8_t)(x[i] ^ s0b[i]));
+                diff |= (uint8_t)(slot->mic[v][i] ^ (uint8_t)(x[i] ^ s0b[i]));
             }
         }
 
@@ -530,13 +566,19 @@ kbd_crypt_status_t kbd_crypt_seal_begin(uint8_t ctrl_hint, uint8_t tag,
         }
     }
 
-    seal_tag = tag;
-    seal_body_len = body_len;
+    slot->tag = tag;
+    slot->body_len = body_len;
+    slot->ctr = seal_ctr;
     /* The counter is consumed HERE, not at finish(): a begin() whose finish()
      * never happens must burn its value rather than let a later frame reuse it.
      * Gaps are fine -- the receiver only requires strictly increasing. */
     crypt_tx_ctr = seal_ctr;
-    seal_pending = 1u;
+    /* Publish LAST, with release ordering. The fence is architecturally cheap on
+     * this in-order core; the load-bearing half is the compiler barrier, which
+     * is exactly what was missing before -- nothing stopped GCC sinking the tag
+     * stores past a plain flag store. */
+    __atomic_store_n(&seal_live, seal_build, __ATOMIC_RELEASE);
+    seal_build ^= 1u;
     KBD_BENCH_AES_END();
     kbd_crypt_release();
     return KBD_CRYPT_OK;
@@ -549,35 +591,42 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
     uint8_t n;
     uint8_t v;
 
-    if (!seal_pending || out == 0 || out_len == 0) {
+    /* Claim the published slot with a single atomic exchange. This both READS
+     * the index and CONSUMES it, so the frame can never be emitted twice under
+     * one counter -- the invariant the old read-then-clear only held because
+     * both halves ran in the same cooperative context. The acquire stops the
+     * slot loads being hoisted above the claim. */
+    uint32_t idx = __atomic_exchange_n(&seal_live, SEAL_NONE, __ATOMIC_ACQUIRE);
+    const seal_slot_t *slot;
+
+    if (idx > 1u || out == 0 || out_len == 0) {
         return KBD_CRYPT_SHAPE;
     }
+    slot = &seal_slot[idx];
     /* The MAC for this ctrl must already exist. It always will -- begin()
      * covered every reachable value -- so a miss means the caller's ctrl left
      * the range the ARQ logic can produce. Refuse rather than reach for the AES
      * engine here: this runs in the response path, where a crypto call would
      * both blow the turnaround budget and race main-loop use of the engine. */
-    if ((uint8_t)(ctrl & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK) != seal_ctrl_base) {
+    if ((uint8_t)(ctrl & (uint8_t)~KBD_CRYPT_CTRL_VARIANT_MASK) != slot->ctrl_base) {
         return KBD_CRYPT_SHAPE;
     }
     v = (uint8_t)(ctrl & KBD_CRYPT_CTRL_VARIANT_MASK);
 
-    /* Consume the pending frame: this counter value is spent and the frame must
-     * not be emitted twice. */
-    seal_pending = 0u;
-    n = seal_body_len;
+    /* Already consumed by the exchange above. */
+    n = slot->body_len;
 
     out[0] = ctrl;
-    out[1] = seal_tag;
-    out[2] = (uint8_t)seal_ctr;
-    out[3] = (uint8_t)(seal_ctr >> 8);
-    out[4] = (uint8_t)(seal_ctr >> 16);
-    out[5] = (uint8_t)(seal_ctr >> 24);
+    out[1] = slot->tag;
+    out[2] = (uint8_t)slot->ctr;
+    out[3] = (uint8_t)(slot->ctr >> 8);
+    out[4] = (uint8_t)(slot->ctr >> 16);
+    out[5] = (uint8_t)(slot->ctr >> 24);
     for (i = 0; i < n; i++) {
-        out[6 + i] = seal_cipher[i];
+        out[6 + i] = slot->cipher[i];
     }
     for (i = 0; i < KBD_CRYPT_TAG_BYTES; i++) {
-        out[6 + n + i] = seal_mic[v][i];
+        out[6 + n + i] = slot->mic[v][i];
     }
     *out_len = (uint8_t)(n + KBD_CRYPT_FRAME_OVERHEAD);
     return KBD_CRYPT_OK;
@@ -585,7 +634,7 @@ kbd_crypt_status_t kbd_crypt_seal_finish(uint8_t ctrl,
 
 int kbd_crypt_seal_pending(void)
 {
-    return seal_pending != 0u;
+    return __atomic_load_n(&seal_live, __ATOMIC_RELAXED) != SEAL_NONE;
 }
 
 void kbd_crypt_seal_discard(void)
@@ -594,7 +643,7 @@ void kbd_crypt_seal_discard(void)
      * prepared frame is stale (its report has been superseded) can invalidate it
      * without doing 11 AES blocks wherever it happens to be running. The
      * replacement seal is then built in a slot chosen for it. */
-    seal_pending = 0u;
+    seal_revoke();
 }
 
 kbd_crypt_status_t kbd_crypt_seal(uint8_t ctrl, uint8_t tag,
