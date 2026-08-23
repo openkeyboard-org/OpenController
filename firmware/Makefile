@@ -90,8 +90,10 @@ export PATH := $(MRS_TOOLCHAIN):$(PATH)
 TOOL_PREFIXES := riscv32-wch-elf- riscv-wch-elf-
 PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
     if [ -x "$(MRS_TOOLCHAIN)/$${p}gcc" ]; then printf '%s' "$$p"; break; fi; done)
+# `test` is host-only (it compiles harnesses with the HOST cc), so it must not
+# demand the WCH cross toolchain -- that is what lets CI run the suite at all.
 NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
-                   openboot-image openboot-test info gdbserver
+                   openboot-image openboot-test info gdbserver test
 NEED_TOOLCHAIN := 1
 ifneq ($(MAKECMDGOALS),)
 ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
@@ -234,6 +236,21 @@ CFLAGS += -DRF_TURNAROUND_COUNT=$(RF_TURNAROUND_COUNT)
 # already on the just-received poll channel, and re-setting it misses stock RX.
 STOCK_RESP_NO_SETCH ?= 1
 CFLAGS += -DSTOCK_RESP_NO_SETCH=$(STOCK_RESP_NO_SETCH)
+# Omit the RF_Shut() before the response TX. This is the prerequisite for ever
+# transmitting the response from the TMR0 ISR: RF_Shut reaches tmos_stop_task /
+# tmos_memory_free, whose vendor guards mask IRQ 21 only while TMR0 is IRQ 16.
+# A real knob (not an EXTRA_CFLAGS define) so the A/B rebuilds are honest --
+# CONFIG_FINGERPRINT picks it up and the two images cannot be confused.
+RESP_TX_NO_SHUT ?= 0
+CFLAGS += -DRESP_TX_NO_SHUT=$(RESP_TX_NO_SHUT)
+# Transmit the poll response directly from the TMR0 turnaround ISR instead of
+# posting RF_EVT_RESPOND to the cooperative main loop. A REAL knob, not an
+# EXTRA_CFLAGS define: `make STOCK_ISR_FAST_RESPONSE=1` previously built the
+# DEFAULT image in silence, so an A/B measured the same binary twice.
+# Requires RESP_TX_NO_SHUT=1 -- RF_Shut() reaches tmos_stop_task and
+# tmos_memory_free, whose vendor guards mask IRQ 21 while TMR0 is IRQ 16.
+STOCK_ISR_FAST_RESPONSE ?= 0
+CFLAGS += -DSTOCK_ISR_FAST_RESPONSE=$(STOCK_ISR_FAST_RESPONSE)
 # Stock-interop fix: pair-ACK type tag is the previous connected-hop seed; the
 # first connected poll is seed+1. Override only for bench regressions.
 STOCK_CONNECT_IDX_BIAS ?= 1
@@ -241,6 +258,98 @@ CFLAGS += -DSTOCK_CONNECT_IDX_BIAS=$(STOCK_CONNECT_IDX_BIAS)
 # Additional bench-only interop probes (STOCK_SUPPRESS_RESPONSES,
 # STOCK_PARK_AFTER_CATCH, STOCK_SEED_BOND, ...) default off via #ifndef
 # fallbacks in src/rf_task.c; enable with EXTRA_CFLAGS=-DSTOCK_...=1.
+#
+# AES-128-CCM link encryption of the keyboard->dongle HID uplink. OFF by
+# default: a plaintext build must stay byte-identical to the validated stock
+# image, and encryption is useless until the receiver also runs a build that
+# decrypts it (OpenDongle's rf_crypt). `make KBD_RF_CRYPT=1` to build it in.
+#
+# The crypto sources are gated at the source-list level below rather than only
+# by #if, so an OFF build compiles nothing extra at all. Flipping this changes
+# CFLAGS, which changes CONFIG_FINGERPRINT, which forces a full rebuild - so an
+# A/B of the two images can never compare stale objects.
+KBD_RF_CRYPT ?= 0
+CFLAGS += -DKBD_RF_CRYPT=$(KBD_RF_CRYPT)
+# BENCH ONLY: compile the UART command that writes the link key (0xAE). Kept
+# SEPARATE from KBD_RF_CRYPT on purpose - an encrypted release image must carry
+# no key-write path at all, or anything on the host wire could overwrite the key
+# and forge keystrokes, defeating the point of encrypting the link. Until the
+# key-establishment handshake lands, a bench build needs it to key both ends:
+#   make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1
+KBD_CRYPT_BENCH_KEY ?= 0
+CFLAGS += -DKBD_CRYPT_BENCH_KEY=$(KBD_CRYPT_BENCH_KEY)
+# BENCH ONLY: route UART1 on the chip-default PA8/PA9 pins (generic CH592F
+# devboard wiring: probe TX -> PA8/RXD1, probe RX <- PA9/TXD1). The keyboard
+# PCB wires the PB12/PB13 remap, which remains the default.
+KBD_UART1_DEFAULT_PINS ?= 0
+CFLAGS += -DKBD_UART1_DEFAULT_PINS=$(KBD_UART1_DEFAULT_PINS)
+# BENCH ONLY: transmit-outcome counters (UART 0xB2). Answers whether a response
+# frame the keyboard believes it sent was ever accepted by the radio, and how
+# late in its poll slot it went out -- neither of which kbd_crypt_tx_sealed can
+# say, because that increments BEFORE RF_Tx is called. Every counter is written
+# AFTER the transmit is committed, so the measured path is unchanged.
+# Deliberately independent of KBD_CRYPT_BENCH_KEY so the same tree can be built
+# with and without it for an A/B against the same metric.
+KBD_TX_OUTCOME ?= 0
+CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
+ifeq ($(KBD_CRYPT_BENCH_KEY),1)
+ifneq ($(KBD_RF_CRYPT),1)
+$(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
+endif
+endif
+ifeq ($(STOCK_ISR_FAST_RESPONSE),1)
+ifneq ($(RESP_TX_NO_SHUT),1)
+$(error STOCK_ISR_FAST_RESPONSE=1 needs RESP_TX_NO_SHUT=1 - RF_Shut() in the response path reaches tmos_stop_task/tmos_memory_free, and the vendor TMOS guards mask IRQ 21 while TMR0 is IRQ 16, so the ISR would re-enter the allocator on half-mutated state)
+endif
+endif
+ifeq ($(KBD_TX_OUTCOME),1)
+ifneq ($(RF_DIAG_COUNTERS),1)
+$(error KBD_TX_OUTCOME=1 needs RF_DIAG_COUNTERS=1 - the poll-arrival timestamp it measures latency against (ll_rx_cb_last_sys) is maintained only there)
+endif
+endif
+# `make update` REBUILDS both slots (update: bundle), so invoking it without
+# the crypto knobs silently replaces an encrypted image with a plaintext one
+# and flashes it -- the 2026-08-15 audit's finding 1, observed in this very
+# checkout. kbd_rf_crypt.o is linked only by encrypted builds and survives a
+# knob change (the config stamp forces rebuilds but never deletes rival
+# objects), so its presence marks "the last build here was encrypted". Refuse
+# a defaulted-plaintext update in that state; a deliberate downgrade says
+# KBD_RF_CRYPT=0 explicitly, which also clears the markers so later defaulted
+# updates stop tripping this.
+CRYPT_BUILD_MARKERS := $(wildcard build/ch592f-slot*/kbd_rf_crypt.o)
+# Cover every goal that PRODUCES a flashable artifact, not just the two that
+# flash one: `bundle` emits the .obb the OpenBoot CLI flashes directly and
+# `factory` emits the SWD whole-chip image, so both could silently hand over a
+# plaintext build. (Prerequisites still never appear in MAKECMDGOALS, so the
+# original reasoning holds for bundle-as-a-prerequisite-of-update.)
+CRYPT_GUARDED_GOALS := update flash-factory bundle factory
+ifneq ($(filter $(CRYPT_GUARDED_GOALS),$(MAKECMDGOALS)),)
+ifeq ($(KBD_RF_CRYPT),0)
+ifneq ($(CRYPT_BUILD_MARKERS),)
+ifeq ($(origin KBD_RF_CRYPT),command line)
+# Consent is recorded by a RECIPE, never by a parse-time $(shell): make expands
+# those during the read phase regardless of -n, so `make -n KBD_RF_CRYPT=0
+# update` -- a dry run, contractually side-effect-free -- used to delete the
+# markers and permanently disarm this guard for every later defaulted build.
+CRYPT_DOWNGRADE_ACK := 1
+else
+$(error the last build was ENCRYPTED and this goal would rebuild and flash PLAINTEXT. Pass the knobs on THIS command (e.g. `make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1 update OB_PORT=...`), or downgrade deliberately with an explicit KBD_RF_CRYPT=0)
+endif
+endif
+endif
+endif
+
+# This target is defined above `all`, so name the default goal explicitly or the
+# first target in the file silently becomes it.
+.DEFAULT_GOAL := all
+
+# Clearing the markers is a real build step: it runs only when the goal actually
+# executes, and `make -n` prints it instead of doing it.
+.PHONY: crypt-downgrade-ack
+crypt-downgrade-ack:
+ifeq ($(CRYPT_DOWNGRADE_ACK),1)
+	rm -f build/ch592f-slot*/kbd_rf_crypt.o
+endif
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
 # WCH-Interrupt-fast/HPE semantics; do not emit a firmware image otherwise.
@@ -274,6 +383,34 @@ APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
 APP_SRC += src/kbd_image_id.c
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
+# Link encryption (see KBD_RF_CRYPT above). Compiled only when enabled.
+ifeq ($(KBD_RF_CRYPT),1)
+# AES backend behind the hal_aes seam.
+#
+#   hw (default) -- the CH592 accelerator. Fast per block (~14.5 us) but it
+#     silently returns the PREVIOUS block's output when preempted by the BLEB
+#     radio interrupt, which is why kbd_rf_crypt.c double-computes every seal
+#     and retries. Measured 39-44% of seals hit that collision.
+#   sw -- the portable cipher, SRAM-resident (~28 us/block at 60 MHz). No engine
+#     state to corrupt, so no double-compute and no retry: a seal goes from
+#     22-plus blocks of variable cost to 11 of fixed cost.
+#
+# The cipher MUST be relocated into .highcode: flash-resident it measures 18x
+# slower (~512 us/block), which is unusable inside an 875 us poll slot.
+KBD_AES_BACKEND ?= hw
+ifeq ($(KBD_AES_BACKEND),hw)
+APP_SRC += src/hal_aes_ch592.c
+else ifeq ($(KBD_AES_BACKEND),sw)
+APP_SRC += src/hal_aes_sw.c src/aes_sw.c
+# Spell the attribute out rather than reusing __HIGH_CODE: aes_sw.c is shared,
+# header-free portable C and must not have to include a CH592 SDK header.
+CFLAGS += -DKBD_AES_SW_HIGHCODE='__attribute__((section(".highcode")))'
+CFLAGS += -DKBD_AES_SOFTWARE=1
+else
+$(error KBD_AES_BACKEND must be hw or sw, got '$(KBD_AES_BACKEND)')
+endif
+APP_SRC += src/kbd_rf_crypt.c
+endif
 
 # Source files - SDK startup
 STARTUP_SRC := src/startup_CH592_phased.S
@@ -368,7 +505,7 @@ GDB        := $(PREFIX)gdb
 KBD_PROBE ?=
 PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
-.PHONY: all clean size size-check info gdbserver debug factory flash-factory \
+.PHONY: all clean size size-check info gdbserver debug factory flash-factory test \
         bundle update check-deps check-openboot-toolchain check-factory-slot \
         openboot-image openboot-test FORCE
 
@@ -446,6 +583,14 @@ size-check: $(BUILD)/$(TARGET).bin
 # clean. --skip-toolchain because verifying a SHA must not require GCC12 to
 # be installed. (The WCH SDK is vendored in-tree - see vendor/README.md - so
 # there is no SDK-revision half to this check.)
+# Host-only gate: no cross toolchain, no hardware, so it can run anywhere --
+# which is the point, because until now nothing ran this suite automatically and
+# the pins in it were only as good as someone remembering. Mirrors OpenDongle's
+# `make -C firmware test`. Not a release gate: shipping still needs the pinned
+# toolchains and the hardware matrix.
+test:
+	cd tests && $(PYTHON) -m unittest discover
+
 check-deps:
 	$(PYTHON) -I $(OPENBOOT)/firmware/check_dependencies.py \
 	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
@@ -536,7 +681,7 @@ $(FACTORY_BIN) $(FACTORY_MANIFEST) &: $(BUILD)/$(TARGET).bin \
 	@cp "$(OPENBOOT_MANIFEST)" "$(FACTORY_MANIFEST)"
 	@echo "factory image: $$(stat -c%s "$(FACTORY_BIN)") B (blessed, slot A)"
 
-factory: $(FACTORY_BIN)
+factory: crypt-downgrade-ack $(FACTORY_BIN)
 
 # Whole-chip factory install over SWD. Erases the code flash (NOT DataFlash:
 # the KBD2 bond at physical 0x74000 survives -E), writes the factory image at
@@ -544,7 +689,7 @@ factory: $(FACTORY_BIN)
 # values and its verify is disabled), then does a REAL power cycle: -b reboots
 # out of halt without re-running the boot path, so it would prove nothing
 # about first-power-on behavior.
-flash-factory: factory
+flash-factory: crypt-downgrade-ack factory
 	@command -v "$(MINICHLINK)" >/dev/null 2>&1 || { \
 	  echo "minichlink not found: $(MINICHLINK)" >&2; exit 1; }
 	@test -n "$(strip $(KBD_PROBE))" || { \
@@ -590,7 +735,7 @@ flash-factory: factory
 # the factory rule do not coordinate target ownership with each other, and
 # both recurse into the shared OpenBoot submodule build directory - run such
 # goals as separate invocations.
-bundle:
+bundle: crypt-downgrade-ack
 	+$(MAKE) SLOT=A $(SLOT_A_BIN)
 	+$(MAKE) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \
@@ -608,7 +753,7 @@ bundle:
 # OpenBoot's COMMIT attests only length+CRC, so this is the only guard
 # against cross-flashing a dongle CH592 image on a shared bench.
 OB_PORT ?=
-update: bundle
+update: crypt-downgrade-ack bundle
 	@test -n "$(strip $(OB_PORT))" || { \
 	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
 	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \

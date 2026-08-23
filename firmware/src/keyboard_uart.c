@@ -15,6 +15,10 @@
  * -- already a known gap) and keep RF alive. */
 #define KBD_UART_TX_WAIT_US  150u
 
+#ifndef KBD_UART1_DEFAULT_PINS
+#define KBD_UART1_DEFAULT_PINS 0
+#endif
+
 #ifndef RF_DIAG_COUNTERS
 #define RF_DIAG_COUNTERS 0
 #endif
@@ -72,10 +76,20 @@ static uint8_t uart_send_frame(uint8_t cmd, uint8_t val)
 
 void KeyboardUart_Init(void)
 {
+#if KBD_UART1_DEFAULT_PINS
+    /* BENCH ONLY: generic CH592F devboard wired on the chip-default UART1
+     * pins (probe TX -> PA8/RXD1, probe RX <- PA9/TXD1). The keyboard PCB
+     * routes the PB12/PB13 remap, which stays the default build. */
+    GPIOPinRemap(DISABLE, RB_PIN_UART1);
+    GPIOA_SetBits(GPIO_Pin_9);
+    GPIOA_ModeCfg(GPIO_Pin_9, GPIO_ModeOut_PP_5mA);
+    GPIOA_ModeCfg(GPIO_Pin_8, GPIO_ModeIN_PU);
+#else
     GPIOPinRemap(ENABLE, RB_PIN_UART1);
     GPIOB_SetBits(bTXD1_);
     GPIOB_ModeCfg(bTXD1_, GPIO_ModeOut_PP_5mA);
     GPIOB_ModeCfg(bRXD1_, GPIO_ModeIN_PU);
+#endif
 
     UART1_DefInit();
     UART1_BaudRateCfg(115200);
@@ -114,6 +128,95 @@ void KeyboardUart_SendLed(uint8_t led_mask)
     uart_send_frame(0x5A, led_mask);
 }
 
+#if KBD_CRYPT_BENCH_KEY
+void KeyboardUart_SendCryptFail(uint8_t latched, uint8_t len, uint32_t session,
+                                uint8_t seal_bb, const uint8_t *frame22,
+                                const uint8_t *good8, const uint8_t *plain8,
+                                const uint8_t *s1_8, const uint8_t *s0_8)
+{
+    uint8_t hdr[8];
+    uint8_t chk = 0;
+    uint8_t i;
+    const uint8_t *vecs[4];
+    uint8_t v;
+
+    vecs[0] = good8;
+    vecs[1] = plain8;
+    vecs[2] = s1_8;
+    vecs[3] = s0_8;
+
+    hdr[0] = 0x5F;
+    hdr[1] = latched;
+    hdr[2] = len;
+    hdr[3] = (uint8_t)session;
+    hdr[4] = (uint8_t)(session >> 8);
+    hdr[5] = (uint8_t)(session >> 16);
+    hdr[6] = (uint8_t)(session >> 24);
+    hdr[7] = seal_bb;
+    for (i = 0; i < 8u; i++) {
+        if (!uart_send_byte(hdr[i])) {
+            return;
+        }
+        chk = (uint8_t)(chk + hdr[i]);
+    }
+    for (i = 0; i < 22u; i++) {
+        if (!uart_send_byte(frame22[i])) {
+            return;
+        }
+        chk = (uint8_t)(chk + frame22[i]);
+    }
+    for (v = 0; v < 4u; v++) {
+        for (i = 0; i < 8u; i++) {
+            if (!uart_send_byte(vecs[v][i])) {
+                return;
+            }
+            chk = (uint8_t)(chk + vecs[v][i]);
+        }
+    }
+    uart_send_byte(chk);
+}
+
+#endif
+#if KBD_CRYPT_BENCH_KEY || KBD_TX_OUTCOME
+/* [lead][n x u32 LE][chk], chk seeded WITH the lead byte (so the host can just
+ * sum the whole frame except its last byte). Shared by every u32-vector reply
+ * so a second one cannot drift from the first's checksum rule. */
+static void uart_send_u32_frame(uint8_t lead, const uint32_t *v, uint8_t n)
+{
+    uint8_t chk = lead;
+    uint8_t i, b;
+
+    if (!uart_send_byte(lead)) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        uint8_t k;
+        for (k = 0; k < 4u; k++) {
+            b = (uint8_t)(v[i] >> (8u * k));
+            if (!uart_send_byte(b)) {
+                return;   /* TX wedged: abandon rather than desync the checksum */
+            }
+            chk = (uint8_t)(chk + b);
+        }
+    }
+    uart_send_byte(chk);
+}
+
+#endif
+#if KBD_CRYPT_BENCH_KEY
+void KeyboardUart_SendCryptDiag(const uint32_t *counters, uint8_t n)
+{
+    uart_send_u32_frame(0x5Du, counters, n);
+}
+#endif
+
+#if KBD_TX_OUTCOME
+void KeyboardUart_SendTxOutcome(const uint32_t *counters, uint8_t n)
+{
+    uart_send_u32_frame(0x62u, counters, n);
+}
+#endif
+
 static void reset_parser(void)
 {
     rx_len = 0;
@@ -128,6 +231,20 @@ static uint8_t expected_for_header(uint8_t b)
         return 3;
     case 0xA1:
         return 10;
+#if KBD_CRYPT_BENCH_KEY
+    case KBD_UART_CMD_SET_LINK_KEY:
+        return 18;   /* [AE][key 0..15][chk] */
+    case KBD_UART_CMD_CRYPT_DIAG:
+        return 2;    /* [AF][chk] -- read-only, no body */
+    case KBD_UART_CMD_CRYPT_FAIL:
+        return 2;    /* [B0][chk] -- read-only, no body */
+    case KBD_UART_CMD_CRYPT_VERIFY:
+        return 3;    /* [B1][mode][chk] */
+#endif
+#if KBD_TX_OUTCOME
+    case KBD_UART_CMD_TX_OUTCOME:
+        return 2;    /* [B2][chk] -- read-only, no body */
+#endif
     case 0xA9:
         /* BLE device-name frames are FIXED 21 bytes on the wire: the host
          * pads [A9][len][name...][chk] out to 21 regardless of len (stock
@@ -156,6 +273,20 @@ static uint8_t frame_is_valid(void)
                 checksum(rx_buf, chk_idx) == rx_buf[chk_idx]);
     } else if (cmd == 0x61) {
         return rx_buf[1] == 0x0D && rx_buf[2] == 0x0A;
+#if KBD_TX_OUTCOME
+    } else if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        return checksum(rx_buf, 1) == rx_buf[1];
+#endif
+#if KBD_CRYPT_BENCH_KEY
+    } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        return checksum(rx_buf, 17) == rx_buf[17];
+    } else if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        return checksum(rx_buf, 1) == rx_buf[1];
+    } else if (cmd == KBD_UART_CMD_CRYPT_FAIL) {
+        return checksum(rx_buf, 1) == rx_buf[1];
+    } else if (cmd == KBD_UART_CMD_CRYPT_VERIFY) {
+        return checksum(rx_buf, 2) == rx_buf[2];
+#endif
     }
     return 0;
 }
@@ -180,6 +311,36 @@ static void dispatch_frame(void)
         if (frame_cb) {
             frame_cb(0xA9, name_len, &rx_buf[2], name_len);
         }
+#if KBD_CRYPT_BENCH_KEY
+    } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_SET_LINK_KEY, 0, &rx_buf[1], 16);
+        }
+    } else if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        /* No ack: the 0x5D reply IS the response, and an ack ahead of it just
+         * gives the host another frame to skip past. */
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_CRYPT_DIAG, 0, 0, 0);
+        }
+    } else if (cmd == KBD_UART_CMD_CRYPT_FAIL) {
+        /* Same no-ack contract: the 0x5F reply IS the response. */
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_CRYPT_FAIL, 0, 0, 0);
+        }
+    } else if (cmd == KBD_UART_CMD_CRYPT_VERIFY) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_CRYPT_VERIFY, rx_buf[1], 0, 0);
+        }
+#endif
+#if KBD_TX_OUTCOME
+    } else if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        /* Same no-ack contract as 0xAF: the 0x62 reply IS the response. */
+        if (frame_cb) {
+            frame_cb(KBD_UART_CMD_TX_OUTCOME, 0, 0, 0);
+        }
+#endif
     } else {
         /* Host ACK to one of our 0x5A/0x5B/0x5C frames. */
     }

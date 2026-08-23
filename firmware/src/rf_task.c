@@ -6,6 +6,9 @@
 #include "ISP592.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#if KBD_RF_CRYPT
+#include "kbd_rf_crypt.h"
+#endif
 
 #define RF_EVT_START              0x0001
 #define RF_EVT_RX_RESTART         0x0002
@@ -15,6 +18,10 @@
 #define RF_EVT_RESPOND            0x0020   /* connected poll-response TX (main loop) */
 #define RF_EVT_NOTIFY_LED         0x0040
 #define RF_EVT_SAVE_BOND          0x0100   /* deferred DataFlash write, not from RF ISR */
+#if KBD_RF_CRYPT
+#define RF_EVT_CRYPT_SESSION      0x0200   /* verify+adopt a received session frame */
+#define RF_EVT_CRYPT_ARM          0x0400   /* pre-seal the next encrypted uplink frame */
+#endif
 
 /* Stock-interop H1/H2 discriminator: skip the first N connected-poll responses
  * (keep listening/tracking, no uplink TX). If the keyboard then catches several
@@ -37,6 +44,12 @@
  * the 6000-count turnaround below. */
 #ifndef STOCK_ISR_FAST_RESPONSE
 #define STOCK_ISR_FAST_RESPONSE 0
+#endif
+/* Omit the RF_Shut() before the response TX. Prerequisite for
+ * STOCK_ISR_FAST_RESPONSE: see the call site for why RF_Shut is what makes the
+ * ISR path unsafe. Default off until soaked. */
+#ifndef RESP_TX_NO_SHUT
+#define RESP_TX_NO_SHUT 0
 #endif
 /* Fast-response fix (matches stock firmwareB.bin 0x20000f06): skip the redundant
  * RF_SetChannel before the response TX -- the radio is already on the poll channel;
@@ -83,6 +96,8 @@
 #define RF_PAIR_BCAST_TICKS       32u      /* 20 ms at 625 us/tick */
 #define RF_PAIR_WINDOW_TICKS      8480u    /* stock pair window is about 5.3 s */
 #define RF_PAIR_DWELL_BCASTS      12u
+/* Advert lead + slot policy live in kbd_rf_crypt.h so a host test can pin
+ * them; there must be no second copy here. */
 #define RF_CONNECTED_TIMEOUT_TICKS 5000u   /* ~3.1 s; FIXED connection supervision --
                                             * the dongle's advertised timeout field is
                                             * intentionally not honored (stock scales it
@@ -91,7 +106,19 @@
 #define RF_BOND_EEPROM_OFF        0x4000u  /* DataFlash 0x74000: stock keyboard 2.4G bond page */
 #define RF_BOND_EEPROM_ERASE_LEN  256u
 #define RF_BOND_MAGIC             0x3244424bu  /* "KBD2" little-endian */
+#if KBD_RF_CRYPT
+/* v2 appends the negotiated flags and the 16-byte link key. The version bump is
+ * deliberate and there is NO migration: a v1 record predates any notion of a
+ * key, so it is invalidated and the unit re-pairs, which is exactly the right
+ * semantics when encryption state enters the bond. The record grows from 24 to
+ * 40 bytes inside an erase page of 256, and the checksum already covers
+ * sizeof-4, so nothing else has to move. */
+#define RF_BOND_VERSION           2u
+#define RF_BOND_FLAG_ENC_CAPABLE  0x01u  /* peer negotiated encryption at pairing */
+#define RF_BOND_FLAG_ENC_KEY      0x02u  /* link_key holds a provisioned key      */
+#else
 #define RF_BOND_VERSION           1u
+#endif
 
 #define R32_RTC_CNT_32K_ADDR      0x40001038u
 #define SYSTICK_CNT_ADDR          0xE000F008u
@@ -149,19 +176,48 @@ static uint8_t has_bond;
 static uint8_t stored_dongle_mac[6];
 static uint32_t stored_session_aa;
 static uint8_t stored_type_tag;
+#if KBD_RF_CRYPT
+static uint8_t stored_bond_flags;
+static uint8_t stored_link_key[KBD_CRYPT_KEY_BYTES];
+#endif
 
 typedef struct {
     uint32_t magic;
     uint8_t  version;
     uint8_t  type_tag;
+#if KBD_RF_CRYPT
+    uint8_t  flags;         /* RF_BOND_FLAG_ENC_*; was the low half of reserved0 */
+    uint8_t  reserved0;
+#else
     uint16_t reserved0;
+#endif
     uint32_t session_aa;
     uint8_t  dongle_mac[6];
     uint16_t reserved1;
+#if KBD_RF_CRYPT
+    uint8_t  link_key[KBD_CRYPT_KEY_BYTES];  /* valid iff flags & ENC_KEY */
+#endif
     uint32_t checksum;
 } rf_bond_record_t;
 
+#if KBD_RF_CRYPT
+/* Encryption is NEGOTIATED, never assumed: it goes active only for a peer that
+ * advertised the capability at pairing AND a key that has been provisioned.
+ * Mirrors the receiver's bond_enc_active(). */
+static uint8_t rf_bond_enc_active(void)
+{
+    return (stored_bond_flags & (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY))
+           == (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY);
+}
+#endif
+
 static uint8_t pair_bcast_count;
+#if KBD_RF_CRYPT
+/* 0 = the next PAIR_BCAST fires the advert, 1 = it fires that slot's beacon.
+ * Reset wherever pair_bcast_count is, so a pairing attempt always leads with an
+ * advert rather than inheriting the previous attempt's phase. */
+static uint8_t pair_slot_phase;
+#endif
 static uint8_t pair_payload[10];
 
 static uint8_t pending_type_tag;
@@ -169,7 +225,52 @@ static uint16_t pending_interval;
 static uint32_t pending_session_aa;
 
 static uint8_t hid_report[8];
+#if KBD_RF_CRYPT
+/* An encrypted boot-keyboard frame is 22 bytes on air, so the response buffer
+ * has to hold one. Sized only in encrypted builds so a plaintext image keeps
+ * its exact .bss layout. */
+static uint8_t tx_payload[KBD_CRYPT_MAX_FRAME];
+/* Session frame copied out of the RX ISR, verified in task context. */
+static volatile uint8_t crypt_session_rx[KBD_CRYPT_LEN_SESSION];
+static volatile uint8_t crypt_session_rx_pending;
+static volatile uint8_t crypt_polls_since_auth;
+static volatile uint8_t crypt_keepalive_due;
+/* Deferred CRYPT_ARM: set by rf_do_response_tx, consumed by the TX_FINISH /
+ * TX_FAIL callback (or the tx_status!=0 fallback), so seal_begin's AES never
+ * overlaps the transmission it follows -- see docs/TODO.md section 0. */
+static volatile uint8_t crypt_arm_after_tx;
+
+/* Seal the next uplink frame, and act on a failure instead of discarding it.
+ *
+ * Neither failure that can reach here is retryable. An engine fault is a fatal
+ * fault of the radio path (hal_aes.h says so explicitly), and counter
+ * exhaustion needs a re-key, not another attempt. Dropping the session makes
+ * the link fail CLOSED in both cases: with no session there is no sealed frame,
+ * and rf_do_response_tx then sends bare acks rather than plaintext. Discarding
+ * the status instead left the keyboard looking healthy while it had nothing to
+ * send, until the receiver's silence guard dropped the link. */
+static void rf_crypt_arm(uint8_t ctrl_hint)
+{
+    kbd_crypt_status_t st;
+#if KBD_CRYPT_BENCH_KEY
+    /* Bench: re-derive the tag of the frame just transmitted, from its own
+     * bytes, before the engine is reused for the next seal. Catches a
+     * corrupted seal at the source (selfck_bad) with the receiver out of the
+     * loop entirely. */
+    kbd_crypt_bench_verify_pending();
+#endif
+    st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD,
+                              hid_report, sizeof(hid_report));
+#if KBD_TX_OUTCOME
+    txo_arm[(unsigned)st < 8u ? (unsigned)st : 7u]++;
+#endif
+    if (st == KBD_CRYPT_FAULT_ENGINE || st == KBD_CRYPT_EXHAUSTED) {
+        kbd_crypt_end_session();
+    }
+}
+#else
 static uint8_t tx_payload[10];
+#endif
 static uint8_t tx_ctrl;
 static uint8_t prev_data_idx;     /* current connected data-channel index */
 static volatile uint8_t pending_led;
@@ -232,6 +333,21 @@ static volatile uint8_t  supervision_kick;
  * convention) so SWD and the .map can resolve them by name. */
 #ifndef RF_DIAG_COUNTERS
 #define RF_DIAG_COUNTERS 1
+#endif
+#if KBD_RF_CRYPT
+/* Session-adoption trace. Not gated on RF_DIAG_COUNTERS: an encrypted link that
+ * never adopts a session is silently dead -- it sends only bare acks, which look
+ * exactly like a healthy idle link until the receiver gives up -- and these
+ * three counters are the difference between diagnosing that in one bench run
+ * and guessing. 12 bytes of the .diag_safe window. (They really are outside
+ * the gate now: the crypto paths increment them unconditionally, so a
+ * KBD_RF_CRYPT=1 RF_DIAG_COUNTERS=0 release build must still link -- the
+ * 2026-08-15 audit caught them defined under the wrong #if.) */
+volatile uint32_t kbd_crypt_sess_rx  __attribute__((section(".diag_safe")));  /* LEN-14 announces seen by the ISR */
+volatile uint32_t kbd_crypt_sess_ok  __attribute__((section(".diag_safe")));  /* verified and adopted */
+volatile uint32_t kbd_crypt_sess_bad __attribute__((section(".diag_safe")));  /* verify rejected */
+volatile uint32_t kbd_crypt_tx_sealed __attribute__((section(".diag_safe")));  /* sealed frames handed to RF_Tx */
+volatile uint32_t kbd_crypt_seal_miss __attribute__((section(".diag_safe")));  /* wanted one, none was ready */
 #endif
 #if RF_DIAG_COUNTERS
 volatile uint32_t rf_cb_count[6] __attribute__((section(".diag_safe")));
@@ -341,12 +457,86 @@ static uint8_t mac_equal(const uint8_t *a, const uint8_t *b)
     return 1;
 }
 
+#if KBD_TX_OUTCOME
+/* Transmit-outcome instrumentation. Answers ONE question about the encrypted
+ * link's measured HID loss (26% of burst-adjacent report changes, 4.3% of
+ * isolated ones, versus 0% on plaintext): are the missing frames NEVER
+ * TRANSMITTED, or transmitted into a phase that misses the receiver's
+ * post-poll RX window? kbd_crypt_tx_sealed cannot answer it -- it increments
+ * BEFORE RF_Tx is called.
+ *
+ * DISCIPLINE, because this instruments the very path whose timing is the
+ * suspect:
+ *   - NOTHING is added between rf_do_response_tx() entry and the RF_Tx call.
+ *     Every counter below is written AFTER RF_Tx has returned, deriving what
+ *     it needs from tx_len, which is still live. The measured path is
+ *     bit-identical to the uninstrumented build up to the transmit.
+ *   - No callable helper anywhere in the response path or the radio callback.
+ *     A flash-resident helper reached from a __HIGH_CODE path is exactly the
+ *     shape that degraded the dongle link (an XIP call in the radio IRQ);
+ *     these are macros so they stay in SRAM with their caller.
+ *   - Plain .bss, NOT .diag_safe: that window has one u32 left, and keeping
+ *     out of it also keeps both_ends.py's absolute addresses stable.
+ *
+ * len_class indexes every array: 0 = 1-byte bare ack, 1 = 10-byte plaintext
+ * report, 2 = 22-byte sealed frame, 3 = anything else. Comparing class 2
+ * against class 0 on the SAME link is the control: both are transmitted from
+ * the same slot by the same code, so a difference between them is not
+ * attributable to the radio or the host. */
+volatile uint32_t txo_start[4];      /* RF_Tx accepted the frame            */
+volatile uint32_t txo_refuse[4];     /* RF_Tx refused synchronously         */
+volatile uint32_t txo_finish[4];     /* TX_MODE_TX_FINISH consumed it       */
+volatile uint32_t txo_fail[4];       /* TX_MODE_TX_FAIL consumed it         */
+volatile uint32_t txo_noterm[4];     /* superseded with no terminal callback */
+/* The catch-all `sta` branch. Instrumented for the same reason the two named
+ * ones are: a transmit that terminates here would otherwise leave txo_inflight
+ * set, and the NEXT transmit would charge it to txo_noterm -- turning an
+ * ordinary alternate completion into fabricated evidence of a lost frame. */
+volatile uint32_t txo_other[4];
+/* Poll-arrival -> RF_Tx latency, per len_class, in 8 buckets of 8192 SysTick
+ * ticks (136.5 us at 60 MHz); bucket 7 saturates. The connection interval is
+ * 875 us, so a frame landing in bucket 6+ has missed most of its slot. This is
+ * the direct test of "transmitted, but too late". */
+volatile uint32_t txo_dpoll[4][8];
+/* bit0 = a transmit is in flight; bits[2:1] = its len_class. Lets the radio
+ * status callback attribute TX_FINISH/TX_FAIL to the right class without the
+ * callback having to know anything about the frame. */
+volatile uint8_t  txo_inflight;
+/* Why rf_crypt_arm() failed to leave a frame ready. seal_miss says a slot wanted
+ * a sealed frame and had none; it cannot say whether the arm was never run, ran
+ * and was refused, or ran and killed the session. Indexed by kbd_crypt_status_t
+ * (0 OK, 1 SHAPE, 2 INACTIVE, 3 BUSY, 4 EXHAUSTED, 5 FAULT_ENGINE), with any
+ * out-of-range status folded into the last bucket. */
+volatile uint32_t txo_arm[8];
+
+/* 22 is spelled out rather than taken from KBD_CRYPT_LEN_BOOT_KBD so this
+ * builds in a PLAINTEXT image too -- the instrumented plaintext control is the
+ * whole reason the counters exist, and that build has no crypt header. */
+#define TXO_LEN_SEALED 22u
+/* Consume an in-flight frame from the radio callback. The txo_inflight test is
+ * load-bearing: these callbacks also fire for transmissions this module never
+ * armed, and counting those would inflate the terminal totals. */
+#define TXO_TERM(arr)                                                         \
+    do {                                                                      \
+        if (txo_inflight & 1u) {                                              \
+            arr[(txo_inflight >> 1) & 3u]++;                                  \
+            txo_inflight = 0u;                                                \
+        }                                                                     \
+    } while (0)
+#else
+#define TXO_TERM(arr) do { } while (0)
+#endif
+
+
 static uint32_t rtc_read_32k(void)
 {
     return *(volatile uint32_t *)R32_RTC_CNT_32K_ADDR;
 }
 
-#if RF_DIAG_COUNTERS
+/* Also outside the diag gate: rf_crypt_ctr_start() folds this into the
+ * per-boot counter seed, so a KBD_RF_CRYPT=1 RF_DIAG_COUNTERS=0 release
+ * build needs it (same audit finding as the kbd_crypt_* counters above). */
+#if RF_DIAG_COUNTERS || KBD_RF_CRYPT
 static uint32_t systick_read(void)
 {
     return *(volatile uint32_t *)SYSTICK_CNT_ADDR;
@@ -459,6 +649,40 @@ static void rf_set_event_atomic(uint16_t evt)
     rf_irq_restore(irq);
 }
 
+#if KBD_RF_CRYPT
+/* A per-boot starting point for the CCM transmit counter.
+ *
+ * Not a security random: the counter travels in the clear, and CCM needs the
+ * nonce to be UNIQUE, not secret. What it must do is differ from boot to boot,
+ * because the receiver's session_id does not reliably differ -- its generator is
+ * close to deterministic for a fixed device, and this bench saw the same value
+ * return across reboots. Two deterministic halves make a repeated session_id
+ * into certain keystream reuse; varying this one breaks that.
+ *
+ * RTC is the part that actually moves between boots; the chip UID only
+ * separates units. Folded with a 32-bit mix so neighbouring RTC values do not
+ * produce neighbouring starts, then bounded well below the top of the range so
+ * exhaustion stays remote. */
+static uint32_t rf_crypt_ctr_start(void)
+{
+    uint8_t uid[8] __attribute__((aligned(4))) = {0};
+    uint32_t x;
+
+    GET_UNIQUE_ID(uid);
+    x = ((uint32_t)uid[0] | ((uint32_t)uid[1] << 8) |
+         ((uint32_t)uid[2] << 16) | ((uint32_t)uid[3] << 24));
+    x ^= ((uint32_t)uid[4] | ((uint32_t)uid[5] << 8) |
+          ((uint32_t)uid[6] << 16) | ((uint32_t)uid[7] << 24));
+    x ^= rtc_read_32k();
+    x ^= systick_read();
+    /* xorshift32 avalanche: spread neighbouring inputs across the range. */
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return x & KBD_CRYPT_CTR_START_MAX;
+}
+#endif
+
 static uint32_t rf_bond_checksum(const rf_bond_record_t *rec)
 {
     const uint8_t *p = (const uint8_t *)rec;
@@ -495,6 +719,16 @@ static void rf_build_bond_record(rf_bond_record_t *rec)
     for (uint8_t i = 0; i < 6; i++) {
         rec->dongle_mac[i] = stored_dongle_mac[i];
     }
+#if KBD_RF_CRYPT
+    rec->flags = stored_bond_flags;
+    /* Canonical form: no key provisioned => the field is zero, so a stale key
+     * can never sit behind a cleared flag. */
+    if (stored_bond_flags & RF_BOND_FLAG_ENC_KEY) {
+        for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+            rec->link_key[i] = stored_link_key[i];
+        }
+    }
+#endif
     rec->checksum = rf_bond_checksum(rec);
 }
 
@@ -540,6 +774,19 @@ static uint8_t rf_load_bond_from_flash(void)
     for (uint8_t i = 0; i < 6; i++) {
         stored_dongle_mac[i] = rec.dongle_mac[i];
     }
+#if KBD_RF_CRYPT
+    stored_bond_flags = rec.flags;
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        stored_link_key[i] = rec.link_key[i];
+    }
+    /* Install the key once, here at boot, where the schedule is off the poll
+     * grid. The per-session nonce arrives later, from the receiver's announce. */
+    if (rf_bond_enc_active()) {
+        kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
+    } else {
+        kbd_crypt_clear();
+    }
+#endif
     has_bond = 1;
     return 1;
 }
@@ -576,11 +823,49 @@ static void rf_clear_bond_ram(void)
     stored_session_aa = 0;
     stored_type_tag = 0;
     tmos_memset(stored_dongle_mac, 0, sizeof(stored_dongle_mac));
+#if KBD_RF_CRYPT
+    /* Unpairing must take the key with it -- a cleared bond that kept its key
+     * would re-arm encryption against a peer we no longer have a session with. */
+    stored_bond_flags = 0;
+    tmos_memset(stored_link_key, 0, sizeof(stored_link_key));
+    kbd_crypt_clear();
+#endif
 }
 
-static void rf_clear_bond_flash(void)
+/* Erase the stored bond, and VERIFY it went. Returns 1 on a proven-erased page.
+ *
+ * The result used to be discarded. EEPROM_ERASE documents 0=SUCCESS/!0=FAILURE,
+ * and the erase is the highest-current flash operation there is -- exactly what
+ * a battery brownout interrupts, and a user pulling power during an unpair is
+ * the likeliest way to cause one. On a failed or interrupted erase the RAM
+ * state said "unpaired, no key" while DataFlash still held a COMPLETE v2
+ * record: flags, peer identity and the 16-byte link key, all in one checksummed
+ * blob. The next boot loaded it verbatim and re-armed encryption toward the peer
+ * the user had just revoked -- and because a different-peer pair is only
+ * reachable through this clear, a subsequent pairing lived in RAM alone and was
+ * silently reverted by any later power cycle.
+ *
+ * Read back and confirm, mirroring rf_save_bond_to_flash's checked erase. If it
+ * still will not erase, overwrite the record's leading word: DataFlash writes
+ * only clear bits, so zeroing the magic invalidates the record even on a page
+ * that refuses to erase. */
+static uint8_t rf_clear_bond_flash(void)
 {
-    (void)EEPROM_ERASE(RF_BOND_EEPROM_OFF, RF_BOND_EEPROM_ERASE_LEN);
+    rf_bond_record_t cur __attribute__((aligned(4)));
+    uint32_t zero = 0;
+
+    if (EEPROM_ERASE(RF_BOND_EEPROM_OFF, RF_BOND_EEPROM_ERASE_LEN) == 0
+        && EEPROM_READ(RF_BOND_EEPROM_OFF, &cur, sizeof(cur)) == 0
+        && rf_bond_flash_is_erased(&cur)) {
+        return 1;
+    }
+
+    (void)EEPROM_WRITE(RF_BOND_EEPROM_OFF, &zero, sizeof(zero));
+    if (EEPROM_READ(RF_BOND_EEPROM_OFF, &cur, sizeof(cur)) == 0
+        && !rf_bond_record_valid(&cur)) {
+        return 1;                 /* not erased, but no longer a loadable bond */
+    }
+    return 0;
 }
 
 /* PLL servo (stock 0x20000D60): pull the hop anchor toward the reference time
@@ -678,6 +963,17 @@ __HIGH_CODE
 void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 {
     RF_DIAG_INC(rf_cb_count[0]);
+#if KBD_CRYPT_BENCH_KEY
+    /* Bench: this callback preempts the task context that runs seal_begin /
+     * the self-verify; the vendor IRQ path reads/clears AES_STA. Count the
+     * overlaps, total and per-seal. */
+    if (kbd_crypt_in_aes) {
+        kbd_crypt_bb_during_aes++;
+        if (kbd_crypt_seal_bb != 0xFFu) {
+            kbd_crypt_seal_bb++;
+        }
+    }
+#endif
 #if RF_DIAG_COUNTERS
     ll_trace_rec(sta, rsr, rxBuf);
 #endif
@@ -754,7 +1050,15 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
              * ignored here -- responding to them disrupts the lock. (Measured: the
              * keyboard never even receives the EV10 LEN-15 re-key before a drop --
              * the drop is loss of channel lock, not an EV10-rekey-ignore.) */
-            if (len != 1u && len != 3u && len != 10u) {
+            if (len != 1u && len != 3u && len != 10u
+#if KBD_RF_CRYPT
+                /* The receiver announces a fresh session nonce in place of a
+                 * poll, so this length has to be let through or encryption can
+                 * never start. It is authenticated, but not here: copy it out
+                 * and verify in task context (hal_aes must not run in an ISR). */
+                && len != KBD_CRYPT_LEN_SESSION
+#endif
+                ) {
                 rf_set_event_atomic(RF_EVT_RX_RESTART);
                 return;
             }
@@ -809,6 +1113,29 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                 pending_led = rxBuf[4];
                 rf_set_event_atomic(RF_EVT_NOTIFY_LED);
             }
+#if KBD_RF_CRYPT
+            /* Session announce: copy it out and defer. Verifying needs the AES
+             * engine, which must not run here -- same discipline the receiver
+             * uses for its own decrypt path. Nothing is adopted until the tag
+             * checks out in task context. */
+            if (len == KBD_CRYPT_LEN_SESSION && rxBuf[3] == KBD_CRYPT_TAG_SESSION
+                && !crypt_session_rx_pending) {
+                for (uint8_t i = 0; i < KBD_CRYPT_LEN_SESSION; i++) {
+                    crypt_session_rx[i] = rxBuf[2 + i];
+                }
+                crypt_session_rx_pending = 1;
+                kbd_crypt_sess_rx++;
+                rf_set_event_atomic(RF_EVT_CRYPT_SESSION);
+            }
+            /* Count every connected reception against the receiver's silence
+             * guard; only a frame we actually authenticated resets it. */
+            if (crypt_polls_since_auth < 0xFFu) {
+                crypt_polls_since_auth++;
+            }
+            if (crypt_polls_since_auth >= KBD_CRYPT_KEEPALIVE_POLLS) {
+                crypt_keepalive_due = 1;
+            }
+#endif
 
             /* Re-arm the supervision timer in the main loop (RF_ConnectedTick),
              * NOT here: tmos_start/stop_task are not safe from this ISR (see the
@@ -835,19 +1162,37 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FINISH) {
         RF_DIAG_INC(rf_cb_count[3]);
+        TXO_TERM(txo_finish);
         response_pending = 0;   /* response done -> hop may retune again */
+#if KBD_RF_CRYPT
+        /* The radio is quiet now: release the deferred seal arm (see
+         * rf_do_response_tx). Posted after RX_RESTART in priority order, so
+         * the RX re-arm still runs first. */
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
     }
 
     if (sta == TX_MODE_TX_FAIL) {
         RF_DIAG_INC(rf_cb_count[4]);
+        TXO_TERM(txo_fail);
         response_pending = 0;
+#if KBD_RF_CRYPT
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
     }
 
     RF_DIAG_INC(rf_cb_count[5]);
+    TXO_TERM(txo_other);
     rf_set_event_atomic(RF_EVT_RX_RESTART);
 }
 
@@ -875,6 +1220,60 @@ static void rf_do_response_tx(void)
     }
 #endif
     tx_payload[0] = response_ctrl;
+    tx_len = 1;
+#if KBD_RF_CRYPT
+    /* Gate on whether the BOND requires encryption, NOT on whether a session is
+     * currently usable. Those differ, and the difference leaked keystrokes:
+     * kbd_crypt_active() additionally demands an adopted session, and
+     * rf_enter_connected() ends the session on EVERY connect, so between connect
+     * and the receiver's session announce this test was false on an
+     * encryption-required bond and execution fell through to the plaintext
+     * branch below. A report pending across that window went out as
+     * [ctrl][A1][report] in clear. The receiver discards it as a downgrade, so
+     * the link still worked and the leak was invisible -- but a passive listener
+     * gets the keystroke, which is the exact thing this feature exists to stop.
+     *
+     * With the bond-level predicate, an encryption-required bond that has no
+     * usable session simply finds no sealed frame and sends the bare ack. */
+    if (rf_bond_enc_active()) {
+        /* Either the pre-sealed frame goes out or the bare ack does -- never
+         * the plaintext report. */
+        if (hid_resend || crypt_keepalive_due) {
+            uint8_t sealed_len = 0;
+            /* No cipher work happens here: seal_finish only selects the tag
+             * that seal_begin already computed for this ctrl. */
+            if (kbd_crypt_seal_finish(response_ctrl, tx_payload, &sealed_len)
+                    == KBD_CRYPT_OK) {
+                tx_len = sealed_len;
+                if (hid_resend) {
+                    hid_resend--;
+                }
+                crypt_keepalive_due = 0;
+                crypt_polls_since_auth = 0;
+                tx_payload[0] = response_ctrl;
+                kbd_crypt_tx_sealed++;
+#if KBD_CRYPT_BENCH_KEY
+                /* Bench: snapshot the exact bytes handed to RF_Tx below; the
+                 * next CRYPT_ARM re-verifies them in task context. */
+                kbd_crypt_bench_snapshot(tx_payload, tx_len);
+#endif
+            } else {
+                kbd_crypt_seal_miss++;
+            }
+            /* Seal the next one from task context, whether or not this slot
+             * found a frame ready -- but only AFTER this transmission
+             * completes. Arming here made seal_begin's ~160 us of AES overlap
+             * the ~88 us on-air TX + TX_FINISH window, where a BLEB preempt
+             * silently aborts an AES block into stale output (docs/TODO.md
+             * section 0) -- the ~12% garbage-tag defect. The TX_FINISH /
+             * TX_FAIL callback consumes this latch and posts RF_EVT_CRYPT_ARM
+             * once the radio is done; RF_EVT_RX_RESTART outranks it in
+             * RF_ProcessEvent, so the RX re-arm still runs first and the seal
+             * lands in the dead air before the next poll. */
+            crypt_arm_after_tx = 1u;
+        }
+    } else
+#endif
     if (hid_resend) {
         tx_payload[1] = 0xA1;
         for (uint8_t i = 0; i < 8; i++) {
@@ -882,11 +1281,29 @@ static void rf_do_response_tx(void)
         }
         tx_len = 10;
         hid_resend--;
-    } else {
-        tx_len = 1;
     }
     RF_DIAG_SET(last_rf_op, 3);
+#if !RESP_TX_NO_SHUT
+    /* Stop the armed RX so the radio can turn around and transmit.
+     *
+     * This is the blocker for moving the response into the TMR0 turnaround ISR:
+     * RF_Shut() reaches tmos_stop_task() and tmos_memory_free(), and the vendor
+     * TMOS mutators guard themselves by masking IRQ 21 only -- TMR0 is IRQ 16.
+     * A TMR0 ISR landing inside a main-loop tmos_* critical section would
+     * re-enter the allocator and the timer list on half-mutated state. Removing
+     * this call is a PREREQUISITE for that experiment -- it does not by itself
+     * make RF_Tx ISR-safe, which is still unproven: RF_Tx touches substantial
+     * vendor RF state and calls TMOS_SysRegister.
+     *
+     * It is redundant here. Disassembly of LIBCH59xBLE.a shows RF_Tx calls
+     * phy_status_clear(), which inspects the live LLE state and issues
+     * ble_ll_hw_api_shut() itself when it is not idle -- and under LLE_MODE_BASIC
+     * the radio is ALREADY idle by this point, because rf_rx_basic_rxProcess
+     * calls rf_stop() before it invokes RF_2G4StatusCallBack. What RF_Tx does
+     * NOT duplicate is RF_Shut's software cleanup; the RX re-arm in
+     * rf_start_rx() begins with its own RF_Shut, which normalises that. */
     RF_Shut();
+#endif
 #if !STOCK_RESP_NO_SETCH
     /* Redundant: the radio is already on the poll channel from rf_start_rx, and
      * re-setting it forces a ~150us PLL relock -- pushing the response outside the
@@ -897,9 +1314,62 @@ static void rf_do_response_tx(void)
     uint8_t tx_status = RF_Tx(tx_payload, tx_len, 0xFF, 0xFF);
     RF_DIAG_SET(rf_last_tx_status, tx_status);
     RF_DIAG_INC(rf_connected_tx_count);
+#if KBD_TX_OUTCOME
+    /* Post-commit only: the transmit is already handed to the radio, so none
+     * of this can delay it. ll_rx_cb_last_sys is the SysTick stamp taken when
+     * this poll arrived (already maintained under RF_DIAG_COUNTERS), so the
+     * latency comes for free. */
+    {
+        /* Classify with an explicit if-chain, not a ternary cascade: GCC turned
+         * the cascade into a .rodata jump table, and reading it here is an XIP
+         * FLASH access while this SRAM-resident routine sits inside an
+         * in-progress transmission -- the same shape that degraded the dongle
+         * link when a helper went flash-resident in its radio IRQ path. */
+        uint8_t cls = 3u;
+        uint32_t d, b;
+
+        if (tx_len == 1u) {
+            cls = 0u;
+        } else if (tx_len == 10u) {
+            cls = 1u;
+        } else if (tx_len == TXO_LEN_SEALED) {
+            cls = 2u;
+        }
+
+        /* Claim the in-flight slot FIRST. TX_FINISH/TX_FAIL can arrive as soon
+         * as RF_Tx returns, and a terminal that lands before this store is
+         * silently dropped -- which would then be charged to txo_noterm on the
+         * next transmit, fabricating evidence of a lost frame. The remaining
+         * window is a couple of instructions against an ~88 us transmission,
+         * but it costs nothing to make it as small as possible. */
+        if (txo_inflight & 1u) {
+            /* Previous frame produced no terminal callback we recognised
+             * before this slot superseded it. */
+            txo_noterm[(txo_inflight >> 1) & 3u]++;
+        }
+        txo_inflight = (tx_status != 0) ? 0u : (uint8_t)(1u | (cls << 1));
+
+        if (tx_status != 0) {
+            txo_refuse[cls]++;
+        } else {
+            txo_start[cls]++;
+        }
+        /* Latency LAST: it is the only part that reads a peripheral, and it is
+         * pure telemetry -- nothing downstream depends on it. */
+        d = systick_read() - ll_rx_cb_last_sys;
+        b = d >> 13;
+        txo_dpoll[cls][b > 7u ? 7u : b]++;
+    }
+#endif
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
         response_pending = 0;
+#if KBD_RF_CRYPT
+        if (crypt_arm_after_tx) {
+            crypt_arm_after_tx = 0u;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        }
+#endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
     }
 }
@@ -964,6 +1434,38 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_NOTIFY_LED;
     }
 
+#if KBD_RF_CRYPT
+    if (events & RF_EVT_CRYPT_SESSION) {
+        uint8_t frame[KBD_CRYPT_LEN_SESSION];
+        uint32_t sid = 0;
+
+        for (uint8_t i = 0; i < KBD_CRYPT_LEN_SESSION; i++) {
+            frame[i] = crypt_session_rx[i];
+        }
+        crypt_session_rx_pending = 0;
+        /* A frame that does not authenticate is simply dropped: it is noise or
+         * a forgery, and adopting from it would hand an attacker our session. */
+        if (kbd_crypt_verify_session(frame, KBD_CRYPT_LEN_SESSION, &sid)
+                == KBD_CRYPT_OK) {
+            kbd_crypt_adopt_session(sid);
+            kbd_crypt_sess_ok++;
+            rf_set_event_atomic(RF_EVT_CRYPT_ARM);
+        } else {
+            kbd_crypt_sess_bad++;
+        }
+        return events ^ RF_EVT_CRYPT_SESSION;
+    }
+
+    if (events & RF_EVT_CRYPT_ARM) {
+        /* Task context: the whole CCM for the next uplink frame, so the
+         * response path has only a buffer copy left to do. */
+        if (kbd_crypt_active() && !kbd_crypt_seal_pending()) {
+            rf_crypt_arm(tx_ctrl);
+        }
+        return events ^ RF_EVT_CRYPT_ARM;
+    }
+#endif
+
     if (events & RF_EVT_SAVE_BOND) {
         rf_save_bond_to_flash();
         return events ^ RF_EVT_SAVE_BOND;
@@ -1014,6 +1516,12 @@ static uint8_t rf_configure(uint32_t access_addr)
     cfg.CRCInit = RF_CRC_INIT;
     cfg.rfStatusCB = RF_2G4StatusCallBack;
     cfg.RxMaxlen = RF_RX_MAX_LEN;
+#if KBD_RF_CRYPT
+    /* The memset above leaves TxMaxlen at 0 while the library documents a
+     * default of 251. Ten-byte frames evidently pass regardless, but an
+     * encrypted frame is 22, so stop relying on that and state the bound. */
+    cfg.TxMaxlen = RF_RX_MAX_LEN;
+#endif
 
     RF_DIAG_INC(rf_config_count);
     uint8_t cfg_status = RF_Config(&cfg);
@@ -1067,6 +1575,10 @@ static void rf_start_rx(uint8_t channel)
 #endif
 }
 
+#if KBD_RF_CRYPT
+static void rf_pair_send_cap_advert(uint16_t next_delay);
+#endif
+
 static void rf_pair_broadcast(void)
 {
     RF_DIAG_SET(last_rf_op, 2);
@@ -1074,6 +1586,48 @@ static void rf_pair_broadcast(void)
     uint8_t pair_channel_idx = (uint8_t)(dwell % NUM_PAIR_CHANNELS);
 
     rf_channel = pair_channels[pair_channel_idx];
+
+#if KBD_RF_CRYPT
+    /* LEAD EVERY BEACON with the capability advert, 2.5 ms earlier, on the same
+     * channel. The receiver commits the bond on the FIRST beacon it hears and
+     * never re-arms RX on the pair AA before promoting, so the advert has to
+     * precede whichever beacon that turns out to be -- and a receiver joining
+     * mid-stream has no idea which one that is.
+     *
+     * The previous schedule (slots 0,1 then one in eight) assumed both ends
+     * start together. They do not: the documented order puts the KEYBOARD into
+     * pairing first and restarts the dongle into an already-running broadcast.
+     * With the dongle camped on a fixed channel and the keyboard hopping three,
+     * every audible dwell after the first then OPENED with three consecutive
+     * beacons, so capability landed 0/10 in that order against 11/11 with the
+     * dongle listening first (Fisher p < 0.00001, 2026-08-22). Leading every
+     * beacon makes the first audible frame an advert wherever the receiver
+     * joins.
+     *
+     * THE ORDER IS THE SAFETY PROPERTY, not the density. A 2026-08 attempt put
+     * the advert AFTER the beacon and broke pairing outright: the pair-ACK
+     * arrives in the quiet window right after a beacon, and an advert there left
+     * the keyboard deaf (RF_Shut/RF_Tx) exactly then. Leading the beacon keeps
+     * that window as empty as it has always been -- keyboard TX-busy during
+     * either ACK is unchanged at 0%. Do not move the advert after the beacon.
+     * firmware/tests/test_pair_slots.py pins this as property P4.
+     *
+     * The beacon keeps its own 20 ms cadence and its channel is still chosen
+     * from the BEACON index, so a stock receiver sees a byte-identical beacon
+     * schedule. Adverts ride only the fresh-pair AA: a bonded reconnect's
+     * capability is already on the receiver's record. */
+    uint8_t advert_enabled = (rf_access_addr == RF_DEFAULT_ACCESS_ADDR) ? 1u : 0u;
+    uint8_t send_advert = 0u;
+    uint16_t next_delay = kbd_pair_slot_next(advert_enabled, &pair_slot_phase,
+                                             &send_advert);
+    if (send_advert) {
+        rf_pair_send_cap_advert(next_delay);
+        return;
+    }
+#else
+    const uint8_t advert_enabled = 0u;
+    const uint16_t next_delay = RF_PAIR_BCAST_TICKS;
+#endif
 
     for (uint8_t i = 0; i < 6; i++) {
         pair_payload[i] = keyboard_mac[i];
@@ -1090,8 +1644,47 @@ static void rf_pair_broadcast(void)
 
     RF_DIAG_INC(rf_pair_bcast_count);
     pair_bcast_count++;
-    rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
+    /* Subtract the lead the advert already consumed, so beacon-to-beacon
+     * spacing stays exactly RF_PAIR_BCAST_TICKS and the dwell/hop schedule is
+     * byte-identical to a build without encryption. */
+    (void)advert_enabled;
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, next_delay);
 }
+
+#if KBD_RF_CRYPT
+/* Tell the receiver we can do link encryption, so it records the capability on
+ * the bond it is about to write. Purely additive: the beacon carries no tag
+ * byte and the receiver classifies pair traffic by length, so this LEN-3 frame
+ * is a separate transmission that a receiver without the feature ignores.
+ *
+ * It LEADS every beacon by KBD_PAIR_ADVERT_LEAD_TICKS on the same channel, so
+ * the first frame a receiver hears is an advert wherever in the stream it
+ * joins. Both halves of the slot are separate PAIR_BCAST firings -- TX
+ * completion is asynchronous (TX_MODE_TX_FINISH re-arms RX), so two RF_Tx calls
+ * cannot be chained inside one firing; the schedule sequences them instead, and
+ * kbd_pair_slot_next() owns that policy.
+ *
+ * The old comment here said the receiver "only has to see this once during the
+ * pairing window". That was the defect: the receiver commits the bond on the
+ * FIRST beacon it hears and never re-arms RX on the pair AA again before
+ * promoting, so the advert must precede THAT beacon, not merely appear
+ * sometime. Under the old one-in-eight schedule it usually did not --
+ * capability latched 0/10 in the documented pairing order. */
+static void rf_pair_send_cap_advert(uint16_t next_delay)
+{
+    uint8_t cap[KBD_CRYPT_LEN_CAP];
+
+    cap[0] = 0u;                         /* ctrl: ignored by the receiver here */
+    cap[1] = KBD_CRYPT_TAG_CAP;
+    cap[2] = KBD_CRYPT_CAP_VERSION;
+
+    RF_Shut();
+    rf_configure_if_needed(rf_access_addr);
+    (void)RF_Tx(cap, sizeof(cap), 0xFF, 0xFF);
+    /* Its beacon follows in the SAME slot, one lead later. */
+    rf_start_task_atomic(RF_EVT_PAIR_BCAST, next_delay);
+}
+#endif
 
 static void rf_enter_connected(void)
 {
@@ -1107,6 +1700,18 @@ static void rf_enter_connected(void)
     rf_conn_interval = pending_interval;
     prev_data_idx = (uint8_t)((stored_type_tag + STOCK_CONNECT_IDX_BIAS) % NUM_DATA_CHANNELS);
     tx_ctrl = 0x02;
+#if KBD_RF_CRYPT
+    /* We always advertise the capability while pairing, so the bond is capable
+     * from our side; encryption still needs a key before it goes active. */
+    stored_bond_flags |= RF_BOND_FLAG_ENC_CAPABLE;
+    /* Each connection gets a fresh session from the receiver's announce. Drop
+     * any session carried over from the previous one so nothing is transmitted
+     * under a session the receiver has already replaced. */
+    kbd_crypt_end_session();
+    crypt_session_rx_pending = 0;
+    crypt_polls_since_auth = 0;
+    crypt_keepalive_due = 0;
+#endif
     hop_anchor = pending_anchor;   /* seeded at the 2nd 15-byte (rx-13) */
     since_rx = 0;
     response_pending = 0;
@@ -1293,6 +1898,20 @@ void TMR0_IRQHandler(void)
 
 void RF_TaskInit(void)
 {
+#if KBD_RF_CRYPT
+    /* Before any bond load: rf_load_bond_from_flash() installs the link key
+     * through this backend. Safe here because CH59x_BLEInit()/RF_RoleInit()
+     * have already run by the time the RF task is created. */
+    kbd_crypt_init();
+    /* .diag_safe is NOLOAD and deliberately not zeroed by startup (that is how
+     * ll_boot_count survives a reset), so these must be cleared explicitly or
+     * they read as stale RAM. */
+    kbd_crypt_sess_rx = 0;
+    kbd_crypt_sess_ok = 0;
+    kbd_crypt_sess_bad = 0;
+    kbd_crypt_tx_sealed = 0;
+    kbd_crypt_seal_miss = 0;
+#endif
 #if RF_DIAG_COUNTERS
     for (uint8_t i = 0; i < 6; i++) {
         rf_cb_count[i] = 0;
@@ -1362,6 +1981,9 @@ void RF_TaskInit(void)
         rf_access_addr = stored_session_aa;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
+        #if KBD_RF_CRYPT
+        pair_slot_phase = 0u;
+        #endif
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     } else {
         rf_set_event_atomic(RF_EVT_START);
@@ -1380,6 +2002,9 @@ uint8_t RF_Select2G4(void)
         rf_access_addr = stored_session_aa;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
+        #if KBD_RF_CRYPT
+        pair_slot_phase = 0u;
+        #endif
         rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     }
@@ -1403,6 +2028,9 @@ void RF_EnterPairing(void)
     rf_access_addr = RF_DEFAULT_ACCESS_ADDR;
     rf_channel = pair_channels[0];
     pair_bcast_count = 0;
+    #if KBD_RF_CRYPT
+    pair_slot_phase = 0u;
+    #endif
     rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     rf_start_task_atomic(RF_EVT_PAIR_TIMEOUT, RF_PAIR_WINDOW_TICKS);
 }
@@ -1434,11 +2062,14 @@ void RF_FlushBondSave(void)
     }
 }
 
-void RF_ClearBond(void)
+uint8_t RF_ClearBond(void)
 {
     rf_clear_bond_ram();
     bond_save_pending = 0;
-    rf_clear_bond_flash();
+    /* Propagate the result: an unpair that only cleared RAM looks identical to
+     * the caller but resurrects the whole bond -- key included -- at the next
+     * boot, so the UART path must be able to report failure rather than ack it. */
+    return rf_clear_bond_flash();
 }
 
 uint8_t RF_HasBond(void)
@@ -1449,6 +2080,22 @@ uint8_t RF_HasBond(void)
 void RF_QueueHIDReport(const uint8_t report[8])
 {
     uint8_t changed = 0;
+    /* IRQs off across the whole update.
+     *
+     * hid_report is read byte-by-byte by the response path and hid_resend is a
+     * read-modify-write there. Today both run in this same cooperative context,
+     * so the 8-byte copy is atomic by construction -- but under
+     * STOCK_ISR_FAST_RESPONSE the responder becomes the TMR0 ISR, which can then
+     * land in the middle of this loop and put HALF THE OLD REPORT and half the
+     * new one on air. Masking here costs a few microseconds in a
+     * non-time-critical path and makes the update atomic under either responder,
+     * which is a precondition for that experiment being safe to run at all.
+     *
+     * The mask also covers hid_resend and the seal discard below, so the
+     * responder can never observe "new report, stale resend count" or the
+     * reverse. */
+    uint32_t irq = rf_irq_save();
+
     for (uint8_t i = 0; i < 8; i++) {
         if (hid_report[i] != report[i]) {
             changed = 1;
@@ -1459,8 +2106,72 @@ void RF_QueueHIDReport(const uint8_t report[8])
      * next few polls so a dropped slot doesn't lose a key-down or key-up. */
     if (changed) {
         hid_resend = HID_RESEND_COUNT;
+#if KBD_RF_CRYPT
+        /* Only DISCARD the prepared frame here -- do not build its replacement.
+         *
+         * Any prepared frame holds the previous report, so it must not go out.
+         * But this runs from the UART command handler, which is asynchronous to
+         * the radio's poll grid, and sealing costs ~160 us of AES. With the
+         * default STOCK_ISR_FAST_RESPONSE=0 the turnaround ISR only posts
+         * RF_EVT_RESPOND, and this single cooperative main loop cannot service
+         * it until the seal returns -- so a seal starting shortly before a poll
+         * pushes the response past the receiver's post-poll RX window and the
+         * response is simply lost. Bench-observed: a keystroke that never
+         * arrived while the link was otherwise healthy, and a keepalive rate at
+         * roughly half its nominal value.
+         *
+         * Discarding is cipher-free and safe anywhere. The replacement is built
+         * by the RF_EVT_CRYPT_ARM handler, which is posted from the response
+         * path -- the quiet window immediately after a transmission, ~700 us
+         * before the next poll. The report therefore waits one extra poll
+         * (~1.75 ms rather than ~875 us) before going on air, which is far below
+         * anything a typist can perceive and much cheaper than losing it. */
+        kbd_crypt_seal_discard();
+#endif
     }
+    rf_irq_restore(irq);
 }
+
+#if KBD_RF_CRYPT
+/* Provision the 16-byte link key into the bond and activate encryption.
+ *
+ * BRING-UP SCAFFOLD. Until the key-establishment handshake exists, both ends
+ * are given the same key out of band -- this is the keyboard half, the
+ * receiver's is its USB IAP BondWrite. It is deliberately not reachable from
+ * any shipped command path: a link key that any host can overwrite at will is
+ * an open door to exactly the injection this feature exists to stop.
+ *
+ * Returns 0 if there is no bond to attach the key to, or if the key is one of
+ * the two values that mean "erased flash" rather than a key. */
+uint8_t RF_ProvisionLinkKey(const uint8_t key[KBD_CRYPT_KEY_BYTES])
+{
+    uint8_t all_zero = 1;
+    uint8_t all_ff = 1;
+
+    if (!has_bond) {
+        return 0;
+    }
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        if (key[i] != 0x00u) {
+            all_zero = 0;
+        }
+        if (key[i] != 0xFFu) {
+            all_ff = 0;
+        }
+    }
+    if (all_zero || all_ff) {
+        return 0;
+    }
+
+    for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+        stored_link_key[i] = key[i];
+    }
+    stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE);
+    kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
+    rf_save_bond_to_flash();
+    return 1;
+}
+#endif
 
 uint8_t RF_GetState(void)
 {

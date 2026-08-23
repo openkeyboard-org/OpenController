@@ -12,6 +12,9 @@
 #include "HAL.h"
 #include "keyboard_uart.h"
 #include "rf_task.h"
+#if KBD_CRYPT_BENCH_KEY
+#include "kbd_rf_crypt.h"   /* bench self-verify counters + latch */
+#endif
 #include "openboot_app.h"
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
@@ -65,6 +68,80 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         return;
     }
 
+#if KBD_CRYPT_BENCH_KEY
+    if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
+        /* Bench scaffold; see keyboard_uart.h for why this is behind its own
+         * flag. Status mirrors the pairing codes so the bench driver can read
+         * the outcome: 0x21 accepted, 0x36 rejected (no bond, or a key of all
+         * 0x00 / all 0xFF, which are erased-flash patterns rather than keys). */
+        KeyboardUart_SendStatus(RF_ProvisionLinkKey(payload) ? 0x21 : 0x36);
+        return;
+    }
+
+    if (cmd == KBD_UART_CMD_CRYPT_DIAG) {
+        /* Same .diag_safe counters that were previously read over SWD, sent out
+         * of band instead. Order matches the reply layout documented in
+         * keyboard_uart.h; keep the two in step. The bench self-verify
+         * counters (kbd_rf_crypt.h) append AFTER the original five so an old
+         * reader still parses the prefix. */
+        const uint32_t counters[9] = {
+            kbd_crypt_seal_miss, kbd_crypt_tx_sealed,
+            kbd_crypt_sess_bad,  kbd_crypt_sess_ok, kbd_crypt_sess_rx,
+            kbd_crypt_selfck_ok, kbd_crypt_selfck_bad,
+            kbd_crypt_bb_during_aes, kbd_crypt_seal_redo,
+        };
+        KeyboardUart_SendCryptDiag(counters, 9u);
+        return;
+    }
+
+    if (cmd == KBD_UART_CMD_CRYPT_VERIFY) {
+        kbd_crypt_selfck_enable = sub ? 1u : 0u;
+        return;
+    }
+
+#if KBD_TX_OUTCOME
+    if (cmd == KBD_UART_CMD_TX_OUTCOME) {
+        /* Order MUST match the layout documented in keyboard_uart.h. Flattened
+         * here rather than memcpy'd so the ordering is visible at the one place
+         * a reader checks it against the host parser. */
+        uint32_t v[64];
+        uint8_t i, j;
+
+        for (i = 0; i < 4u; i++) {
+            v[i]        = txo_start[i];
+            v[4u + i]   = txo_refuse[i];
+            v[8u + i]   = txo_finish[i];
+            v[12u + i]  = txo_fail[i];
+            v[16u + i]  = txo_noterm[i];
+            v[20u + i]  = txo_other[i];
+        }
+        for (i = 0; i < 4u; i++) {
+            for (j = 0; j < 8u; j++) {
+                v[24u + (i * 8u) + j] = txo_dpoll[i][j];
+            }
+        }
+        for (i = 0; i < 8u; i++) {
+            v[56u + i] = txo_arm[i];
+        }
+        KeyboardUart_SendTxOutcome(v, 64u);
+        return;
+    }
+#endif
+
+    if (cmd == KBD_UART_CMD_CRYPT_FAIL) {
+        KeyboardUart_SendCryptFail(kbd_crypt_selfck_latched,
+                                   kbd_crypt_selfck_len,
+                                   kbd_crypt_selfck_session,
+                                   kbd_crypt_selfck_seal_bb,
+                                   kbd_crypt_selfck_frame,
+                                   kbd_crypt_selfck_good,
+                                   kbd_crypt_selfck_plain,
+                                   kbd_crypt_selfck_s1,
+                                   kbd_crypt_selfck_s0);
+        return;
+    }
+#endif
+
     if (cmd != 0xA6) {
         return;
     }
@@ -106,8 +183,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x52: /* unpair */
         RF_Disconnect();
-        RF_ClearBond();
-        KeyboardUart_SendStatus(0x33);
+        /* Report the DISCONNECT status only when the stored bond is provably
+         * gone. A flash erase that silently failed used to ack success while
+         * the record -- key included -- survived to be reloaded at the next
+         * boot; 0x36 (refused) tells the operator to retry instead. */
+        if (RF_ClearBond()) {
+            KeyboardUart_SendStatus(0x33);
+        } else {
+            KeyboardUart_SendStatus(0x36);
+        }
         break;
 
     case 0x53: /* battery */
@@ -123,7 +207,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x63: /* factory 2.4G pair */
         transport_is_2g4 = 1;
         RF_Disconnect();
-        RF_ClearBond();
+        if (!RF_ClearBond()) {
+            KeyboardUart_SendStatus(0x36);   /* stale bond survives; do not pair */
+            break;
+        }
         RF_EnterPairing();
         KeyboardUart_SendStatus(0x31);
         KeyboardUart_SendStatus(0x23);
