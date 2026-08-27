@@ -4,7 +4,7 @@ Firmware for a WCH CH592F (QingKe RISC-V4F) wireless module that adds
 2.4 GHz wireless support to QMK keyboards. The CH592F sits next to the
 keyboard's host MCU, speaks a binary command/status protocol over UART1,
 and implements the keyboard-side wireless link used by
-[OpenDongle](https://github.com/openkeyboard-org): pairing, connected-mode
+[OpenDongle](https://github.com/openkeyboard-org/OpenDongle): pairing, connected-mode
 channel hopping, HID report uplink, and persistent bonding in DataFlash.
 
 Status: the 2.4 GHz connected-mode HID link is bench-validated end-to-end
@@ -108,16 +108,18 @@ fallbacks in `src/rf_task.c`. Enable one with, for example,
 `make EXTRA_CFLAGS="-DSTOCK_SUPPRESS_RESPONSES=1"`; pass multiple `-D`
 options inside the quoted `EXTRA_CFLAGS` value to enable several at once.
 
-The BLE library defaults to the vendored V1.4.2 triple; other versions are
-drop-in directories selected with `make BLE_LIB_DIR=...`.
+The BLE library defaults to the submodule-provided V1.4.2 triple; other
+versions are drop-in directories selected with `make BLE_LIB_DIR=...`.
 
 ## Layout and licensing
 
 - `src/`, `ld/`, `Makefile`, `docs/` — first-party, Apache-2.0
   (see `LICENSE`), **except** `src/startup_CH592_phased.S`, a WCH-derived
   startup fork that remains under WCH's notice (see `NOTICE`).
-- `vendor/` — WCH SDK subset and BLE library, **not** Apache-2.0; see
-  `NOTICE` and `vendor/README.md` for terms, provenance, and checksums.
+- `../third_party/weactstudio-wch-ble-core/` and OpenBoot's recursive
+  `third_party/openwch/ch592/` submodule provide the WCH SDK and BLE library;
+  they are **not** Apache-2.0. See `NOTICE` and the upstream repositories for
+  terms and provenance.
 - `docs/TMOS_REVIEW.md` — SDK-alignment review; the written rationale for
   interrupt-architecture decisions (e.g. why there is no app
   `BB_IRQHandler`).

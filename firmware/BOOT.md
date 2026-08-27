@@ -1,3 +1,8 @@
+<!--
+Copyright 2026 Eric Molitor (EMulator)
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Boot architecture: OpenBoot on the CH592F keyboard module
 
 The application runs under [OpenBoot](https://github.com/openkeyboard-org/OpenBoot)

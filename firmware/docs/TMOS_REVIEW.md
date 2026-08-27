@@ -1,3 +1,8 @@
+<!--
+Copyright 2026 Eric Molitor (EMulator)
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # TMOS / CH592 SDK Alignment Review
 
 **Subject:** This firmware (`src/`) vs. the canonical WCH CH592 BLE/RF SDK ("TMOS") conventions.
@@ -260,7 +265,7 @@ recommendation text, retained for history — neither is an open task.**
   removes ~120 lines of assembly and directly answers the original suspicion.
 
 Either way, **bench-verify** (timing-sensitive; the project's empirical culture): build
-`make BLE_LIB_DIR=vendor-ble-v1.00 RF_DIAG_COUNTERS=1`, confirm `bb_irq_count` / `rf_cb_count[*]`
+`make BLE_LIB_DIR=path/to/ble-lib-v1.00 RF_DIAG_COUNTERS=1`, confirm `bb_irq_count` / `rf_cb_count[*]`
 behavior, and re-run a connected-mode soak to confirm 100% delivery is retained.
 
 **P2 — Document the deliberate divergences and name the CSR helpers.** *(clarity)* (a) ~~note why

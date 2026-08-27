@@ -1,5 +1,8 @@
+Copyright 2026 Eric Molitor (EMulator)
+SPDX-License-Identifier: Apache-2.0
+
 OpenController Firmware
-Copyright 2026 OpenController contributors
+Copyright 2026 Eric Molitor (EMulator)
 
 The Apache License 2.0 (see LICENSE) applies to the first-party firmware
 sources in this directory: src/ (except as noted below), Makefile, ld/,
@@ -8,23 +11,30 @@ docs/, and README.md.
 Third-party material
 --------------------
 
-Everything under vendor/ is third-party material and is NOT licensed under
-Apache-2.0:
+The git submodules under ../third_party/ are third-party material and are NOT
+licensed under Apache-2.0:
 
-* vendor/wch-ch592-sdk/ and vendor/wch-ble-lib-v1.4.2/ contain SDK sources,
-  headers, and binary libraries (LIBCH59xBLE.a, libISP592.a) that are
-  copyright Nanjing Qinheng Microelectronics Co., Ltd. (WCH) and carry the
-  following notice:
+* ../third_party/weactstudio-wch-ble-core/ contains the WCH CH592 SDK sources,
+  headers, and libISP592.a used by the application. It is pinned to upstream
+  commit 1ee632c27b2caef52a65079a98a51e9bf7f42f61.
+* ../third_party/openboot/third_party/openwch/ch592/ contains the WCH BLE
+  library release used by the application. OpenBoot pins that recursive
+  submodule to commit a46e0086f1ffb5e5502703970bff94888e67f4cb.
+
+The WCH-authored files are copyright Nanjing Qinheng Microelectronics Co.,
+Ltd. (WCH) and carry the following notice:
 
       Copyright (c) Nanjing Qinheng Microelectronics Co., Ltd.
       Attention: This software (modified or not) and binary are used for
       microcontroller manufactured by Nanjing Qinheng Microelectronics.
 
-* The files under vendor/wch-ch592-sdk/ were taken from the
-  WeActStudio.WCH-BLE-Core repository (MIT-licensed packaging by WeAct
-  Studio; the WCH-authored files retain the WCH notice above).
+The WeActStudio repository packaging is MIT-licensed; the WCH-authored files
+retain the WCH notice above. See the submodules for their complete license and
+copyright information.
 
-See vendor/README.md for exact provenance, versions, and checksums.
+The application uses `Examples/CH592/ble/broadcaster/` from the WeActStudio
+submodule and `EVT/EXAM/BLE/LIB/` from the openwch/ch592 submodule. These are
+the same upstream files previously copied into this repository.
 
 Derived first-party files
 -------------------------
