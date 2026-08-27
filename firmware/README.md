@@ -110,19 +110,3 @@ options inside the quoted `EXTRA_CFLAGS` value to enable several at once.
 
 The BLE library defaults to the submodule-provided V1.4.2 triple; other
 versions are drop-in directories selected with `make BLE_LIB_DIR=...`.
-
-## Layout and licensing
-
-- `src/`, `ld/`, `Makefile`, `docs/` — first-party, Apache-2.0
-  (see `LICENSE`), **except** `src/startup_CH592_phased.S`, a WCH-derived
-  startup fork that remains under WCH's notice (see `NOTICE`).
-- `../third_party/weactstudio-wch-ble-core/` and OpenBoot's recursive
-  `third_party/openwch/ch592/` submodule provide the WCH SDK and BLE library;
-  they are **not** Apache-2.0. See `NOTICE` and the upstream repositories for
-  terms and provenance.
-- `docs/TMOS_REVIEW.md` — SDK-alignment review; the written rationale for
-  interrupt-architecture decisions (e.g. why there is no app
-  `BB_IRQHandler`).
-- `POWERSAVING.md` — power-reduction survey, ordered by risk to 2.4 GHz link
-  performance. Source-derived and explicitly unmeasured; read the "Measure
-  first" section before acting on the ordering.

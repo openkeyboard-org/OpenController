@@ -22,4 +22,4 @@ toolchain, build, and flashing instructions.
 - Firmware and tools software: [Apache License 2.0](./firmware/LICENSE).
 - Hardware designs: [CERN Open Hardware Licence Version 2 - Weakly Reciprocal](./hardware/LICENSE).
 - The submodules under `third_party/` contain third-party code under their
-  own terms — see [firmware/NOTICE](./firmware/NOTICE).
+  own terms
