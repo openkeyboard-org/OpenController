@@ -14,12 +14,12 @@ toolchain, build, and flashing instructions.
 
 - `firmware/` — firmware source and related software artifacts.
 - `hardware/` — hardware design files and documentation.
+- `third_party/` — pinned git submodules used by the firmware.
 - `tools/` — development and support tooling.
 
 ## Licensing
 
 - Firmware and tools software: [Apache License 2.0](./firmware/LICENSE).
 - Hardware designs: [CERN Open Hardware Licence Version 2 - Weakly Reciprocal](./hardware/LICENSE).
-- `firmware/vendor/` and the WCH-derived startup file
-  `firmware/src/startup_CH592_phased.S` contain third-party WCH/WeActStudio
-  code under its own terms — see [firmware/NOTICE](./firmware/NOTICE).
+- The submodules under `third_party/` contain third-party code under their
+  own terms

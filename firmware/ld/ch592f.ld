@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware linker script (CH592F).
  * Based on CH592 SDK Link.ld

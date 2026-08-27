@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware for the WCH CH592F.
  *

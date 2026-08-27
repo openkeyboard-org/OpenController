@@ -1,4 +1,8 @@
 /*
+ * Copyright 2021 Nanjing Qinheng Microelectronics Co., Ltd.
+ * Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
+ *
  * Phased CH592F startup — fork of WCH's vendor startup_CH592.S with SRAM
  * markers at each reset phase. The vendor logic is Copyright (c) Nanjing
  * Qinheng Microelectronics Co., Ltd. and remains under WCH's notice (see
