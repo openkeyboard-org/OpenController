@@ -1,0 +1,30 @@
+OpenController Firmware
+Copyright 2026 Eric Molitor (EMulator)
+
+The Apache License 2.0 in LICENSE applies to the first-party firmware in this
+directory. The build also consumes the pinned third-party dependencies below;
+their own license files and source notices remain controlling for those files.
+
+Third-party dependencies
+------------------------
+
+* third_party/weactstudio-wch-ble-core is distributed under the MIT License
+  included in that submodule. SDK files within it retain copyright and usage
+  notices from Nanjing Qinheng Microelectronics Co., Ltd. (WCH).
+* third_party/openboot is distributed under the Apache License 2.0 included in
+  that submodule. Its recursive third_party/openwch/ch592 submodule is also
+  distributed under the Apache License 2.0 included there.
+
+WCH-derived first-party modifications
+-------------------------------------
+
+firmware/src/startup_CH592_phased.S is a modified copy of the WCH CH592 SDK
+startup file. firmware/ld/ch592f.ld is based on the WCH CH592 SDK linker
+script. Both identify their modifications and are distributed under
+Apache-2.0 while retaining WCH provenance. The upstream startup file states:
+
+  Attention: This software (modified or not) and binary are used for
+  microcontroller manufactured by Nanjing Qinheng Microelectronics.
+
+OpenController targets a WCH CH592 microcontroller and complies with that
+stated use condition.
