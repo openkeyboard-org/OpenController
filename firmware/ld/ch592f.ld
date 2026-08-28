@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware linker script (CH592F).
- * Based on CH592 SDK Link.ld
+ * Based on the WCH CH592 SDK Link.ld; see ../NOTICE for provenance.
  *
  * The application runs under OpenBoot (third_party/openboot), which owns
  * flash [0x0000, 0x2000) and boots one of two equal A/B slots:
