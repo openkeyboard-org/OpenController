@@ -21,7 +21,7 @@ def board_config(board: str) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("board,remap,factory_mac,dcdc,openboot_board", [
-    ("opencontroller-ch592", "1", "0", "0", "opencontroller-ch592"),
+    ("opencontroller-ch592", "1", "0", "1", "opencontroller-ch592"),
     ("mk65mx-wireless-ch592", "0", "1", "1", "mk65mx-wireless-ch592"),
 ])
 def test_board_profile(board, remap, factory_mac, dcdc, openboot_board):
@@ -55,3 +55,16 @@ def test_dcdc_enable_must_be_an_exact_boolean(bad):
 
     assert result.returncode != 0
     assert "KBD_DCDC_ENABLE" in result.stderr
+
+
+def test_dcdc_enable_rejected_in_extra_cflags():
+    """A -D in EXTRA_CFLAGS would win the CFLAGS redefinition silently while
+    print-board-config keeps reporting the board value; the deliberate
+    override path is `make KBD_DCDC_ENABLE=...`, which stays validated."""
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "EXTRA_CFLAGS=-DKBD_DCDC_ENABLE=0", "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "EXTRA_CFLAGS" in result.stderr

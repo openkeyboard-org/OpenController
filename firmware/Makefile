@@ -150,6 +150,13 @@ endif
 ifeq ($(filter 0 1,$(strip $(KBD_DCDC_ENABLE))),)
 $(error BOARD '$(BOARD)' has invalid KBD_DCDC_ENABLE='$(KBD_DCDC_ENABLE)')
 endif
+# A deliberate A/B override goes through `make KBD_DCDC_ENABLE=...`, which
+# passes the same validation above and is what print-board-config reports.
+# A -D in EXTRA_CFLAGS would instead win the CFLAGS redefinition silently
+# while print-board-config keeps reporting the board value, so reject it.
+ifneq ($(findstring KBD_DCDC_ENABLE,$(EXTRA_CFLAGS)),)
+$(error KBD_DCDC_ENABLE must not go through EXTRA_CFLAGS; use `make KBD_DCDC_ENABLE=0|1` or the board profile)
+endif
 
 # ---------------------------------------------------------------------------
 # OpenBoot integration

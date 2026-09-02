@@ -80,12 +80,18 @@ producing a wrong image.
 |---|---|---|---|
 | `KBD_UART1_REMAP` | 1 | 0 | 1 = UART1 on PB12/PB13, 0 = silicon-default PA8/PA9 |
 | `KBD_FACTORY_MAC` | 0 | 1 | 1 = 2.4 GHz identity from the CH592 factory ROM |
-| `KBD_DCDC_ENABLE` | 0 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
+| `KBD_DCDC_ENABLE` | 1 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
 
 `KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
 populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
 that cannot do DC-DC at all (`ROM_CFG_ADR_HW` bit 13); it cannot tell that a
 PCB is missing the part, and enabling it there collapses the core supply.
+Both current profiles enable it (bench-measured 2026-09-02: 5.03 mA vs
+7.17 mA active, −29.8%). A deliberate A/B override is
+`make KBD_DCDC_ENABLE=0|1`, which passes the profile validation and is
+reported by `print-board-config`; passing it through `EXTRA_CFLAGS` is
+rejected at parse time because that path would silently diverge from the
+reported configuration.
 
 The size check enforces the 216 KiB slot capacity (see BOOT.md).
 
