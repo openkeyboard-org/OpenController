@@ -14,13 +14,15 @@
 #include "rf_task.h"
 #include "openboot_app.h"
 
-/* Run the core from the CH592's DC-DC converter instead of the LDO. Requires
- * the board to populate the DC-DC inductor -- PWR_DCDCCfg only declines on
- * silicon that cannot do DC-DC at all (ROM_CFG_ADR_HW bit 13), never on a
- * board that simply lacks the part, and without the inductor the core supply
- * collapses. Bench A/B knob: make EXTRA_CFLAGS=-DKBD_DCDC_ENABLE=1 */
+/* Run the core from the CH592's DC-DC converter instead of the LDO. Default
+ * on: bench-measured 2026-09-02 at 5.03 mA vs 7.17 mA active (-29.8%), see
+ * the enabling commit. Requires the board to populate the DC-DC inductor --
+ * PWR_DCDCCfg only declines on silicon that cannot do DC-DC at all
+ * (ROM_CFG_ADR_HW bit 13), never on a board that simply lacks the part, and
+ * without the inductor the core supply collapses. A board without the
+ * inductor must build with EXTRA_CFLAGS=-DKBD_DCDC_ENABLE=0 */
 #ifndef KBD_DCDC_ENABLE
-#define KBD_DCDC_ENABLE 0
+#define KBD_DCDC_ENABLE 1
 #endif
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
