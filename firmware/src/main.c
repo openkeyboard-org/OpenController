@@ -207,6 +207,47 @@ static void OpenBoot_Service(void)
     }
 }
 
+#if KBD_IDLE_WFI
+/* Idle-state WFI (power ladder MR2). Heartbeat: WWDG counts whenever Fsys
+ * runs -- idle mode included -- so an idle keyboard with no UART traffic
+ * and no other IRQ must still wake inside the ~559 ms watchdog window to
+ * feed it. 200 ms leaves >2x margin. TMR3 is raw-register one-purpose use,
+ * mirroring rf_task's TMR0 idiom; the later clock-gating rung must never
+ * gate TMR3 for this reason. The handler only clears the flag: waking IS
+ * the point. */
+static void heartbeat_init(void)
+{
+    R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
+    R32_TMR3_CNT_END = GetSysClock() / 5u;   /* 200 ms */
+    R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
+    R8_TMR3_INTER_EN = RB_TMR_IE_CYC_END;
+    R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
+    PFIC_EnableIRQ(TMR3_IRQn);
+}
+
+__INTERRUPT
+__HIGH_CODE
+void TMR3_IRQHandler(void)
+{
+    R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
+}
+
+#ifndef RF_DIAG_COUNTERS
+#define RF_DIAG_COUNTERS 1
+#endif
+#if RF_DIAG_COUNTERS
+/* .diag_safe.power: the linker collects subsections AFTER every exact-name
+ * .diag_safe section, so power counters never shift the legacy rf_task/
+ * keyboard_uart counter addresses bench scripts read by absolute address
+ * (guarded by an ASSERT in ch592f.ld). NOLOAD: zeroed in main(). */
+volatile uint32_t pwr_wfi_count
+    __attribute__((section(".diag_safe.power")));
+#define PWR_DIAG_INC(x) do { (x)++; } while (0)
+#else
+#define PWR_DIAG_INC(x) do { } while (0)
+#endif
+#endif /* KBD_IDLE_WFI */
+
 __HIGH_CODE
 __attribute__((noinline))
 void Main_Circulation(void)
@@ -217,6 +258,38 @@ void Main_Circulation(void)
         KeyboardUart_Poll();
         OpenBoot_Service();
         WATCHDOG_FEED();
+#if KBD_IDLE_WFI
+        /* Idle the core only in RF_STATE_IDLE: TMOS scheduling and the hop
+         * servo are POLL-driven, so PAIRING (20 ms beacon cadence) and
+         * CONNECTED (~875 us hop grid) must keep spinning. rf_state only
+         * changes in main-loop context (TMOS handlers), so it needs no
+         * re-check below. */
+        if (RF_GetState() == RF_STATE_IDLE && !openboot_entry_pending
+                && KeyboardUart_RxQuiet()) {
+            uint32_t irq_state;
+            /* Global-mask critical section (CSR 0x800 MPIE|MIE, the
+             * rf_task.c idiom): PFIC per-source enables stay set, so a
+             * UART1/TMR3 interrupt pending at the controller still ends
+             * the WFI -- the handler is simply deferred until the csrrs
+             * below. SYS_DisableAllIrq is NOT usable here: it clears the
+             * PFIC source enables themselves, and a QingKe WFI never
+             * wakes on a source the controller cannot respond to
+             * (adversarial-review blocker). The re-check closes the
+             * check-to-WFI race: a byte landing before the mask has its
+             * interrupt already consumed into the ring and would
+             * otherwise be overslept until the heartbeat. */
+            __asm volatile ("csrrc %0, 0x800, %1"
+                            : "=r"(irq_state) : "r"(0x88) : "memory");
+            if (KeyboardUart_RxQuiet() && R8_UART1_RFC == 0
+                    && !openboot_entry_pending) {
+                WATCHDOG_FEED();
+                PWR_DIAG_INC(pwr_wfi_count);
+                LowPower_Idle();
+            }
+            __asm volatile ("csrrs zero, 0x800, %0"
+                            :: "r"(irq_state & 0x88) : "memory");
+        }
+#endif
     }
 }
 
@@ -292,6 +365,12 @@ int main(void)
         KeyboardUart_SendStatus(0x35);
     }
     watchdog_init();
+#if KBD_IDLE_WFI
+#if RF_DIAG_COUNTERS
+    pwr_wfi_count = 0;   /* .diag_safe.power is NOLOAD; startup never clears it */
+#endif
+    heartbeat_init();
+#endif
     BOOT_PHASE(0xA7);
     Main_Circulation();
 }

@@ -31,6 +31,22 @@ static uint8_t rx_buf[KBD_UART_MAX_FRAME];
 static uint8_t rx_len;
 static uint8_t rx_expected;
 
+#if KBD_IDLE_WFI
+/* RX ring between UART1_IRQHandler and KeyboardUart_Poll. The ISR exists so
+ * LowPower_Idle() in Main_Circulation ends the instant a host byte arrives;
+ * it MUST drain RBR because RECV_RDY clears only by reading data - an
+ * ack-only handler would retrigger forever. Single-producer/single-consumer:
+ * head is ISR-owned, tail main-loop-owned, uint8_t indexes wrap mod 256 and
+ * are masked mod size on access, so no index ever needs a critical section. */
+#define KBD_UART_RING_SIZE 64u   /* power of two, > 2 max frames */
+static volatile uint8_t rx_ring[KBD_UART_RING_SIZE];
+static volatile uint8_t rx_ring_head;
+static volatile uint8_t rx_ring_tail;
+/* Set by the ISR on a hardware overrun OR a full ring (same recovery: the
+ * byte stream has a hole, so the parser must resync). Consumed by Poll. */
+static volatile uint8_t rx_overrun_latch;
+#endif
+
 #if KBD_UART_DIAG_COUNTERS
 volatile uint32_t kbd_uart_rx_overrun_count __attribute__((section(".diag_safe")));
 volatile uint32_t kbd_uart_rx_frame_error_count __attribute__((section(".diag_safe")));
@@ -102,6 +118,14 @@ void KeyboardUart_Init(void)
     UART1_BaudRateCfg(115200);
     UART1_CLR_RXFIFO();
     UART1_CLR_TXFIFO();
+
+#if KBD_IDLE_WFI
+    /* 1-byte trigger so the first byte of a frame ends a WFI immediately;
+     * LINE_STAT keeps the overrun accounting the polled path had. */
+    UART1_ByteTrigCfg(UART_1BYTE_TRIG);
+    UART1_INTCfg(ENABLE, RB_IER_RECV_RDY | RB_IER_LINE_STAT);
+    PFIC_EnableIRQ(UART1_IRQn);
+#endif
 }
 
 void KeyboardUart_SetFrameCallback(keyboard_uart_frame_cb_t cb)
@@ -266,6 +290,59 @@ static void feed_byte(uint8_t b)
     process_rx_buf();
 }
 
+#if KBD_IDLE_WFI
+
+/* Drains RBR for every cause: RECV_RDY/RECV_TOUT clear only that way, and
+ * after a LINE_STAT overrun the FIFO still holds bytes worth keeping.
+ * __HIGH_CODE: wake ISRs must run from RAM (LowPower_Idle powers flash
+ * down; the fetch stall on the way back out is paid once, after we return). */
+__INTERRUPT
+__HIGH_CODE
+void UART1_IRQHandler(void)
+{
+    if (UART1_GetITFlag() == UART_II_LINE_STAT) {
+        if (R8_UART1_LSR & RB_LSR_OVER_ERR) {   /* reading LSR clears it */
+            rx_overrun_latch = 1;
+        }
+    }
+    while (R8_UART1_RFC) {
+        uint8_t b = R8_UART1_RBR;
+        if ((uint8_t)(rx_ring_head - rx_ring_tail) < KBD_UART_RING_SIZE) {
+            rx_ring[rx_ring_head & (KBD_UART_RING_SIZE - 1u)] = b;
+            rx_ring_head++;
+        } else {
+            rx_overrun_latch = 1;
+        }
+    }
+}
+
+void KeyboardUart_Poll(void)
+{
+    if (rx_overrun_latch) {
+        /* The byte stream has a hole (hardware overrun or full ring).
+         * Discard everything queued and resync from silence: a retained
+         * pre-gap byte could otherwise latch a header whose frame body
+         * lies beyond the gap, swallowing the next valid command
+         * (adversarial-review finding). tail=head must be atomic against
+         * the ISR (CSR 0x800 global-mask idiom, see rf_task.c). */
+        uint32_t irq_state;
+        __asm volatile ("csrrc %0, 0x800, %1"
+                        : "=r"(irq_state) : "r"(0x88) : "memory");
+        rx_ring_tail = rx_ring_head;
+        rx_overrun_latch = 0;
+        __asm volatile ("csrrs zero, 0x800, %0"
+                        :: "r"(irq_state & 0x88) : "memory");
+        KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
+        reset_parser();
+    }
+    while (rx_ring_tail != rx_ring_head) {
+        feed_byte(rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)]);
+        rx_ring_tail++;
+    }
+}
+
+#else /* !KBD_IDLE_WFI: original pure-polling path */
+
 static void check_uart_line_status(void)
 {
     if (R8_UART1_LSR & RB_LSR_OVER_ERR) {
@@ -281,6 +358,18 @@ void KeyboardUart_Poll(void)
         feed_byte(R8_UART1_RBR);
         check_uart_line_status();
     }
+}
+
+#endif /* KBD_IDLE_WFI */
+
+uint8_t KeyboardUart_RxQuiet(void)
+{
+#if KBD_IDLE_WFI
+    return (rx_ring_tail == rx_ring_head) && (rx_len == 0)
+        && !rx_overrun_latch;
+#else
+    return (rx_len == 0);
+#endif
 }
 
 uint8_t KeyboardUart_TxIdle(void)
