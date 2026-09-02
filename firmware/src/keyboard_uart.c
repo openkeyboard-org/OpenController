@@ -318,24 +318,30 @@ void UART1_IRQHandler(void)
 
 void KeyboardUart_Poll(void)
 {
-    if (rx_overrun_latch) {
-        /* The byte stream has a hole (hardware overrun or full ring).
-         * Discard everything queued and resync from silence: a retained
-         * pre-gap byte could otherwise latch a header whose frame body
-         * lies beyond the gap, swallowing the next valid command
-         * (adversarial-review finding). tail=head must be atomic against
-         * the ISR (CSR 0x800 global-mask idiom, see rf_task.c). */
-        uint32_t irq_state;
-        __asm volatile ("csrrc %0, 0x800, %1"
-                        : "=r"(irq_state) : "r"(0x88) : "memory");
-        rx_ring_tail = rx_ring_head;
-        rx_overrun_latch = 0;
-        __asm volatile ("csrrs zero, 0x800, %0"
-                        :: "r"(irq_state & 0x88) : "memory");
-        KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
-        reset_parser();
-    }
-    while (rx_ring_tail != rx_ring_head) {
+    for (;;) {
+        /* Checked before EVERY byte, not just once per Poll: the ISR can
+         * record a stream hole (hardware overrun or full ring) while this
+         * loop is draining, and feeding even one post-hole byte lets a
+         * retained pre-gap header swallow the next valid command (review
+         * finding). On a hole: discard everything queued and resync from
+         * silence; tail=head must be atomic against the ISR (CSR 0x800
+         * global-mask idiom, see rf_task.c). Bytes fed before the latch
+         * was set are pre-hole and were valid to parse. */
+        if (rx_overrun_latch) {
+            uint32_t irq_state;
+            __asm volatile ("csrrc %0, 0x800, %1"
+                            : "=r"(irq_state) : "r"(0x88) : "memory");
+            rx_ring_tail = rx_ring_head;
+            rx_overrun_latch = 0;
+            __asm volatile ("csrrs zero, 0x800, %0"
+                            :: "r"(irq_state & 0x88) : "memory");
+            KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
+            reset_parser();
+            continue;   /* the ISR may already have queued post-gap bytes */
+        }
+        if (rx_ring_tail == rx_ring_head) {
+            break;
+        }
         feed_byte(rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)]);
         rx_ring_tail++;
     }
