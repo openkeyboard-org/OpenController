@@ -14,6 +14,17 @@
 #include "rf_task.h"
 #include "openboot_app.h"
 
+/* Run the core from the CH592's DC-DC converter instead of the LDO. Default
+ * on: bench-measured 2026-09-02 at 5.03 mA vs 7.17 mA active (-29.8%), see
+ * the enabling commit. Requires the board to populate the DC-DC inductor --
+ * PWR_DCDCCfg only declines on silicon that cannot do DC-DC at all
+ * (ROM_CFG_ADR_HW bit 13), never on a board that simply lacks the part, and
+ * without the inductor the core supply collapses. A board without the
+ * inductor must build with EXTRA_CFLAGS=-DKBD_DCDC_ENABLE=0 */
+#ifndef KBD_DCDC_ENABLE
+#define KBD_DCDC_ENABLE 1
+#endif
+
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 
 #if (defined(BLE_MAC)) && (BLE_MAC == TRUE)
@@ -207,6 +218,12 @@ void Main_Circulation(void)
 int main(void)
 {
     BOOT_PHASE(0xA0);
+#if KBD_DCDC_ENABLE
+    /* Ahead of SetSysClock, matching WCH's own BLE examples: the switch is a
+     * supply transient, and taking it while the core still runs from the
+     * reset-default clock keeps it away from the PLL. */
+    PWR_DCDCCfg(ENABLE);
+#endif
     SetSysClock(CLK_SOURCE_PLL_60MHz);
     BOOT_PHASE(0xA1);
 
