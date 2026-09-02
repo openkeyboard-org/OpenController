@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef RF_TASK_H
 #define RF_TASK_H

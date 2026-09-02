@@ -1,40 +1,30 @@
 OpenController Firmware
-Copyright 2026 OpenController contributors
+Copyright 2026 Eric Molitor (EMulator)
 
-The Apache License 2.0 (see LICENSE) applies to the first-party firmware
-sources in this directory: src/ (except as noted below), Makefile, ld/,
-docs/, and README.md.
+The Apache License 2.0 in LICENSE applies to the first-party firmware in this
+directory. The build also consumes the pinned third-party dependencies below;
+their own license files and source notices remain controlling for those files.
 
-Third-party material
---------------------
+Third-party dependencies
+------------------------
 
-Everything under vendor/ is third-party material and is NOT licensed under
-Apache-2.0:
+* third_party/weactstudio-wch-ble-core is distributed under the MIT License
+  included in that submodule. SDK files within it retain copyright and usage
+  notices from Nanjing Qinheng Microelectronics Co., Ltd. (WCH).
+* third_party/openboot is distributed under the Apache License 2.0 included in
+  that submodule. Its recursive third_party/openwch/ch592 submodule is also
+  distributed under the Apache License 2.0 included there.
 
-* vendor/wch-ch592-sdk/ and vendor/wch-ble-lib-v1.4.2/ contain SDK sources,
-  headers, and binary libraries (LIBCH59xBLE.a, libISP592.a) that are
-  copyright Nanjing Qinheng Microelectronics Co., Ltd. (WCH) and carry the
-  following notice:
+WCH-derived first-party modifications
+-------------------------------------
 
-      Copyright (c) Nanjing Qinheng Microelectronics Co., Ltd.
-      Attention: This software (modified or not) and binary are used for
-      microcontroller manufactured by Nanjing Qinheng Microelectronics.
+firmware/src/startup_CH592_phased.S is a modified copy of the WCH CH592 SDK
+startup file. firmware/ld/ch592f.ld is based on the WCH CH592 SDK linker
+script. Both identify their modifications and are distributed under
+Apache-2.0 while retaining WCH provenance. The upstream startup file states:
 
-* The files under vendor/wch-ch592-sdk/ were taken from the
-  WeActStudio.WCH-BLE-Core repository (MIT-licensed packaging by WeAct
-  Studio; the WCH-authored files retain the WCH notice above).
+  Attention: This software (modified or not) and binary are used for
+  microcontroller manufactured by Nanjing Qinheng Microelectronics.
 
-See vendor/README.md for exact provenance, versions, and checksums.
-
-Derived first-party files
--------------------------
-
-* src/startup_CH592_phased.S is a derivative of WCH's startup_CH592.S
-  (vendor logic preserved; diagnostic phase-marker stores added) and
-  remains subject to the WCH notice above rather than Apache-2.0.
-
-Provenance
-----------
-
-The firmware application was imported from the OpenDongle Controller
-prototype tree at commit 7caff2039bd3cc524902ce702268dce7670057bd.
+OpenController targets a WCH CH592 microcontroller and complies with that
+stated use condition.
