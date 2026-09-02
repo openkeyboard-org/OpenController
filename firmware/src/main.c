@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware for the WCH CH592F.
  *
@@ -15,8 +15,16 @@
 #include "rf_task.h"
 #include "openboot_app.h"
 
+/* Run the core from the CH592's DC-DC converter instead of the LDO.
+ * Bench-measured 2026-09-02 at 5.03 mA vs 7.17 mA active (-29.8%), see the
+ * enabling commit. This is a board hardware claim owned by the board
+ * profile (boards/*.mk, validated at parse time): the board must populate
+ * the DC-DC inductor -- PWR_DCDCCfg only declines on silicon that cannot do
+ * DC-DC at all (ROM_CFG_ADR_HW bit 13), never on a board that simply lacks
+ * the part, and without the inductor the core supply collapses. The
+ * fallback below covers non-Makefile builds only. */
 #ifndef KBD_DCDC_ENABLE
-#define KBD_DCDC_ENABLE 0
+#define KBD_DCDC_ENABLE 1
 #endif
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];

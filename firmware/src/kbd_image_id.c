@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * The application image identity header instance. Placed by the linker at
  * ORIGIN(FLASH) + 0x20 in the .kbd_id section, which ld/ch592f.ld pins and

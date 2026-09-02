@@ -1,5 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
 # SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 OpenController contributors
 #
 # OpenController keyboard wireless-module firmware — CH592F
 # Target: WCH CH592F (QingKe RISC-V4F, 60MHz, 448KB flash, 26KB SRAM)
@@ -54,14 +54,17 @@ endif
 # `pip install --user pyserial` stops being importable.
 PYTHON ?= python3
 
-# SDK path (relative to this Makefile): the vendored WeActStudio SDK subset.
-# Layout mirrors the WeAct example tree; see vendor/README.md for provenance.
-SDK ?= vendor/wch-ch592-sdk
+# SDK path: the pinned WeActStudio submodule's CH592 broadcaster example,
+# whose files match the bench-validated SDK subset.
+WEACT_SDK_ROOT := $(abspath ../third_party/weactstudio-wch-ble-core)
+WEACT_SDK_REVISION := 1ee632c27b2caef52a65079a98a51e9bf7f42f61
+SDK ?= $(WEACT_SDK_ROOT)/Examples/CH592/ble/broadcaster
 
 SDK_BLE_DIR := $(SDK)/ble
 SDK_SRC_DIR := $(SDK)
 
-# CH59x BLE library directory. Defaults to the vendored v1.4.2 triple
+# CH59x BLE library directory. Defaults to the v1.4.2 triple in OpenBoot's
+# pinned recursive openwch/ch592 submodule
 # (LIBCH59xBLE.a + CH59xBLE_LIB.h + ble_task_scheduler.S), the
 # CH59x_BLE_LIB_V1.4.2 release. Other library versions (e.g. from the openwch
 # CH592 EVT tree) are drop-in triples; override to A/B-compare:
@@ -72,7 +75,9 @@ SDK_SRC_DIR := $(SDK)
 # PFIC_EnableIRQ(BLEB/BLEL), but that was a debugger-reset artifact. The app
 # now relies on the library's normal BLEB fast-vector setup; see
 # docs/TMOS_REVIEW.md.
-BLE_LIB_DIR ?= vendor/wch-ble-lib-v1.4.2
+OPENWCH_CH592_ROOT = $(OPENBOOT)/third_party/openwch/ch592
+OPENWCH_CH592_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
+BLE_LIB_DIR ?= $(OPENWCH_CH592_ROOT)/EVT/EXAM/BLE/LIB
 
 # Toolchain. Default: WCH GCC15. Supported alternate: WCH GCC12 —
 #   make MRS_TOOLCHAIN="$$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin"
@@ -153,7 +158,7 @@ OPENBOOT := $(abspath ../third_party/openboot)
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := 60a100d13a3a4751dcb7b2b46db368485e05c17f
+OPENBOOT_REVISION := 235486da03980a86e9254f8851b043bbf9456ac4
 # The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
 # the app defaults to GCC15. Upstream measured erratic GCC15 bootloader
 # behavior (see check-openboot-toolchain), so this defaults to the validated
@@ -497,11 +502,31 @@ size-check: $(BUILD)/$(TARGET).bin
 # ---------------------------------------------------------------------------
 # Assert the OpenBoot submodule IS the pinned revision and its worktree is
 # clean. --skip-toolchain because verifying a SHA must not require GCC12 to
-# be installed. (The WCH SDK is vendored in-tree - see vendor/README.md - so
-# there is no SDK-revision half to this check.)
+# be installed. Check the application SDK and BLE-library source pins too;
+# they are build inputs in separate (one recursive) submodules.
 check-deps:
 	$(PYTHON) -I $(OPENBOOT)/firmware/check_dependencies.py \
 	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
+	@for spec in \
+	  "$(WEACT_SDK_ROOT)|$(WEACT_SDK_REVISION)|WeActStudio WCH SDK" \
+	  "$(OPENWCH_CH592_ROOT)|$(OPENWCH_CH592_REVISION)|openwch CH592 SDK"; do \
+	    root=$${spec%%|*}; rest=$${spec#*|}; \
+	    expected=$${rest%%|*}; name=$${rest#*|}; \
+	    actual=$$(git -C "$$root" rev-parse HEAD 2>/dev/null) || { \
+	      echo "ERROR: $$name submodule is not initialized: $$root"; \
+	      echo "       run: git submodule update --init --recursive"; \
+	      exit 1; \
+	    }; \
+	    if [ "$$actual" != "$$expected" ]; then \
+	      echo "ERROR: $$name revision $$actual; expected $$expected"; \
+	      exit 1; \
+	    fi; \
+	    if [ -n "$$(git -C "$$root" status --porcelain)" ]; then \
+	      echo "ERROR: $$name submodule has local changes: $$root"; \
+	      exit 1; \
+	    fi; \
+	    echo "$$name: $$actual (clean)"; \
+	  done
 
 # OpenBoot's own compiler gate is ADVISORY: a mismatch warns and continues.
 # GCC15 is bench-unvalidated for the bootloader (upstream measured erratic
