@@ -83,9 +83,13 @@ void KeyboardUart_Init(void)
     GPIOB_ModeCfg(bRXD1_, GPIO_ModeIN_PU);
 #else
     /* MK65MX uses UART1's default PA8/PA9 mapping.  PB13 is CHWAKE on that
-     * board: explicitly return both alternate UART pins to floating inputs so
-     * neither the application nor an inherited pin state can drive it. */
-    GPIOB_ModeCfg(bRXD1_ | bTXD1_, GPIO_ModeIN_Floating);
+     * board -- driven push-pull by the keyboard host, so it must stay a
+     * FLOATING input: a pull-up against a driven-low line burns ~50 uA
+     * continuously (CH592 IUP), and the application must never drive it.
+     * PB12 is genuinely unconnected there and keeps the input-pull-up park
+     * from main(); floating it leaves a CMOS input mid-rail burning
+     * crossbar current. */
+    GPIOB_ModeCfg(bTXD1_, GPIO_ModeIN_Floating);
     GPIOA_SetBits(bTXD1);
     GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(bRXD1, GPIO_ModeIN_PU);

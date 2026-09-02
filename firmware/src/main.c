@@ -240,6 +240,17 @@ int main(void)
     SetSysClock(CLK_SOURCE_PLL_60MHz);
     BOOT_PHASE(0xA1);
 
+    /* Park every pin as a pulled-up input before any peripheral claims its
+     * own (WCH's own examples do the same ahead of low-power use): a
+     * floating CMOS input can sit mid-rail and burn crossbar current
+     * continuously. KeyboardUart_Init re-claims the UART pins immediately
+     * below. PB13 is excluded from the park: on the MK65MX profile it is
+     * CHWAKE, driven push-pull by the keyboard host, and must never be
+     * biased even transiently (review finding); on the remap profile it is
+     * this firmware's own TX pin and is driven high a few lines down. */
+    GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+    GPIOB_ModeCfg(GPIO_Pin_All & ~bTXD1_, GPIO_ModeIN_PU);
+
     KeyboardUart_Init();
     KeyboardUart_SetFrameCallback(handle_uart_frame);
     BOOT_PHASE(0xA2);
