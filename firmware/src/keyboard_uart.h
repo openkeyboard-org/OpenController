@@ -6,9 +6,12 @@
 
 #include <stdint.h>
 
-/* Idle-state WFI (power ladder MR2): interrupt-driven UART RX + the
- * LowPower_Idle() site in Main_Circulation. Default on; disable for a
- * pure-polling A/B baseline with EXTRA_CFLAGS=-DKBD_IDLE_WFI=0. */
+/* Idle-state low-power wait (power ladder MR2): interrupt-driven UART RX +
+ * the flash-off WFE idle site (idle_wait_event's split form) in
+ * Main_Circulation. Name kept as KBD_IDLE_WFI for the A/B knob and the
+ * pwr_wfi_count counter; the mechanism is WFE, not a plain WFI (see main.c).
+ * Default on; disable for a pure-polling baseline with
+ * EXTRA_CFLAGS=-DKBD_IDLE_WFI=0. */
 #ifndef KBD_IDLE_WFI
 #define KBD_IDLE_WFI 1
 #endif

@@ -33,8 +33,9 @@ static uint8_t rx_expected;
 
 #if KBD_IDLE_WFI
 /* RX ring between UART1_IRQHandler and KeyboardUart_Poll. The ISR exists so
- * LowPower_Idle() in Main_Circulation ends the instant a host byte arrives;
- * it MUST drain RBR because RECV_RDY clears only by reading data - an
+ * the WFE idle wait in Main_Circulation ends the instant a host byte arrives
+ * (RECV_RDY pending is the wake event); it MUST drain RBR because RECV_RDY
+ * clears only by reading data - an
  * ack-only handler would retrigger forever. Single-producer/single-consumer:
  * head is ISR-owned, tail main-loop-owned, uint8_t indexes wrap mod 256 and
  * are masked mod size on access, so no index ever needs a critical section. */

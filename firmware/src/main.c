@@ -249,26 +249,52 @@ volatile uint32_t pwr_wfi_count
 #endif /* KBD_IDLE_WFI */
 
 #if KBD_IDLE_WFI
-/* RAM-resident idle wait. WFE with SEVONPEND (PFIC SCTLR bit 4), NOT a
- * masked WFI: bench-measured on this silicon, a WFI entered with the
- * global-IRQ CSR masked never wakes on a pending source -- the first WFI
- * slept until the WWDG reset and the chip reboot-looped (~1 boot/2.7 s,
- * ll_boot_count climbing; this is also what invalidated the first "1.75 mA
- * idle" meter figure). With SEVONPEND, an interrupt PENDING at the PFIC is
- * a wake event even while global delivery stays masked, which is exactly
- * the semantics the idle site needs. Pattern mirrors the SDK's __WFE():
- * self-SEV + double wfi-as-wfe so a stale event can't satisfy the real
- * wait. Flash handling mirrors LowPower_Idle (off until next fetch). */
+/* Idle via WFE (WFI reinterpreted as wait-for-event, SCTLR WFITOWFE bit 3)
+ * with SEVONPEND (bit 4), NOT a masked WFI: a WFI entered with the global-IRQ
+ * CSR masked never wakes on a pending source on this silicon -- the masked
+ * WFI slept to the WWDG reset and reboot-looped (~1 boot/2.7 s; this also
+ * invalidated the first "1.75 mA idle" figure, which was that loop's
+ * average). Under SEVONPEND an interrupt going pending is a wake event even
+ * while global delivery stays masked.
+ *
+ * The split into arm-drain / sleep is load-bearing, not stylistic. SEVONPEND
+ * on this core only latches a NEW pending edge; a source ALREADY pending when
+ * SEVONPEND is enabled generates no event. So the stale-event drain (the
+ * self-SEV + WFE that the SDK __WFE folds together) must run BEFORE the final
+ * wake-source check, not after it: otherwise a UART byte or TMR3 heartbeat
+ * that pends in the window between the check and the drain is neither seen by
+ * the check nor edge-detected by SEVONPEND, and the real WFE can sleep past
+ * it to the WWDG reset (a TMR3 cycle-end is the dangerous case -- its RW1
+ * flag stays set with the ISR masked, so it produces no later edge). This
+ * ordering was the adversarial-review blocker on the single-function form.
+ *
+ * Sequence (all under the caller's CSR-0x800 mask):
+ *   idle_arm_and_drain(): arm WFE+SEVONPEND, self-SEV, one WFE -> latch clean
+ *   caller re-checks every wake source, INCLUDING the TMR3 flag, with
+ *     SEVONPEND now live: anything already pending is caught here; anything
+ *     that pends later is a fresh edge the real WFE below catches.
+ *   idle_sleep_once(): flash off (until next fetch), one real WFE.
+ *   idle_disarm(): clear WFE+SEVONPEND. */
 __HIGH_CODE
-static void idle_wait_event(void)
+static void idle_arm_and_drain(void)
 {
-    FLASH_ROM_SW_RESET();
-    R8_FLASH_CTRL = 0x04;
     PFIC->SCTLR &= ~(1u << 2);                        /* sleep, not deep */
     PFIC->SCTLR |= (1u << 4) | (1u << 3) | (1u << 5); /* SEVONPEND|WFE|SEV */
-    __asm__ volatile ("wfi");                         /* eats the self-SEV */
-    PFIC->SCTLR |= (1u << 3);
+    __asm__ volatile ("wfi");                         /* self-SEV -> drains */
+    PFIC->SCTLR |= (1u << 3);                         /* re-arm WFE mode */
+}
+
+__HIGH_CODE
+static void idle_sleep_once(void)
+{
+    FLASH_ROM_SW_RESET();
+    R8_FLASH_CTRL = 0x04;                             /* flash off til fetch */
     __asm__ volatile ("wfi");                         /* real wait */
+}
+
+__HIGH_CODE
+static void idle_disarm(void)
+{
     PFIC->SCTLR &= ~((1u << 4) | (1u << 3));
 }
 #endif
@@ -292,22 +318,26 @@ void Main_Circulation(void)
         if (RF_GetState() == RF_STATE_IDLE && !openboot_entry_pending
                 && KeyboardUart_RxQuiet()) {
             uint32_t irq_state;
-            /* Global-mask critical section (CSR 0x800 MPIE|MIE, the
-             * rf_task.c idiom) closes the check-to-idle race: a byte
-             * landing before the mask has its interrupt already consumed
-             * into the ring and would otherwise be overslept until the
-             * heartbeat. Inside the mask, idle_wait_event()'s SEVONPEND
-             * WFE wakes on any interrupt PENDING at the PFIC; the handler
-             * itself runs at the csrrs below. (A masked WFI does NOT wake
-             * on this silicon -- see idle_wait_event.) */
+            /* Global-mask critical section (CSR 0x800 MPIE|MIE, rf_task.c
+             * idiom). Under the mask: drain any stale event FIRST, then
+             * re-check every wake source with SEVONPEND live, then sleep.
+             * The re-check covers the ring/FIFO (a byte that pended before
+             * the mask), OpenBoot, and the TMR3 heartbeat flag -- its ISR
+             * cannot run while masked, so a heartbeat that already pended
+             * would be an edge-less source the WFE could sleep past to the
+             * WWDG reset. A source that pends AFTER this check is a fresh
+             * edge the WFE catches. Woken handlers run at the csrrs. */
             __asm volatile ("csrrc %0, 0x800, %1"
                             : "=r"(irq_state) : "r"(0x88) : "memory");
+            idle_arm_and_drain();
             if (KeyboardUart_RxQuiet() && R8_UART1_RFC == 0
-                    && !openboot_entry_pending) {
+                    && !openboot_entry_pending
+                    && (R8_TMR3_INT_FLAG & RB_TMR_IF_CYC_END) == 0) {
                 WATCHDOG_FEED();
                 PWR_DIAG_INC(pwr_wfi_count);
-                idle_wait_event();
+                idle_sleep_once();
             }
+            idle_disarm();
             __asm volatile ("csrrs zero, 0x800, %0"
                             :: "r"(irq_state & 0x88) : "memory");
         }
