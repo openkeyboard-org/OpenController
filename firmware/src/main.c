@@ -96,6 +96,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     default:
         break;
     }
+    /* MR7: mirror the reducer's auto-sleep lifetime into the power module,
+     * and treat every accepted frame as host activity (holdoff restart). */
+    PowerSleep_SetAutosleep(sleep_proto.autosleep);
+    PowerSleep_NoteActivity();
 #endif
 
     if (cmd == 0xA1) {
@@ -172,9 +176,9 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x55: /* sleep-bt-en: reserved BT twin of the 2.4G sleep path;
                 * no BT transport in this firmware, ACK-only (parser already
                 * sent 61 0D 0A). */
-    case 0x57: /* sleep-2g4-en: A6 57 auto-sleep enable is the next rung
-                * (MR7); no-op here so a legacy host cannot arm autonomous
-                * sleep before that contract exists. */
+    case 0x57: /* sleep-2g4-en (stock: enable auto-sleep on 2.4G). MR7 arms
+                * auto-sleep in the reducer above -- behind the A6 56 gate, so
+                * a legacy host's bare A6 57 stays a no-op. Nothing to do here. */
     case 0x62: /* factory BT pair */
         break;
 
@@ -423,6 +427,14 @@ void Main_Circulation(void)
 #endif
                 && KeyboardUart_RxQuiet()) {
             uint32_t irq_state;
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+            /* MR7: with auto-sleep armed (and the activity holdoff expired),
+             * an idle module deep-sleeps until the host's RX edge instead of
+             * shallow-idling. Woke => restart the loop pass (feed, poll). */
+            if (PowerSleep_IdleAutosleep() == 0) {
+                continue;
+            }
+#endif
             /* Global-mask critical section (CSR 0x800 MPIE|MIE, rf_task.c
              * idiom). Under the mask: drain any stale event FIRST, then
              * re-check every wake source with SEVONPEND live, then sleep.

@@ -31,6 +31,23 @@ static uint8_t rx_buf[KBD_UART_MAX_FRAME];
 static uint8_t rx_len;
 static uint8_t rx_expected;
 
+/* Raw RX activity latch (power ladder MR7): set on EVERY byte taken from the
+ * hardware -- including bytes the parser later discards (a stray NULL wake
+ * preamble, line noise, a host 61 0D 0A ACK), none of which reach the frame
+ * callback. The auto-sleep holdoff consumes it, so a NULL that lands while the
+ * module is awake still counts as "the host is talking" and defers sleep
+ * (review finding: otherwise the real frame's first byte becomes the lost
+ * wake byte). Set in ISR/polled context, consumed in main-loop context. */
+#ifndef KBD_DEEP_SLEEP
+#define KBD_DEEP_SLEEP 0
+#endif
+#if KBD_DEEP_SLEEP
+static volatile uint8_t rx_activity_latch;
+#define RX_NOTE_ACTIVITY()  do { rx_activity_latch = 1; } while (0)
+#else
+#define RX_NOTE_ACTIVITY()  do { } while (0)   /* KBD_DEEP_SLEEP=0: byte-identical to MR4 */
+#endif
+
 #if KBD_IDLE_WFI
 /* RX ring between UART1_IRQHandler and KeyboardUart_Poll. The ISR exists so
  * the WFE idle wait in Main_Circulation ends the instant a host byte arrives
@@ -311,6 +328,7 @@ void UART1_IRQHandler(void)
     }
     while (R8_UART1_RFC) {
         uint8_t b = R8_UART1_RBR;
+        RX_NOTE_ACTIVITY();
         if ((uint8_t)(rx_ring_head - rx_ring_tail) < KBD_UART_RING_SIZE) {
             rx_ring[rx_ring_head & (KBD_UART_RING_SIZE - 1u)] = b;
             rx_ring_head++;
@@ -365,6 +383,7 @@ void KeyboardUart_Poll(void)
 {
     check_uart_line_status();
     while (R8_UART1_RFC) {
+        RX_NOTE_ACTIVITY();
         feed_byte(R8_UART1_RBR);
         check_uart_line_status();
     }
@@ -381,6 +400,20 @@ uint8_t KeyboardUart_RxQuiet(void)
     return (rx_len == 0);
 #endif
 }
+
+#if KBD_DEEP_SLEEP
+uint8_t KeyboardUart_TakeRxActivity(void)
+{
+    /* Read-then-clear only when set: if the ISR sets the latch between the
+     * read and the clear we still report activity (v == 1), and the new byte
+     * sits in the ring where RxQuiet() vetoes sleep -- nothing is lost. */
+    uint8_t v = rx_activity_latch;
+    if (v) {
+        rx_activity_latch = 0;
+    }
+    return v;
+}
+#endif
 
 uint8_t KeyboardUart_TxIdle(void)
 {

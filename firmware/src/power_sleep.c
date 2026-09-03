@@ -10,10 +10,14 @@
  * idle -- INCLUDING while CONNECTED, because the connected-mode hop scheduler
  * is app-polled off raw RTC reads and invisible to TMOS. Every sleep here is
  * hard-gated (sleep => the RF link was already torn down; never sleep a live
- * link). Two entry paths: PowerSleep_ExplicitOnce() is LIVE from MR6 (the
- * host commands it with A6 54); the TMOS idle callback CH59x_LowPower stays
- * inert until pwr_autosleep is set (MR7 autonomous sleep -- nothing in MR6
- * sets it).
+ * link). Entry paths: PowerSleep_ExplicitOnce() (MR6, host commands it with
+ * A6 54); and, once the host arms auto-sleep with A6 57 (MR7), two
+ * autonomous sites partitioned by RF state -- PowerSleep_IdleAutosleep()
+ * from the main loop in RF IDLE (GPIO-only, indefinite "sleep until the
+ * host talks"), and the TMOS idle callback CH59x_LowPower in the radio-off
+ * slices of a bonded reconnect search (RTC-bounded by the 20 ms beacon
+ * deadline TMOS hands it). The split means IDLE sleep never depends on what
+ * deadline TMOS passes when it has nothing scheduled (undocumented).
  *
  * Wake sources: RTC trigger (armed per sleep with the caller's deadline;
  * RB_RTC_TRIG_EN is set only while a sleep is armed) and a GPIO falling edge
@@ -50,6 +54,7 @@
 #include "keyboard_uart.h"
 #include "rf_task.h"
 #include "power_sleep.h"
+#include "sleep_protocol.h"
 
 #ifndef KBD_UART1_REMAP
 #define KBD_UART1_REMAP 1
@@ -118,12 +123,22 @@ volatile uint8_t  pwr_last_abort_reason __attribute__((section(".diag_safe.power
 volatile uint8_t pwr_bench_phase __attribute__((section(".diag_safe.power")));
 #endif
 
-/* Runtime enable. NOTHING in this rung sets it: the UART sleep-protocol rung
- * (A6 57 auto-sleep) is the only intended writer. */
+/* Auto-sleep enable, mirrored from the sleep-protocol reducer (A6 57 arms,
+ * A6 56/51/52/63 and boot clear). */
 static volatile uint8_t pwr_autosleep;
 
 /* GPIO-wake activity latch (set on a consumed wake edge). */
 static volatile uint8_t pwr_gpio_woke;
+
+/* Post-activity holdoff (review #12): after a GPIO wake OR any accepted UART
+ * frame, autonomous sleep is refused for KBD_AUTOSLEEP_HOLDOFF_MS so the
+ * host's post-NULL frame -- and any burst of frames after it -- lands on an
+ * awake module. Only the FIRST frame after silence needs the preamble. */
+#ifndef KBD_AUTOSLEEP_HOLDOFF_MS
+#define KBD_AUTOSLEEP_HOLDOFF_MS 100u
+#endif
+static uint32_t pwr_holdoff_start;
+static volatile uint8_t pwr_holdoff_active;
 
 __attribute__((always_inline)) static inline uint32_t pwr_irq_save(void)
 {
@@ -169,13 +184,39 @@ static uint32_t pwr_rtc_sub(uint32_t base, uint32_t ticks)
     return base + (RTC_MAX_COUNT - ticks);
 }
 __HIGH_CODE
+/* Same 1024-tick backstep allowance as rf_task.c's RTC32K_BACKSTEP_TOLERANCE:
+ * a small backward RTC sample must read as zero elapsed, not as a ~24 h wrap
+ * that would expire a fresh holdoff instantly (review finding). */
+#define PWR_RTC32K_BACKSTEP_TOLERANCE 1024u
 static uint32_t rtc_ticks_elapsed(uint32_t start)
 {
-    uint32_t now = RTC_GetCycle32k();
-    if (now >= start) {
-        return now - start;
+    return SleepProtocol_ElapsedTicks(RTC_GetCycle32k(), start,
+                                      RTC_MAX_COUNT, PWR_RTC32K_BACKSTEP_TOLERANCE);
+}
+
+static void pwr_note_activity(void)
+{
+    pwr_holdoff_start = RTC_GetCycle32k();
+    pwr_holdoff_active = 1;
+}
+
+/* 1 when autonomous sleep may proceed w.r.t. recent host activity. */
+static uint8_t pwr_holdoff_expired(void)
+{
+    /* Any raw RX byte since the last check -- a discarded NULL preamble, a
+     * host ACK, noise -- is host activity the frame callback never saw. */
+    if (KeyboardUart_TakeRxActivity()) {
+        pwr_note_activity();
+        return 0;
     }
-    return now + (RTC_MAX_COUNT - start);
+    if (!pwr_holdoff_active) {
+        return 1;
+    }
+    if (rtc_ticks_elapsed(pwr_holdoff_start) >= MS_TO_RTC(KBD_AUTOSLEEP_HOLDOFF_MS)) {
+        pwr_holdoff_active = 0;
+        return 1;
+    }
+    return 0;
 }
 
 /* Arm the RX-pin falling-edge wake. Boundary-only: called with IRQs masked
@@ -269,8 +310,12 @@ static void pwr_rtc_trig_disarm(void)
 }
 
 /* The actual sleep, shared by the idle callback and the bench hook. `time`
- * is the ABSOLUTE RTC tick to wake at. Return contract: 0 slept, 2 window
- * rejected, 3 did-not-sleep.
+ * is the ABSOLUTE RTC tick to wake at. Return contract (stock-compatible; this is the TMOS idleCB):
+ * 0 = LowPower_Sleep was ENTERED and returned -- by the RTC deadline, a GPIO
+ * wake, or a spurious prologue return (pwr_wake_rtc / pwr_wake_gpio /
+ * pwr_last_abort_reason say which); TMOS uses 0 to run its LLE/BB wake
+ * re-init, wanted after ANY entry, so a spurious return must still report 0
+ * (review). 2 = window rejected, 3 = vetoed before entry (nothing entered).
  *
  * Deep-sleep entry is the STOCK SDK LowPower_Sleep (plain __WFI), entered
  * with global interrupts UNMASKED. Bench experiments proved the forked
@@ -381,9 +426,14 @@ static uint32_t pwr_sleep_until(uint32_t time)
      * the RTC ISR has already set RTCTigFlag; a GPIO wake ran our handler
      * (pwr_gpio_woke). */
     if (RTCTigFlag) {
-        PWR_DIAG_INC16(pwr_wake_rtc);
-    } else {
+        PWR_DIAG_INC16(pwr_wake_rtc);        /* our own deadline: no holdoff */
+    } else if (pwr_gpio_woke) {
         PWR_DIAG_INC16(pwr_wake_gpio);
+        pwr_note_activity();                 /* host woke us: hold off re-sleep */
+    } else {
+        /* Spurious prologue return: counted for diag, but LowPower_Sleep WAS
+         * entered, so the return stays 0 per the contract above. */
+        PWR_ABORT(PWR_ABORT_LATE);
     }
 
     pwr_gpio_wake_disarm();
@@ -464,6 +514,7 @@ uint32_t PowerSleep_ExplicitOnce(void)
     uint32_t rc;
     if (pwr_gpio_woke) {
         PWR_DIAG_INC16(pwr_wake_gpio);
+        pwr_note_activity();                 /* host woke us: hold off re-sleep */
         rc = 0;
     } else {
         PWR_ABORT(PWR_ABORT_LATE);
@@ -476,19 +527,61 @@ uint32_t PowerSleep_ExplicitOnce(void)
 }
 
 /*********************************************************************
+ * Auto-sleep controls (MR7), mirrored from the sleep-protocol reducer. */
+void PowerSleep_SetAutosleep(uint8_t on)
+{
+    if (on && !pwr_autosleep) {
+        pwr_note_activity();   /* arming counts as activity: no instant sleep */
+    }
+    pwr_autosleep = on ? 1u : 0u;
+}
+
+void PowerSleep_NoteActivity(void)
+{
+    pwr_note_activity();
+}
+
+/*********************************************************************
+ * PowerSleep_IdleAutosleep -- main-loop autonomous site for RF IDLE
+ * (MR7). Sleeps until the host's RX edge (GPIO-only, no deadline, same
+ * one-shot core as the explicit A6 54 path). Returns 0 if it slept and woke,
+ * 3 if not applicable / vetoed. The caller has already checked RF IDLE, no
+ * OpenBoot entry, no pending explicit sleep, and RX quiet. */
+uint32_t PowerSleep_IdleAutosleep(void)
+{
+    if (!pwr_autosleep || !pwr_holdoff_expired()) {
+        return 3;
+    }
+    if (!KeyboardUart_TxIdle()) {   /* never sleep with a reply still shifting */
+        PWR_ABORT(PWR_ABORT_TX);
+        return 3;
+    }
+    return PowerSleep_ExplicitOnce();
+}
+
+/*********************************************************************
  * CH59x_LowPower -- the TMOS idle callback (MCU.c wires it under
  * HAL_SLEEP=TRUE). `time` is the next TMOS deadline as an absolute RTC
- * tick. Hard-gated and RUNTIME-INERT: pwr_autosleep is never set in this
- * rung. */
+ * tick. Autonomous site for the BONDED RECONNECT SEARCH only (MR7): between
+ * beacons, once the duty cycle has shut the receiver, TMOS hands us the
+ * ~17 ms to the next beacon and we deep-sleep it out (RTC + GPIO wake). RF
+ * IDLE is deliberately refused here -- the main loop owns it -- so nothing
+ * depends on what deadline TMOS passes when it has nothing scheduled. */
 __HIGH_CODE
 uint32_t CH59x_LowPower(uint32_t time)
 {
     if (!pwr_autosleep) {
-        return 3;   /* runtime-inert: MR5 never sleeps from the idleCB */
+        return 3;   /* not armed: behaves exactly as MR6 */
+    }
+    if (RF_GetState() == RF_STATE_IDLE) {
+        return 3;   /* main-loop site owns IDLE (GPIO-only, no deadline) */
     }
     if (!RF_CanDeepSleep()) {
         PWR_ABORT(PWR_ABORT_RF);
         return 3;
+    }
+    if (!pwr_holdoff_expired()) {
+        return 3;   /* host recently spoke: stay awake for its next frame */
     }
     if (OpenBoot_EntryPending()) {
         PWR_ABORT(PWR_ABORT_OPENBOOT);
