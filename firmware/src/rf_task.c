@@ -1144,12 +1144,19 @@ static uint8_t rf_configure(uint32_t access_addr)
  * between hops just retune. (The connected response-TX path already skips
  * RF_Config for the same reason -- see the RF_EVT_RESPOND handler.) */
 static uint32_t rf_configured_aa;
+/* Explicit validity flag instead of any in-band sentinel value: every
+ * sentinel scheme collides with SOME legal AA (0 with a zero/corrupt AA,
+ * a complement scheme with an AA equal to the previous one's complement),
+ * and the cost of the collision is a radio silently left unconfigured
+ * (review finding). */
+static uint8_t rf_configured_valid;
 static void rf_configure_if_needed(uint32_t access_addr)
 {
-    if (rf_configured_aa != access_addr) {
+    if (!rf_configured_valid || rf_configured_aa != access_addr) {
         uint8_t cfg_status = rf_configure(access_addr);
         if (cfg_status == 0) {
             rf_configured_aa = access_addr;
+            rf_configured_valid = 1;
         }
     } else {
         RF_SetChannel(rf_channel);   /* same AA: retune only, no RF_Config */
@@ -1514,13 +1521,12 @@ void RF_TaskInit(void)
         pair_rx_open = 1;
         pair_rx_off_armed = 0;
         rf_access_addr = stored_session_aa;
-        /* Force the next rf_configure even if the stored AA equals the
-         * rf_configured_aa sentinel (0): a zero session AA -- possible via
-         * STOCK_SEED_BOND or corrupt RAM state, bench-diagnosed -- would
-         * otherwise skip RF_Config entirely and search on an unconfigured
-         * radio. Persisted bonds reject zero/default AAs at load, so this
-         * is pure hardening. */
-        rf_configured_aa = ~rf_access_addr;
+        /* Force the next rf_configure regardless of any cached AA value:
+         * a zero or otherwise colliding session AA (STOCK_SEED_BOND or
+         * corrupt RAM state, bench-diagnosed) must never skip RF_Config
+         * and search on an unconfigured radio. Persisted bonds reject
+         * zero/default AAs at load, so this is pure hardening. */
+        rf_configured_valid = 0;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
@@ -1545,13 +1551,12 @@ uint8_t RF_Select2G4(void)
         pair_rx_open = 1;
         pair_rx_off_armed = 0;
         rf_access_addr = stored_session_aa;
-        /* Force the next rf_configure even if the stored AA equals the
-         * rf_configured_aa sentinel (0): a zero session AA -- possible via
-         * STOCK_SEED_BOND or corrupt RAM state, bench-diagnosed -- would
-         * otherwise skip RF_Config entirely and search on an unconfigured
-         * radio. Persisted bonds reject zero/default AAs at load, so this
-         * is pure hardening. */
-        rf_configured_aa = ~rf_access_addr;
+        /* Force the next rf_configure regardless of any cached AA value:
+         * a zero or otherwise colliding session AA (STOCK_SEED_BOND or
+         * corrupt RAM state, bench-diagnosed) must never skip RF_Config
+         * and search on an unconfigured radio. Persisted bonds reject
+         * zero/default AAs at load, so this is pure hardening. */
+        rf_configured_valid = 0;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
         rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
