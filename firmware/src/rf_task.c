@@ -15,6 +15,8 @@
 #define RF_EVT_RESPOND            0x0020   /* connected poll-response TX (main loop) */
 #define RF_EVT_NOTIFY_LED         0x0040
 #define RF_EVT_SAVE_BOND          0x0100   /* deferred DataFlash write, not from RF ISR */
+#define RF_EVT_PAIR_RX_OFF        0x0200   /* close the post-beacon listen window
+                                            * (bonded-reconnect duty cycle, MR4) */
 
 /* Stock-interop H1/H2 discriminator: skip the first N connected-poll responses
  * (keep listening/tracking, no uplink TX). If the keyboard then catches several
@@ -83,6 +85,31 @@
 #define RF_PAIR_BCAST_TICKS       32u      /* 20 ms at 625 us/tick */
 #define RF_PAIR_WINDOW_TICKS      8480u    /* stock pair window is about 5.3 s */
 #define RF_PAIR_DWELL_BCASTS      12u
+
+/* Bonded-reconnect radio duty cycle (power ladder MR4). A bonded keyboard
+ * whose dongle is absent searches FOREVER (boot-with-bond and A6 30 arm no
+ * pair timeout), and until this rung it held the receiver open for the whole
+ * 20 ms beacon period -- the single largest measured burner (7.75 mA vs
+ * 0.68 mA idle). With the duty cycle, RX stays open only for a short window
+ * after each beacon; the dongle's reconnect reply lands right after the
+ * beacon it heard, so the window covers it. Behavior change: reconnect
+ * latency may grow -- bench-measured before merge, window sized from the
+ * distribution. EXPLICIT user pairing (A6 51/63) keeps continuous RX: it is
+ * user-attended, latency-sensitive, and bounded by the 5.3 s window. */
+#ifndef KBD_PAIR_DUTY_CYCLE
+#define KBD_PAIR_DUTY_CYCLE 1
+#endif
+#ifndef KBD_PAIR_RX_WINDOW_TICKS
+#define KBD_PAIR_RX_WINDOW_TICKS 4u        /* 2.5 ms of 20 ms = 12.5% RX duty */
+#endif
+
+/* Which flavor of PAIRING we are in. Deliberately an EXPLICIT tag set at the
+ * three entry points, never inferred from rf_access_addr: fresh pairing
+ * flips rf_access_addr to the session AA on its FIRST handshake packet, so
+ * the AA cannot distinguish the flavors mid-handshake (adversarial-review
+ * finding on the plan). */
+#define PAIR_FLAVOR_FRESH   0u             /* A6 51/63: continuous RX */
+#define PAIR_FLAVOR_BONDED  1u             /* boot-with-bond / A6 30: duty-cycled */
 #define RF_CONNECTED_TIMEOUT_TICKS 5000u   /* ~3.1 s; FIXED connection supervision --
                                             * the dongle's advertised timeout field is
                                             * intentionally not honored (stock scales it
@@ -154,6 +181,19 @@ static const uint8_t data_channels[NUM_DATA_CHANNELS] = {4, 13, 20, 28, 33};
 
 static uint8_t rf_taskID;
 static uint8_t rf_state;
+/* PAIR_FLAVOR_* tag; meaningful only while rf_state == RF_STATE_PAIRING. */
+static uint8_t pair_flavor;
+/* Listen-window epoch: RX_RESTART in PAIRING re-arms the receiver only while
+ * this is set. Cleared by the RX_OFF handler so a STALE RX_RESTART (posted by
+ * a late TX-finish or RX-error callback before the window closed) cannot
+ * silently reopen RX for the rest of the beacon period (adversarial-review
+ * finding on the plan). Set by every pairing entry and every beacon. */
+static volatile uint8_t pair_rx_open;
+/* One close-timer per beacon epoch: set when the first RX_RESTART of the
+ * epoch arms the receiver AND starts the RX_OFF timer, so RX-error restarts
+ * within the window do not keep extending it. Cleared per beacon and by the
+ * RX_OFF handler. */
+static volatile uint8_t pair_rx_off_armed;
 static int8_t rf_rssi;
 static uint32_t rf_access_addr;
 static uint8_t rf_channel;
@@ -252,6 +292,9 @@ volatile uint32_t rf_cb_count[6] __attribute__((section(".diag_safe")));
 volatile uint32_t rf_pair_bcast_count __attribute__((section(".diag_safe")));
 volatile uint32_t rf_connected_tx_count __attribute__((section(".diag_safe")));
 volatile uint32_t rf_valid_rx_count __attribute__((section(".diag_safe")));
+/* .diag_safe.power (NOT the bare section): collected after every legacy
+ * counter so bench absolute addresses never move -- see ch592f.ld. */
+volatile uint32_t pwr_pair_rx_off_count __attribute__((section(".diag_safe.power")));
 volatile uint8_t rf_last_config_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_rx_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_tx_status __attribute__((section(".diag_safe")));
@@ -962,8 +1005,26 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_RX_RESTART) {
-        if (rf_state == RF_STATE_PAIRING || rf_state == RF_STATE_CONNECTED) {
+        /* In PAIRING the re-arm is gated by pair_rx_open: after the duty
+         * cycle's RX_OFF closed the window, a stale RX_RESTART (late
+         * TX-finish or RX-error callback) must not reopen the receiver for
+         * the rest of the beacon period. CONNECTED is unconditional. */
+        if (rf_state == RF_STATE_CONNECTED
+                || (rf_state == RF_STATE_PAIRING && pair_rx_open)) {
             rf_start_rx(rf_channel);   /* re-arm on the current channel */
+#if KBD_PAIR_DUTY_CYCLE
+            /* Start the close timer from the moment RX actually arms (first
+             * restart of this beacon epoch only), so the full window is
+             * armed listen time regardless of beacon airtime or scheduler
+             * latency (review finding). */
+            if (rf_state == RF_STATE_PAIRING
+                    && pair_flavor == PAIR_FLAVOR_BONDED
+                    && !pair_rx_off_armed) {
+                pair_rx_off_armed = 1;
+                rf_start_task_atomic(RF_EVT_PAIR_RX_OFF,
+                                     KBD_PAIR_RX_WINDOW_TICKS);
+            }
+#endif
         }
         return events ^ RF_EVT_RX_RESTART;
     }
@@ -975,9 +1036,24 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_PAIR_BCAST;
     }
 
+    if (events & RF_EVT_PAIR_RX_OFF) {
+        /* Close the bonded-reconnect listen window until the next beacon.
+         * A LEN-15 already caught has posted ENTER_CONNECTED, whose handler
+         * re-arms RX itself, so shutting here can never lose the catch. */
+        if (rf_state == RF_STATE_PAIRING
+                && pair_flavor == PAIR_FLAVOR_BONDED) {
+            pair_rx_open = 0;
+            pair_rx_off_armed = 0;
+            RF_Shut();
+            RF_DIAG_INC(pwr_pair_rx_off_count);
+        }
+        return events ^ RF_EVT_PAIR_RX_OFF;
+    }
+
     if (events & RF_EVT_PAIR_TIMEOUT) {
         if (rf_state == RF_STATE_PAIRING) {
             rf_state = RF_STATE_IDLE;
+            rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
             RF_Shut();
         }
         return events ^ RF_EVT_PAIR_TIMEOUT;
@@ -1135,15 +1211,40 @@ static void rf_pair_broadcast(void)
     RF_DIAG_INC(rf_pair_bcast_count);
     pair_bcast_count++;
     rf_start_task_atomic(RF_EVT_PAIR_BCAST, RF_PAIR_BCAST_TICKS);
+
+    /* Open the post-beacon listen window (TX_FINISH -> RX_RESTART arms the
+     * receiver). Bonded reconnect closes it again KBD_PAIR_RX_WINDOW_TICKS
+     * after RX actually arms -- the close timer is started by the first
+     * RX_RESTART of this epoch (see the handler), not here, so beacon
+     * airtime and TMOS dispatch latency never eat the listen window (review
+     * finding). Fresh pairing leaves the window open until the next
+     * beacon's RF_Shut, exactly as before this rung. The stop_task clears
+     * a fired-but-unhandled RX_OFF from a delayed previous epoch, which
+     * would otherwise close THIS epoch's window (review finding; TMOS
+     * stop_task clears queued event bits too). */
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
+    pair_rx_open = 1;
+    pair_rx_off_armed = 0;
 }
 
 static void rf_enter_connected(void)
 {
+    /* Belt-and-braces vs a stale queued catch: every user transition that
+     * invalidates a pending catch (A6 52/11 -> RF_Disconnect, A6 51/63 ->
+     * RF_EnterPairing) now also clears the queued ENTER_CONNECTED event, so
+     * reaching here outside PAIRING should be impossible -- but a catch
+     * connecting from IDLE with torn-down pending_* state is bad enough to
+     * guard anyway (adversarial-review finding: the RX_OFF event can defer
+     * a catch by one scheduler pass, widening the pre-existing window). */
+    if (rf_state != RF_STATE_PAIRING) {
+        return;
+    }
     RF_DIAG_INC(entered_connected_count);
     /* Only ever reached from PAIRING (the connected path drops LEN-15 re-keys), so
      * this is always a real IDLE/PAIRING->CONNECTED transition -- announce 5B32. */
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
     rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
 
     stored_session_aa = pending_session_aa;
     stored_type_tag = pending_type_tag;
@@ -1349,6 +1450,7 @@ void RF_TaskInit(void)
     rf_pair_bcast_count = 0;
     rf_connected_tx_count = 0;
     rf_valid_rx_count = 0;
+    pwr_pair_rx_off_count = 0;
     rf_last_config_status = 0;
     rf_last_rx_status = 0;
     rf_last_tx_status = 0;
@@ -1408,7 +1510,17 @@ void RF_TaskInit(void)
     tmos_memset(hid_report, 0, sizeof(hid_report));
     if (has_bond && keyboard_mac_valid) {
         rf_state = RF_STATE_PAIRING;
+        pair_flavor = PAIR_FLAVOR_BONDED;
+        pair_rx_open = 1;
+        pair_rx_off_armed = 0;
         rf_access_addr = stored_session_aa;
+        /* Force the next rf_configure even if the stored AA equals the
+         * rf_configured_aa sentinel (0): a zero session AA -- possible via
+         * STOCK_SEED_BOND or corrupt RAM state, bench-diagnosed -- would
+         * otherwise skip RF_Config entirely and search on an unconfigured
+         * radio. Persisted bonds reject zero/default AAs at load, so this
+         * is pure hardening. */
+        rf_configured_aa = ~rf_access_addr;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
@@ -1429,10 +1541,21 @@ uint8_t RF_Select2G4(void)
     if (has_bond) {
         rf_tmr0_stop();
         rf_state = RF_STATE_PAIRING;
+        pair_flavor = PAIR_FLAVOR_BONDED;
+        pair_rx_open = 1;
+        pair_rx_off_armed = 0;
         rf_access_addr = stored_session_aa;
+        /* Force the next rf_configure even if the stored AA equals the
+         * rf_configured_aa sentinel (0): a zero session AA -- possible via
+         * STOCK_SEED_BOND or corrupt RAM state, bench-diagnosed -- would
+         * otherwise skip RF_Config entirely and search on an unconfigured
+         * radio. Persisted bonds reject zero/default AAs at load, so this
+         * is pure hardening. */
+        rf_configured_aa = ~rf_access_addr;
         rf_channel = pair_channels[0];
         pair_bcast_count = 0;
         rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
+        rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
         rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     }
     return has_bond;
@@ -1451,10 +1574,24 @@ void RF_EnterPairing(void)
         return;
     }
     rf_tmr0_stop();
+    /* Quiesce-then-clear, IN THIS ORDER (review finding): the old bonded-AA
+     * receiver can still be armed here, and a LEN-15 landing after a bare
+     * event-clear would simply REPOST ENTER_CONNECTED and pass the state
+     * guard (state is PAIRING again). RF_Shut first makes new posts
+     * impossible; the stop_task then sweeps anything posted before it --
+     * including a catch from microseconds ago (A6 63 clears the bond first,
+     * so a stale bonded catch would connect on torn-down state, and even on
+     * A6 51 it would announce a spurious 5B32 after the host saw 5B31). */
+    RF_Shut();
+    rf_stop_task_atomic(RF_EVT_ENTER_CONNECTED);
     rf_state = RF_STATE_PAIRING;
+    pair_flavor = PAIR_FLAVOR_FRESH;   /* user-attended: continuous RX */
+    pair_rx_open = 1;
+    pair_rx_off_armed = 0;
     rf_access_addr = RF_DEFAULT_ACCESS_ADDR;
     rf_channel = pair_channels[0];
     pair_bcast_count = 0;
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
     rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     rf_start_task_atomic(RF_EVT_PAIR_TIMEOUT, RF_PAIR_WINDOW_TICKS);
 }
@@ -1464,6 +1601,8 @@ void RF_Disconnect(void)
     rf_tmr0_stop();
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
     rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
+    rf_stop_task_atomic(RF_EVT_ENTER_CONNECTED);   /* stale-catch guard */
     rf_stop_task_atomic(RF_EVT_DISCONNECT);
     bond_save_pending = 0;
     rf_state = RF_STATE_IDLE;
