@@ -310,8 +310,12 @@ static void pwr_rtc_trig_disarm(void)
 }
 
 /* The actual sleep, shared by the idle callback and the bench hook. `time`
- * is the ABSOLUTE RTC tick to wake at. Return contract: 0 slept, 2 window
- * rejected, 3 did-not-sleep.
+ * is the ABSOLUTE RTC tick to wake at. Return contract (stock-compatible; this is the TMOS idleCB):
+ * 0 = LowPower_Sleep was ENTERED and returned -- by the RTC deadline, a GPIO
+ * wake, or a spurious prologue return (pwr_wake_rtc / pwr_wake_gpio /
+ * pwr_last_abort_reason say which); TMOS uses 0 to run its LLE/BB wake
+ * re-init, wanted after ANY entry, so a spurious return must still report 0
+ * (review). 2 = window rejected, 3 = vetoed before entry (nothing entered).
  *
  * Deep-sleep entry is the STOCK SDK LowPower_Sleep (plain __WFI), entered
  * with global interrupts UNMASKED. Bench experiments proved the forked
@@ -427,7 +431,9 @@ static uint32_t pwr_sleep_until(uint32_t time)
         PWR_DIAG_INC16(pwr_wake_gpio);
         pwr_note_activity();                 /* host woke us: hold off re-sleep */
     } else {
-        PWR_ABORT(PWR_ABORT_LATE);           /* spurious prologue return */
+        /* Spurious prologue return: counted for diag, but LowPower_Sleep WAS
+         * entered, so the return stays 0 per the contract above. */
+        PWR_ABORT(PWR_ABORT_LATE);
     }
 
     pwr_gpio_wake_disarm();
