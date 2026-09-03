@@ -293,10 +293,13 @@ static void feed_byte(uint8_t b)
 
 #if KBD_IDLE_WFI
 
-/* Drains RBR for every cause: RECV_RDY/RECV_TOUT clear only that way, and
- * after a LINE_STAT overrun the FIFO still holds bytes worth keeping.
- * __HIGH_CODE: wake ISRs must run from RAM (LowPower_Idle powers flash
- * down; the fetch stall on the way back out is paid once, after we return). */
+/* Enabled causes are RECV_RDY and LINE_STAT (see KeyboardUart_Init); with the
+ * 1-byte trigger, RECV_RDY fires per byte so a receive-timeout interrupt would
+ * be redundant and is not enabled. This handler drains RBR unconditionally
+ * because RECV_RDY clears only by reading data, and after a LINE_STAT overrun
+ * the FIFO still holds bytes worth keeping. __HIGH_CODE: wake ISRs must run
+ * from RAM (the idle path powers flash down; the fetch stall on the way back
+ * out is paid once, after we return). */
 __INTERRUPT
 __HIGH_CODE
 void UART1_IRQHandler(void)
