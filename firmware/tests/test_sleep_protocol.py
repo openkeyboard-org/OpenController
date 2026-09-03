@@ -16,11 +16,12 @@ SRC = FW / "src" / "sleep_protocol.c"
 # Mirror the enum / opcodes from sleep_protocol.h.
 NONE, SEND_READY, ARM, CANCEL = 0, 1, 2, 3
 A6, A1, A9, ACK = 0xA6, 0xA1, 0xA9, 0x61
-SUB_UNLOCK, SUB_SLEEP = 0x56, 0x54
+SUB_UNLOCK, SUB_SLEEP, SUB_AUTO = 0x56, 0x54, 0x57
 
 
 class State(ctypes.Structure):
-    _fields_ = [("unlocked", ctypes.c_uint8), ("sleep_pending", ctypes.c_uint8)]
+    _fields_ = [("unlocked", ctypes.c_uint8), ("sleep_pending", ctypes.c_uint8),
+                ("autosleep", ctypes.c_uint8)]
 
 
 @pytest.fixture(scope="module")
@@ -35,6 +36,8 @@ def lib(tmp_path_factory):
     dll.SleepProtocol_OnFrame.argtypes = [
         ctypes.POINTER(State), ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
     dll.SleepProtocol_Reset.argtypes = [ctypes.POINTER(State)]
+    dll.SleepProtocol_ElapsedTicks.restype = ctypes.c_uint32
+    dll.SleepProtocol_ElapsedTicks.argtypes = [ctypes.c_uint32] * 4
     return dll
 
 
@@ -179,3 +182,103 @@ def test_reserved_sleep_subs_are_inert(lib, st, sub):
     feed(lib, st, A6, SUB_SLEEP)                # now pending
     assert feed(lib, st, A6, sub) == NONE       # reserved: inert, sleep stands
     assert st.sleep_pending == 1
+
+
+# ---------------- MR7: A6 57 auto-sleep lifetime ----------------
+
+def test_reset_clears_autosleep(lib, st):
+    assert st.autosleep == 0
+
+
+def test_autosleep_without_unlock_is_noop(lib, st):
+    assert feed(lib, st, A6, SUB_AUTO) == NONE
+    assert st.autosleep == 0
+
+
+def test_unlock_then_57_arms_autosleep(lib, st):
+    feed(lib, st, A6, SUB_UNLOCK)
+    assert feed(lib, st, A6, SUB_AUTO) == NONE      # ACK only; no new status
+    assert st.autosleep == 1
+    assert feed(lib, st, A6, SUB_AUTO) == NONE      # idempotent
+    assert st.autosleep == 1
+
+
+def test_reunlock_disables_autosleep(lib, st):
+    # A6 56 = reset to baseline: the disable path (stock has no disable opcode).
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    assert feed(lib, st, A6, SUB_UNLOCK) == SEND_READY
+    assert st.autosleep == 0 and st.unlocked == 1
+
+
+@pytest.mark.parametrize("sub", [0x51, 0x52, 0x63])
+def test_pairing_and_unpair_clear_autosleep(lib, st, sub):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    feed(lib, st, A6, sub)
+    assert st.autosleep == 0
+    assert st.unlocked == 1                        # unlock itself survives
+
+
+@pytest.mark.parametrize("sub", [0x11, 0x30, 0x31, 0x32, 0x33, 0x53, 0x70, 0xFF])
+def test_transport_and_queries_preserve_autosleep(lib, st, sub):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    feed(lib, st, A6, sub)
+    assert st.autosleep == 1
+
+
+@pytest.mark.parametrize("cmd", [A1, A9, ACK])
+def test_non_a6_frames_preserve_autosleep(lib, st, cmd):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    feed(lib, st, cmd, SUB_AUTO)                   # even with sub byte 0x57
+    assert st.autosleep == 1
+
+
+def test_57_does_not_touch_pending_explicit_sleep(lib, st):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_SLEEP)
+    assert feed(lib, st, A6, SUB_AUTO) == NONE
+    assert st.sleep_pending == 1 and st.autosleep == 1
+
+
+def test_explicit_sleep_and_autosleep_are_independent(lib, st):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    assert feed(lib, st, A6, SUB_SLEEP) == ARM      # explicit still arms
+    assert feed(lib, st, A6, 0x30) == CANCEL        # cancels explicit only
+    assert st.autosleep == 1
+
+
+def test_ota_preserves_autosleep_until_reboot(lib, st):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_AUTO)
+    feed(lib, st, A6, 0x81)                        # OTA: module reboots anyway
+    assert st.autosleep == 1
+
+
+# ---------------- MR7: backstep-tolerant elapsed ticks ----------------
+MOD, TOL = 0xA8C00000, 1024
+
+
+def elapsed(lib, now, start):
+    return lib.SleepProtocol_ElapsedTicks(now, start, MOD, TOL)
+
+
+def test_elapsed_normal(lib):
+    assert elapsed(lib, 5000, 1000) == 4000
+    assert elapsed(lib, 1000, 1000) == 0
+
+
+@pytest.mark.parametrize("back", [1, 100, 1024])
+def test_elapsed_small_backstep_is_zero(lib, back):
+    # The CH59x RTC32K read can step backward a few ticks: NOT a wrap.
+    assert elapsed(lib, 100000 - back, 100000) == 0
+
+
+def test_elapsed_true_wrap(lib):
+    # start near the modulus, now just past zero: a genuine wrap.
+    assert elapsed(lib, 10, MOD - 5) == 15
+    # just beyond the tolerance is treated as a wrap, not a backstep
+    assert elapsed(lib, 100000 - TOL - 1, 100000) == MOD - TOL - 1

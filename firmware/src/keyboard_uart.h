@@ -38,4 +38,8 @@ uint8_t KeyboardUart_TxIdle(void);
  * site re-checks R8_UART1_RFC itself under masked IRQs. */
 uint8_t KeyboardUart_RxQuiet(void);
 
+/* Returns 1 (and clears the latch) if ANY byte was taken from the UART since
+ * the last call -- including discarded/unframed bytes. Main-loop context. */
+uint8_t KeyboardUart_TakeRxActivity(void);
+
 #endif

@@ -10,17 +10,36 @@ void SleepProtocol_Reset(sleep_proto_t *st)
 {
     st->unlocked = 0;
     st->sleep_pending = 0;
+    st->autosleep = 0;
 }
 
 sleep_proto_action_t SleepProtocol_OnFrame(sleep_proto_t *st, uint8_t cmd,
                                            uint8_t sub, uint8_t openboot_pending)
 {
     if (cmd == SLEEP_PROTO_CMD_A6 && sub == SLEEP_PROTO_SUB_UNLOCK) {
-        /* Negotiate/re-negotiate v1. Idempotent; a re-request also cancels a
-         * still-pending sleep (it is a new meaningful command). */
+        /* Negotiate/re-negotiate v1 = RESET to the protocol baseline:
+         * unlocked, no pending sleep, auto-sleep OFF. This doubles as the
+         * auto-sleep disable path (stock has no disable opcode). */
         st->unlocked = 1;
         st->sleep_pending = 0;
+        st->autosleep = 0;
         return SLEEP_PROTO_SEND_READY;
+    }
+
+    if (cmd == SLEEP_PROTO_CMD_A6 && sub == SLEEP_PROTO_SUB_AUTO) {
+        /* Arm auto-sleep (idempotent). Gated like A6 54; a pending explicit
+         * sleep is left alone (it proceeds, then auto-sleep governs). */
+        if (st->unlocked) {
+            st->autosleep = 1;
+        }
+        return SLEEP_PROTO_NONE;
+    }
+
+    /* Auto-sleep lifetime: user-attended pairing and unpair clear it (see
+     * header); transport selects preserve it. Independent of sleep_pending. */
+    if (cmd == SLEEP_PROTO_CMD_A6
+            && (sub == 0x51u || sub == 0x52u || sub == 0x63u)) {
+        st->autosleep = 0;
     }
 
     if (cmd == SLEEP_PROTO_CMD_A6 && sub == SLEEP_PROTO_SUB_SLEEP) {
@@ -54,4 +73,16 @@ sleep_proto_action_t SleepProtocol_OnFrame(sleep_proto_t *st, uint8_t cmd,
         }
     }
     return SLEEP_PROTO_NONE;
+}
+
+uint32_t SleepProtocol_ElapsedTicks(uint32_t now, uint32_t start,
+                                    uint32_t modulus, uint32_t backstep_tol)
+{
+    if (now >= start) {
+        return now - start;
+    }
+    if ((start - now) <= backstep_tol) {
+        return 0;                       /* small backward sample, not a wrap */
+    }
+    return now + (modulus - start);     /* true counter wrap */
 }
