@@ -23,17 +23,26 @@
  * 115200 traffic against the hardware wake delay -- review finding). The
  * GPIO wake is armed ONLY across the sleep itself, never at init.
  *
- * Sleep executes with global IRQs masked end to end -- but NOT through the
- * SDK's LowPower_Sleep: its __WFI() clears WFITOWFE, and a QingKe WFI only
- * completes on an interrupt the controller can ACCEPT, so a masked WFI
- * sleeps forever (bench-proven on the shallow path; RB_WAKE_EV_MODE only
- * retains short wake pulses in the PMU, it does not change the CPU wait
- * semantics -- review finding). pwr_deep_commit() below forks the vendor
- * register sequence verbatim and waits via SEVONPEND WFE instead, the exact
- * mechanism bench-proven for the shallow idle: a wake source PENDING at the
- * PFIC ends the wait even while global delivery stays masked; handlers run
- * at the unmask. MR2's ordering discipline applies: the stale-event drain
- * runs BEFORE the final wake-source checks, never after.
+ * Entry runs masked (window math, wake arming, boundary checks), but the
+ * deep sleep itself is the STOCK SDK LowPower_Sleep (plain __WFI) entered
+ * UNMASKED. Two bench experiments killed the first design (a fork of
+ * LowPower_Sleep with a SEVONPEND-WFE wait): it wedged the part whether the
+ * wait ran masked or unmasked, and only a power cycle recovered it. Root
+ * cause (Codex root-cause pass, confirmed by the vendor's own working
+ * path): WFE-mode (WFITOWFE) is incompatible with SLEEPDEEP=1 on this core.
+ * The MR2 shallow-idle lesson -- masked WFI hangs, masked WFE wakes -- does
+ * NOT transfer to deep sleep. So the deep wait is a plain WFI, which wakes
+ * only on an interrupt the controller can ACCEPT, hence unmasked; the
+ * vendor routine is left byte-for-byte (it also owns undocumented PLL /
+ * power-plan bits we must not transcribe). RTC_IRQn and the RX-pin GPIO IRQ
+ * are the accepted wakes.
+ *
+ * The check-to-WFI race for ASYNC UART/GPIO wake is not closed at this
+ * layer -- a single NULL edge can be consumed by its ISR inside the sleep
+ * prologue. Formal closure is a HELD BREAK or a repeated preamble, owned by
+ * the UART sleep-protocol rung. The RTC deadline is race-safe by
+ * SLEEP_RTC_MIN_TIME, and this rung's runtime path is inert with an
+ * RTC-driven bench, so the async race is out of scope here.
  */
 #include "CONFIG.h"
 #include "HAL.h"
@@ -232,86 +241,51 @@ static void pwr_rtc_trig_disarm(void)
     sys_safe_access_disable();
 }
 
-/* Deep-sleep commit: the vendor LowPower_Sleep register sequence transcribed
- * verbatim (DC-DC bits preserved, HSE bias raised, XT pre-start handling,
- * RB_RAM_RET_LV, (2<<11) plan field) EXCEPT the wait instruction: the
- * vendor __WFI() clears WFITOWFE, and a masked WFI never wakes on this
- * silicon, so the wait is a SEVONPEND WFE (SCTLR bits 4|3 armed by the
- * caller's drain step; SLEEPDEEP set here). Caller holds the global mask
- * and has already drained the stale event and re-checked every wake source.
- * RAM-resident; called only from pwr_sleep_until. */
-__HIGH_CODE
-__attribute__((noinline))
-static void pwr_deep_commit(uint16_t rm)
-{
-    __attribute__((aligned(4))) uint8_t MacAddr[6] = {0};
-    uint8_t x32Kpw, x32Mpw;
-    uint16_t power_plan;
-
-    GetMACAddress(MacAddr);             /* vendor flash-cmd quirk, kept */
-
-    x32Kpw = R8_XT32K_TUNE;
-    x32Mpw = R8_XT32M_TUNE;
-    x32Mpw = (x32Mpw & 0xfc) | 0x03;    /* HSE bias 150% for wake */
-    if (R16_RTC_CNT_32K > 0x3fff) {     /* past 500 ms: lower LSE bias */
-        x32Kpw = (x32Kpw & 0xfc) | 0x01;
-    }
-
-    sys_safe_access_enable();
-    R8_BAT_DET_CTRL = 0;
-    sys_safe_access_disable();
-    sys_safe_access_enable();
-    R8_XT32K_TUNE = x32Kpw;
-    R8_XT32M_TUNE = x32Mpw;
-    sys_safe_access_disable();
-
-    sys_safe_access_enable();
-    R16_POWER_PLAN &= ~RB_XT_PRE_EN;
-    sys_safe_access_disable();
-
-    PFIC->SCTLR |= (1u << 2);           /* deep sleep; WFE mode already armed */
-
-    power_plan = R16_POWER_PLAN & (RB_PWR_DCDC_EN | RB_PWR_DCDC_PRE);
-    power_plan |= RB_PWR_PLAN_EN | RB_PWR_CORE | rm | (2u << 11);
-
-    sys_safe_access_enable();
-    R8_SLP_POWER_CTRL |= RB_RAM_RET_LV;
-    R8_PLL_CONFIG |= (1u << 5);
-    R16_POWER_PLAN = power_plan;
-    sys_safe_access_disable();
-
-    __asm__ volatile ("wfi");           /* executes as WFE; wakes on PENDING */
-    __asm__ volatile ("nop");
-    __asm__ volatile ("nop");
-
-    PFIC->SCTLR &= ~((1u << 4) | (1u << 3) | (1u << 2));
-
-    sys_safe_access_enable();
-    R16_POWER_PLAN &= ~RB_XT_PRE_EN;
-    sys_safe_access_disable();
-
-    sys_safe_access_enable();
-    R8_PLL_CONFIG &= ~(1u << 5);
-    sys_safe_access_disable();
-}
-
 /* The actual sleep, shared by the idle callback and the bench hook. `time`
- * is the ABSOLUTE RTC tick to wake at. Stock return contract: 0 slept,
- * 2 window rejected, 3 did-not-sleep. Global mask held end to end. */
-__HIGH_CODE
-__attribute__((noinline))   /* never inline into a flash-resident caller */
+ * is the ABSOLUTE RTC tick to wake at. Return contract: 0 slept, 2 window
+ * rejected, 3 did-not-sleep.
+ *
+ * Deep-sleep entry is the STOCK SDK LowPower_Sleep (plain __WFI), entered
+ * with global interrupts UNMASKED. Bench experiments proved the forked
+ * SEVONPEND-WFE deep path wedges the part regardless of masking: WFE-mode
+ * (WFITOWFE) is incompatible with SLEEPDEEP=1 on this core -- neither RTC
+ * nor GPIO could wake it, only a power cycle recovered it. The shallow-idle
+ * lesson (masked WFE wakes) does NOT transfer to deep sleep. So the wait is
+ * a plain WFI, which wakes on any interrupt the controller can ACCEPT, i.e.
+ * IRQs must be unmasked. LowPower_Sleep is left byte-for-byte vendor code
+ * (it also handles the undocumented PLL/power-plan bits we must not
+ * transcribe). RTC_IRQn and the RX-pin GPIO IRQ are the accepted wakes.
+ *
+ * The check-to-WFI race for ASYNC UART/GPIO wake is NOT closed here: an
+ * edge consumed by its ISR during LowPower_Sleep's prologue is lost, and a
+ * single NULL byte is not a formal closure (a held BREAK or repeated
+ * preamble is -- deferred to the UART sleep-protocol rung, which owns the
+ * host contract). The RTC deadline IS race-safe: SLEEP_RTC_MIN_TIME keeps
+ * it well ahead of the prologue. This rung's runtime path is inert and its
+ * bench experiment is RTC-driven, so the async race is out of scope here.
+ * Not RAM-forced: the whole path runs from flash with the HSE up (entry
+ * before sleep, wake after Long_Delay settle), matching stock. */
 static uint32_t pwr_sleep_until(uint32_t time)
 {
     uint32_t time_sleep, time_curr;
     uint32_t irq_state;
-    volatile uint32_t i;
 
     PWR_DIAG_INC16(pwr_sleep_attempt);
 
     /* Stock early-wake margin, modular (review finding). */
     time = pwr_rtc_sub(time, WAKE_UP_RTC_MAX_TIME);
 
+    /* Mask only for atomic setup + the final wake-source checks. */
     irq_state = pwr_irq_save();
+
+    /* Deep WFI needs interrupts globally acceptable; refuse to sleep from an
+     * already-masked caller (review finding). Both real callers -- the TMOS
+     * idleCB and the bench hook -- run unmasked. */
+    if ((irq_state & 0x08u) == 0u) {
+        pwr_irq_restore(irq_state);
+        PWR_ABORT(PWR_ABORT_LATE);
+        return 3;
+    }
 
     time_curr = RTC_GetCycle32k();
     if (time < time_curr) {
@@ -330,35 +304,31 @@ static uint32_t pwr_sleep_until(uint32_t time)
     pwr_gpio_woke = 0;
     pwr_gpio_wake_arm();
 
-    /* MR2 ordering discipline: drain the stale WFE event BEFORE the final
-     * wake-source checks (SEVONPEND only latches a NEW pending edge; a
-     * source already pending when armed makes no event). Shallow here --
-     * SLEEPDEEP is set only inside the commit. */
-    PFIC->SCTLR &= ~(1u << 2);
-    PFIC->SCTLR |= (1u << 4) | (1u << 3) | (1u << 5);   /* SEVONPEND|WFE|SEV */
-    __asm__ volatile ("wfi");                           /* eats the self-SEV */
-    PFIC->SCTLR |= (1u << 3);                           /* re-arm WFE mode */
+    /* Plain-WFI mode for the deep path: clear any WFE/SEVONPEND/SLEEPDEEP
+     * bits (LowPower_Sleep sets SLEEPDEEP itself). */
+    PFIC->SCTLR &= ~((1u << 4) | (1u << 3) | (1u << 2));
 
-    /* Boundary checks with SEVONPEND live: anything already pending is
-     * caught here; anything later is a fresh edge the deep WFE catches.
-     * RX line low = a byte is mid-flight whose edge already passed and
-     * could NOT wake the sleep -- abort. */
+    /* Wake-source veto: anything already asserted means the wake edge has
+     * passed and an unmasked WFI could miss it. RX line low = a byte is
+     * mid-flight; FIFO/ring nonempty; a latched GPIO edge; the RTC trigger
+     * flag or a pending RTC/GPIO IRQ. */
     if (
 #if PWR_WAKE_PIN_IS_PB
-        (R32_PB_PIN & PWR_WAKE_PIN) == 0
+        (R32_PB_PIN & PWR_WAKE_PIN) == 0 || (R16_PB_INT_IF & PWR_WAKE_PIN)
+        || PFIC_GetPendingIRQ(GPIO_B_IRQn)
 #else
-        (R32_PA_PIN & PWR_WAKE_PIN) == 0
+        (R32_PA_PIN & PWR_WAKE_PIN) == 0 || (R16_PA_INT_IF & PWR_WAKE_PIN)
+        || PFIC_GetPendingIRQ(GPIO_A_IRQn)
 #endif
             || R8_UART1_RFC != 0 || !KeyboardUart_RxQuiet() || pwr_gpio_woke) {
-        PFIC->SCTLR &= ~((1u << 4) | (1u << 3));
         pwr_gpio_wake_disarm();
         pwr_rtc_trig_disarm();
         pwr_irq_restore(irq_state);
         PWR_ABORT(PWR_ABORT_RXLINE);
         return 3;
     }
-    if (RTCTigFlag || (R8_RTC_FLAG_CTRL & RB_RTC_TRIG_FLAG)) {
-        PFIC->SCTLR &= ~((1u << 4) | (1u << 3));
+    if (RTCTigFlag || (R8_RTC_FLAG_CTRL & RB_RTC_TRIG_FLAG)
+            || PFIC_GetPendingIRQ(RTC_IRQn)) {
         pwr_gpio_wake_disarm();
         pwr_rtc_trig_disarm();
         pwr_irq_restore(irq_state);
@@ -370,20 +340,21 @@ static uint32_t pwr_sleep_until(uint32_t time)
     WWDG_SetCounter(0);   /* full window from the instant sleep begins */
 #endif
     PWR_DIAG_INC16(pwr_sleep_entered);
-    pwr_deep_commit(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
 
-    /* Vendor-precedent wake path (the PM example calls HSECFG_Current right
-     * after a GPIO wake at 60 MHz): the hardware Long_Delay wake latency
-     * covers oscillator startup; no software settle theater on top of it
-     * (review finding -- the previous settle loop called flash-resident SDK
-     * code anyway, so it was never a flash-safety barrier). Stock one-tick
-     * synchronization only. */
-    HSECFG_Current(HSE_RCur_100);
-    i = RTC_GetCycle32k();
-    while (i == RTC_GetCycle32k()) { }
+    /* UNMASK, then the stock deep sleep. A wake IRQ arriving from here on
+     * either pends before LowPower_Sleep's __WFI (WFI then returns at once)
+     * or wakes the WFI normally; on wake its ISR runs and vectors back
+     * here. (The narrow prologue race for async wake is the protocol rung's
+     * problem, per the header note; RTC wake is race-safe by min-time.) */
+    pwr_irq_restore(irq_state);
+    LowPower_Sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
+    irq_state = pwr_irq_save();
 
-    if (R8_RTC_FLAG_CTRL & RB_RTC_TRIG_FLAG) {
-        PWR_DIAG_INC16(pwr_wake_rtc);   /* hw flag: the ISR is still masked */
+    /* Wake reason: the waking interrupt's handler ran at the WFI wake, so
+     * the RTC ISR has already set RTCTigFlag; a GPIO wake ran our handler
+     * (pwr_gpio_woke). */
+    if (RTCTigFlag) {
+        PWR_DIAG_INC16(pwr_wake_rtc);
     } else {
         PWR_DIAG_INC16(pwr_wake_gpio);
     }
@@ -454,6 +425,11 @@ void HAL_SleepInit(void)
  * context. Two-experiment protocol per the review: first prove masked WFE
  * wake with WATCHDOG_ENABLE=0, then answer WWDG-in-deep-sleep with the
  * watchdog on (phase 0x20 + boot-count bump = WWDG runs through sleep). */
+void PowerSleep_BenchRequest(void)
+{
+    pwr_bench_phase = 0x01u;
+}
+
 __HIGH_CODE
 void PowerSleep_BenchService(void)
 {

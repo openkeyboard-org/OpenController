@@ -142,6 +142,12 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         break;
 
     case 0x54: /* sleep */
+#if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
+        /* Bench build only: A6 54 arms one measured deep sleep. Not the
+         * real sleep semantics -- those are the UART sleep-protocol rung. */
+        PowerSleep_BenchRequest();
+#endif
+        break;
     case 0x55: /* sleep-bt-en */
     case 0x57: /* sleep-2g4-en */
     case 0x62: /* factory BT pair */

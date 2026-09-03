@@ -17,11 +17,14 @@
 uint8_t OpenBoot_EntryPending(void);
 
 #if KBD_SLEEP_BENCH_HOOK
-/* Main-loop service for the SWD bench hook: poke pwr_bench_sleep_req over
- * SWD to run ONE 5 s deep sleep through the full quiesce procedure. Exists
- * so the WWDG-in-deep-sleep question and the sleep floor can be measured
- * without any protocol change. */
+/* Main-loop service for the bench hook: runs ONE 5 s deep sleep through the
+ * full quiesce procedure when a request is pending, so the WWDG-in-sleep
+ * question and the sleep floor can be measured. */
 void PowerSleep_BenchService(void);
+/* Arm one bench sleep. Driven over UART (A6 54 under the hook build) so the
+ * whole experiment runs on the serial link with the meter as the witness --
+ * SWD reads perturb and cannot observe a sleeping core. */
+void PowerSleep_BenchRequest(void);
 #endif
 
 #endif
