@@ -1,11 +1,12 @@
 /* Copyright 2026 Eric Molitor (EMulator)
  * SPDX-License-Identifier: Apache-2.0
  *
- * Deep-sleep plumbing (power ladder MR5). Compiled only when the board knob
- * KBD_DEEP_SLEEP=1 swaps this module in for the SDK's HAL/SLEEP.c; the two
- * exported SDK symbols (CH59x_LowPower, HAL_SleepInit) live in power_sleep.c.
- * Runtime-inert: nothing arms deep sleep until the UART sleep-protocol rung
- * sets the runtime enable (or the EXTRA_CFLAGS-only bench hook is poked).
+ * Deep-sleep plumbing (power ladder MR5/MR6). Compiled only when the board
+ * knob KBD_DEEP_SLEEP=1 swaps this module in for the SDK's HAL/SLEEP.c; the
+ * two exported SDK symbols (CH59x_LowPower, HAL_SleepInit) live in
+ * power_sleep.c. Explicit host-commanded sleep (PowerSleep_ExplicitOnce,
+ * A6 54) is LIVE from MR6; the TMOS autosleep callback stays inert until
+ * pwr_autosleep is set (MR7).
  */
 #ifndef POWER_SLEEP_H
 #define POWER_SLEEP_H
@@ -15,6 +16,11 @@
 /* Defined in main.c: the A6 81 OpenBoot entry latch. A pending bootloader
  * entry must veto sleep -- the update path expects a running main loop. */
 uint8_t OpenBoot_EntryPending(void);
+
+/* Host-commanded (A6 54) one-shot deep sleep, GPIO-only wake (MR6). Caller
+ * has already drained TX, flushed the bond, and disconnected the radio.
+ * Returns 0 slept-and-woke, 3 vetoed at the boundary. */
+uint32_t PowerSleep_ExplicitOnce(void);
 
 #if KBD_SLEEP_BENCH_HOOK
 /* Main-loop service for the bench hook: runs ONE 5 s deep sleep through the
