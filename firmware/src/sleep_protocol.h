@@ -42,9 +42,11 @@ void SleepProtocol_Reset(sleep_proto_t *st);
 
 /* Fold one accepted UART frame into the state machine. `cmd` is the frame's
  * first byte (0xA6/0xA1/0xA9/0x61...), `sub` the A6 subcommand (ignored for
- * non-A6). `openboot_pending` vetoes new sleep arming (OTA wins). Frames
- * other than the unlock/sleep pair CANCEL a pending sleep (last meaningful
- * command wins); the host ACK 0x61 and anything unrecognized are inert. */
+ * non-A6). `openboot_pending` vetoes new sleep arming (OTA wins). A
+ * STATE-CHANGING command (A1 HID, A9 name, or an A6 transport-select /
+ * pair / unpair / OTA sub) CANCELS a pending sleep -- last meaningful
+ * command wins. Queries (battery/version), the reserved sleep-family subs,
+ * the host ACK 0x61, and any UNRECOGNISED A6 sub are inert. */
 sleep_proto_action_t SleepProtocol_OnFrame(sleep_proto_t *st, uint8_t cmd,
                                            uint8_t sub, uint8_t openboot_pending);
 

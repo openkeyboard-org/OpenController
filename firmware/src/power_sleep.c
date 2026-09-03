@@ -457,17 +457,22 @@ uint32_t PowerSleep_ExplicitOnce(void)
     pwr_low_power_sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
     irq_state = pwr_irq_save();
 
-    /* Count a GPIO wake only if our handler actually ran; anything else is
-     * a spurious prologue return, not the intended RX-edge wake. */
+    /* Classify BEFORE disarm: pwr_gpio_wake_disarm() itself sets pwr_gpio_woke
+     * from a late pending edge, which would mask an anomalous wake (review).
+     * A clean RX-edge wake ran our handler and returns 0; any other return
+     * (a spurious prologue wake) is reported as 3 so the caller can tell. */
+    uint32_t rc;
     if (pwr_gpio_woke) {
         PWR_DIAG_INC16(pwr_wake_gpio);
+        rc = 0;
     } else {
-        PWR_ABORT(PWR_ABORT_LATE);   /* woke without a GPIO edge: unexpected */
+        PWR_ABORT(PWR_ABORT_LATE);
+        rc = 3;
     }
     pwr_gpio_wake_disarm();
     PFIC_EnableIRQ(TMR3_IRQn);
     pwr_irq_restore(irq_state);
-    return 0;
+    return rc;
 }
 
 /*********************************************************************

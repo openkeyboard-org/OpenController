@@ -111,12 +111,39 @@ def test_host_ack_is_inert(lib, st):
     assert st.sleep_pending == 1        # ACK must not cancel
 
 
-def test_unlock_recommand_cancels_pending(lib, st):
+def test_unlock_re_request_cancels_pending(lib, st):
     feed(lib, st, A6, SUB_UNLOCK)
     feed(lib, st, A6, SUB_SLEEP)
     assert feed(lib, st, A6, SUB_UNLOCK) == SEND_READY
     assert st.sleep_pending == 0        # re-negotiate stands the sleep down
     assert st.unlocked == 1
+
+
+@pytest.mark.parametrize("sub", [0xFF, 0xAB, 0x00])
+def test_unrecognised_a6_sub_is_inert(lib, st, sub):
+    # An accepted but unrecognised A6 subcommand must NOT defeat a requested
+    # sleep (contract: unrecognised frames are inert).
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_SLEEP)
+    assert feed(lib, st, A6, sub) == NONE
+    assert st.sleep_pending == 1
+
+
+@pytest.mark.parametrize("sub", [0x53, 0x70])
+def test_query_commands_do_not_cancel_sleep(lib, st, sub):
+    # Battery/version queries are not "changed my mind" -- the sleep proceeds.
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_SLEEP)
+    assert feed(lib, st, A6, sub) == NONE
+    assert st.sleep_pending == 1
+
+
+@pytest.mark.parametrize("sub", [0x11, 0x30, 0x31, 0x32, 0x33, 0x51, 0x52, 0x63, 0x81])
+def test_state_changing_commands_cancel_sleep(lib, st, sub):
+    feed(lib, st, A6, SUB_UNLOCK)
+    feed(lib, st, A6, SUB_SLEEP)
+    assert feed(lib, st, A6, sub) == CANCEL
+    assert st.sleep_pending == 0
 
 
 def test_hid_without_pending_is_inert(lib, st):
@@ -143,12 +170,12 @@ def test_non_a6_sub_never_unlocks_or_arms(lib, st, cmd, sub):
 
 
 @pytest.mark.parametrize("sub", [0x55, 0x57])
-def test_reserved_sleep_subs_never_arm(lib, st, sub):
+def test_reserved_sleep_subs_are_inert(lib, st, sub):
     # A6 55 (BT twin) and A6 57 (MR7 auto-sleep) must not arm explicit sleep,
-    # unlocked or not, pending or not.
+    # and -- as reserved sleep-family subs -- must not cancel a pending one.
     feed(lib, st, A6, SUB_UNLOCK)
     assert feed(lib, st, A6, sub) == NONE
     assert st.sleep_pending == 0
     feed(lib, st, A6, SUB_SLEEP)                # now pending
-    assert feed(lib, st, A6, sub) == CANCEL     # and they cancel like any A6
-    assert st.sleep_pending == 0
+    assert feed(lib, st, A6, sub) == NONE       # reserved: inert, sleep stands
+    assert st.sleep_pending == 1
