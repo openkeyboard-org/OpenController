@@ -76,8 +76,10 @@
 /* .diag_safe.power: collected after every legacy counter (see ch592f.ld).
  * NOLOAD; the counters are zeroed in HAL_SleepInit, the bench phase byte
  * deliberately is NOT (it must survive a WWDG reset to report the verdict).
- * NOTE: the diag window is at capacity -- see the budget note in ch592f.ld
- * before adding anything here (review finding). */
+ * NOTE: the diag window is the fixed 0x200-byte region asserted in
+ * ch592f.ld (_diag_safe_end <= _diag_scratch_start + 0x200). The hook build
+ * ends it at 0x200059fc -- ~4 bytes of headroom -- so adding retained state
+ * here risks tripping that ASSERT; check the map before doing so. */
 volatile uint16_t pwr_sleep_attempt   __attribute__((section(".diag_safe.power")));
 volatile uint16_t pwr_sleep_entered   __attribute__((section(".diag_safe.power")));
 volatile uint16_t pwr_sleep_aborted   __attribute__((section(".diag_safe.power")));
@@ -242,6 +244,14 @@ static void pwr_rtc_trig_disarm(void)
     sys_safe_access_enable();
     R8_RTC_MODE_CTRL &= ~RB_RTC_TRIG_EN;
     sys_safe_access_disable();
+    /* Clear the trigger flag and PFIC pending so the unmask cannot re-enter
+     * an RTC IRQ. Defensive: the SDK's HAL/RTC.c RTC_IRQHandler is linked
+     * (RAM-resident, clears the flag itself), so the "weak stub loops
+     * forever" premise does not hold here -- but on a GPIO wake the RTC
+     * trigger may fire in the wake-to-disarm window, and clearing it here
+     * keeps correctness independent of which handler is linked (review). */
+    R8_RTC_FLAG_CTRL = RB_RTC_TRIG_CLR;
+    PFIC_ClearPendingIRQ(RTC_IRQn);
 }
 
 /* The actual sleep, shared by the idle callback and the bench hook. `time`
