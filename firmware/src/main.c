@@ -396,6 +396,32 @@ int main(void)
     BOOT_PHASE(0xA3);
     HAL_Init();
     BOOT_PHASE(0xA4);
+
+    /* Power ladder MR3: mark every unused peripheral's clock for gating in
+     * R32_SLEEP_CONTROL. Semantics note (inverted API): DISABLE *sets* the
+     * SLP_CLK bits = clock off while the core sleeps -- and per CH592
+     * datasheet section 5.3 that includes Idle (SLEEPDEEP=0, WFI/WFE), so
+     * with the WFE idle from the previous rung this should show up as an
+     * S2 idle delta; awake current is unchanged. Never gate: TMR0
+     * (connected-mode turnaround one-shot), TMR3 (WFE watchdog heartbeat),
+     * UART1 (host link + wake source), BLE (radio). I2C and LCD have no
+     * BIT_SLP_CLK_* convenience macros but their SFR-level byte-1 bits
+     * exist and both peripherals are unused (review finding) -- gated via
+     * the shifted RB_ forms. SPI1's documented bit position (0x0200) is
+     * deliberately NOT set: the CH592 headers comment the SPI1 peripheral
+     * out (not present on this part), and poking a bit the headers refuse
+     * to name buys nothing measurable. */
+#if (RB_SLP_CLK_I2C | RB_SLP_CLK_LCD) > 0xFF
+#error "RB_SLP_CLK_I2C/LCD must be byte-local masks for the <<8 shift below"
+#endif
+    PWR_PeriphClkCfg(DISABLE,
+                     BIT_SLP_CLK_TMR1 | BIT_SLP_CLK_TMR2
+                     | BIT_SLP_CLK_UART0 | BIT_SLP_CLK_UART2
+                     | BIT_SLP_CLK_UART3 | BIT_SLP_CLK_SPI0
+                     | BIT_SLP_CLK_PWMX | BIT_SLP_CLK_USB
+                     | (uint16_t)((uint16_t)(RB_SLP_CLK_I2C
+                                             | RB_SLP_CLK_LCD) << 8));
+
     RF_RoleInit();
     BOOT_PHASE(0xA5);
 
