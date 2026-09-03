@@ -411,6 +411,9 @@ int main(void)
      * deliberately NOT set: the CH592 headers comment the SPI1 peripheral
      * out (not present on this part), and poking a bit the headers refuse
      * to name buys nothing measurable. */
+#if (RB_SLP_CLK_I2C | RB_SLP_CLK_LCD) > 0xFF
+#error "RB_SLP_CLK_I2C/LCD must be byte-local masks for the <<8 shift below"
+#endif
     PWR_PeriphClkCfg(DISABLE,
                      BIT_SLP_CLK_TMR1 | BIT_SLP_CLK_TMR2
                      | BIT_SLP_CLK_UART0 | BIT_SLP_CLK_UART2
