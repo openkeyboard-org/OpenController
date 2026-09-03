@@ -20,17 +20,18 @@ def board_config(board: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
 
-@pytest.mark.parametrize("board,remap,factory_mac,dcdc,openboot_board", [
-    ("opencontroller-ch592", "1", "0", "1", "opencontroller-ch592"),
-    ("mk65mx-wireless-ch592", "0", "1", "1", "mk65mx-wireless-ch592"),
+@pytest.mark.parametrize("board,remap,factory_mac,dcdc,deep_sleep,openboot_board", [
+    ("opencontroller-ch592", "1", "0", "1", "1", "opencontroller-ch592"),
+    ("mk65mx-wireless-ch592", "0", "1", "1", "1", "mk65mx-wireless-ch592"),
 ])
-def test_board_profile(board, remap, factory_mac, dcdc, openboot_board):
+def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, openboot_board):
     cfg = board_config(board)
     assert cfg["BOARD"] == board
     assert cfg["OPENBOOT_BOARD"] == openboot_board
     assert cfg["KBD_UART1_REMAP"] == remap
     assert cfg["KBD_FACTORY_MAC"] == factory_mac
     assert cfg["KBD_DCDC_ENABLE"] == dcdc
+    assert cfg["KBD_DEEP_SLEEP"] == deep_sleep
     assert board in cfg["BUILD"]
     assert board in cfg["BUNDLE_BIN"]
     assert board in cfg["FACTORY_BIN"]
@@ -68,3 +69,30 @@ def test_dcdc_enable_rejected_in_extra_cflags():
 
     assert result.returncode != 0
     assert "EXTRA_CFLAGS" in result.stderr
+
+
+@pytest.mark.parametrize("bad", ["2", "yes", "0 1", ""])
+def test_deep_sleep_must_be_an_exact_boolean(bad):
+    """Mirrors the KBD_DCDC_ENABLE validation: a typo must fail the build,
+    never silently pick a sleep configuration."""
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         f"KBD_DEEP_SLEEP={bad}", "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "KBD_DEEP_SLEEP" in result.stderr
+
+
+@pytest.mark.parametrize("macro", ["KBD_DEEP_SLEEP", "HAL_SLEEP"])
+def test_sleep_macros_rejected_in_extra_cflags(macro):
+    """Both macros must reach every SDK source coherently; an EXTRA_CFLAGS
+    -D would win the redefinition silently (KBD_DEEP_SLEEP) or split the
+    build between app and SDK CONFIG.h (HAL_SLEEP)."""
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         f"EXTRA_CFLAGS=-D{macro}=1", "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert macro in result.stderr

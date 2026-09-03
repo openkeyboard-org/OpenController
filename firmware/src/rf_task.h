@@ -18,6 +18,7 @@ void RF_Disconnect(void);
 void RF_FlushBondSave(void);
 void RF_ClearBond(void);
 uint8_t RF_HasBond(void);
+uint8_t RF_CanDeepSleep(void);
 uint8_t RF_IdentityValid(void);
 
 void RF_QueueHIDReport(const uint8_t report[8]);

@@ -15,3 +15,6 @@ KBD_FACTORY_MAC := 1
 # supply collapses.  PWR_DCDCCfg itself only guards the silicon capability
 # (ROM_CFG_ADR_HW bit 13), not what the PCB populates.
 KBD_DCDC_ENABLE := 1
+
+# Deep-sleep plumbing (power ladder MR5): see opencontroller-ch592.mk.
+KBD_DEEP_SLEEP := 1

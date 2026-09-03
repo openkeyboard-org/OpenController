@@ -1651,6 +1651,26 @@ uint8_t RF_HasBond(void)
     return has_bond;
 }
 
+/* Deep-sleep gate (power ladder MR5): the radio is quiescent for a deep
+ * sleep only in IDLE (radio shut, no TMOS deadlines the sleep could not
+ * honor -- the idleCB receives the next deadline anyway), or in the
+ * radio-off slice of a BONDED reconnect search (RX window closed by the
+ * duty cycle; the 20 ms beacon timer is the TMOS deadline the idleCB gets).
+ * CONNECTED and FRESH pairing are never sleepable, and a still-open RX
+ * window means the radio is live. Pending catches need no extra check:
+ * TMOS only invokes the idle callback when no event is runnable. */
+uint8_t RF_CanDeepSleep(void)
+{
+    if (rf_state == RF_STATE_IDLE) {
+        return 1;
+    }
+    if (rf_state == RF_STATE_PAIRING
+            && pair_flavor == PAIR_FLAVOR_BONDED && !pair_rx_open) {
+        return 1;
+    }
+    return 0;
+}
+
 uint8_t RF_IdentityValid(void)
 {
     return keyboard_mac_valid;
