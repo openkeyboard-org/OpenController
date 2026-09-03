@@ -352,6 +352,7 @@ APP_SRC += src/keyboard_uart.c
 APP_SRC += src/kbd_image_id.c
 ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
 APP_SRC += src/power_sleep.c
+APP_SRC += src/sleep_protocol.c
 endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 
@@ -743,7 +744,12 @@ update: bundle
 #	(bench-measured: HELLO fails at t<2 s, succeeds from ~2.3 s). If the
 #	device is already in the bootloader the A6 81 bytes are SOF-hunt noise
 #	and the settle is harmless.
-	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
+#	The A6 81 is prefixed with the deep-sleep wake preamble (one NULL +
+#	~5 ms gap): if the module was put to sleep with A6 54, the NULL's start
+#	bit is the RX-pin GPIO wake edge and is consumed by the wake, so the
+#	real A6 81 must follow the settle gap (MR6 wake contract). On an awake
+#	module the idle parser drops the stray NULL, so this is harmless.
+	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0x00])); p.flush(); time.sleep(0.005); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
 #	No separate `boot` step: the flash flow ends with BOOT itself
 #	("boot after: yes"), so the device is already running the new image
 #	when this returns - a trailing boot would HELLO an application.

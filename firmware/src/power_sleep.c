@@ -10,9 +10,10 @@
  * idle -- INCLUDING while CONNECTED, because the connected-mode hop scheduler
  * is app-polled off raw RTC reads and invisible to TMOS. Every sleep here is
  * hard-gated (sleep => the RF link was already torn down; never sleep a live
- * link), and the whole module is RUNTIME-INERT until the UART sleep-protocol
- * rung sets pwr_autosleep (nothing in this rung sets it; the bench hook uses
- * its own explicit path).
+ * link). Two entry paths: PowerSleep_ExplicitOnce() is LIVE from MR6 (the
+ * host commands it with A6 54); the TMOS idle callback CH59x_LowPower stays
+ * inert until pwr_autosleep is set (MR7 autonomous sleep -- nothing in MR6
+ * sets it).
  *
  * Wake sources: RTC trigger (armed per sleep with the caller's deadline;
  * RB_RTC_TRIG_EN is set only while a sleep is armed) and a GPIO falling edge
@@ -133,6 +134,19 @@ __attribute__((always_inline)) static inline uint32_t pwr_irq_save(void)
 __attribute__((always_inline)) static inline void pwr_irq_restore(uint32_t s)
 {
     __asm volatile ("csrrs zero, 0x800, %0" :: "r"(s) : "memory");
+}
+
+/* Vendor LowPower_Sleep + the HSE-bias restore it omits. The primitive
+ * raises R8_XT32M_TUNE to 150% for a reliable wake and never lowers it; the
+ * SDK's own CH59x_LowPower wrapper calls HSECFG_Current(HSE_RCur_100) right
+ * after return. Omitting it leaves ACTIVE current elevated after the first
+ * wake -- this was the 1.60 mA post-wake seen on the MR5 bench, not
+ * parasitics (review finding). Both sleep paths go through here. */
+__HIGH_CODE
+static void pwr_low_power_sleep(uint16_t rm)
+{
+    LowPower_Sleep(rm);
+    HSECFG_Current(HSE_RCur_100);
 }
 
 /* Modular RTC-tick helpers (RTC_MAX_COUNT modulus; review finding: a naive
@@ -360,7 +374,7 @@ static uint32_t pwr_sleep_until(uint32_t time)
      * here. (The narrow prologue race for async wake is the protocol rung's
      * problem, per the header note; RTC wake is race-safe by min-time.) */
     pwr_irq_restore(irq_state);
-    LowPower_Sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
+    pwr_low_power_sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
     irq_state = pwr_irq_save();
 
     /* Wake reason: the waking interrupt's handler ran at the WFI wake, so
@@ -376,6 +390,89 @@ static uint32_t pwr_sleep_until(uint32_t time)
     pwr_rtc_trig_disarm();
     pwr_irq_restore(irq_state);
     return 0;
+}
+
+/*********************************************************************
+ * PowerSleep_ExplicitOnce -- host-commanded (A6 54) one-shot deep sleep,
+ * GPIO-only wake (power ladder MR6). No RTC deadline: the WWDG is frozen in
+ * deep sleep (MR5 bench), so the semantic is "sleep until the host wakes us
+ * with an RX edge" -- an RTC backstop would only spend active current after
+ * N minutes for nothing. Any UART start bit is a falling edge on the RX
+ * pin, so the module is never irrecoverably stranded even if a host omits
+ * the NULL preamble (that first frame is lost; a retry wakes it).
+ *
+ * The check-to-WFI race is closed at the PROTOCOL layer for explicit sleep:
+ * the host issued A6 54, so it waits the documented entry-settle before
+ * sending any wake byte; the wake edge therefore lands well after the WFI.
+ * Returns 0 slept, 3 vetoed. Caller (Power_Service) has already drained TX,
+ * flushed the bond, and disconnected. */
+uint32_t PowerSleep_ExplicitOnce(void)
+{
+    uint32_t irq_state;
+
+    PWR_DIAG_INC16(pwr_sleep_attempt);
+
+    irq_state = pwr_irq_save();
+    if ((irq_state & 0x08u) == 0u) {       /* deep WFI needs IRQs acceptable */
+        pwr_irq_restore(irq_state);
+        PWR_ABORT(PWR_ABORT_LATE);
+        return 3;
+    }
+
+    /* Silence the 200 ms TMR3 heartbeat around the sleep: it is the only
+     * always-running periodic IRQ, and a TMR3 edge coincident with the
+     * unmasked WFI in LowPower_Sleep's prologue could end the sleep before
+     * a GPIO wake (Fsys still runs there; TMR3 itself freezes once deep
+     * sleep is entered). Restored after wake (review finding). */
+    PFIC_DisableIRQ(TMR3_IRQn);
+
+    pwr_gpio_woke = 0;
+    pwr_gpio_wake_arm();
+    PFIC->SCTLR &= ~((1u << 4) | (1u << 3) | (1u << 2));   /* plain-WFI mode */
+
+    /* Wake-source veto (GPIO only; no RTC armed): an already-asserted edge
+     * or queued byte means the wake could be missed. */
+    if (
+#if PWR_WAKE_PIN_IS_PB
+        (R32_PB_PIN & PWR_WAKE_PIN) == 0 || (R16_PB_INT_IF & PWR_WAKE_PIN)
+        || PFIC_GetPendingIRQ(GPIO_B_IRQn)
+#else
+        (R32_PA_PIN & PWR_WAKE_PIN) == 0 || (R16_PA_INT_IF & PWR_WAKE_PIN)
+        || PFIC_GetPendingIRQ(GPIO_A_IRQn)
+#endif
+            || R8_UART1_RFC != 0 || !KeyboardUart_RxQuiet() || pwr_gpio_woke) {
+        pwr_gpio_wake_disarm();
+        PFIC_EnableIRQ(TMR3_IRQn);
+        pwr_irq_restore(irq_state);
+        PWR_ABORT(PWR_ABORT_RXLINE);
+        return 3;
+    }
+
+#if WATCHDOG_ENABLE
+    WWDG_SetCounter(0);
+#endif
+    PWR_DIAG_INC16(pwr_sleep_entered);
+
+    pwr_irq_restore(irq_state);
+    pwr_low_power_sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
+    irq_state = pwr_irq_save();
+
+    /* Classify BEFORE disarm: pwr_gpio_wake_disarm() itself sets pwr_gpio_woke
+     * from a late pending edge, which would mask an anomalous wake (review).
+     * A clean RX-edge wake ran our handler and returns 0; any other return
+     * (a spurious prologue wake) is reported as 3 so the caller can tell. */
+    uint32_t rc;
+    if (pwr_gpio_woke) {
+        PWR_DIAG_INC16(pwr_wake_gpio);
+        rc = 0;
+    } else {
+        PWR_ABORT(PWR_ABORT_LATE);
+        rc = 3;
+    }
+    pwr_gpio_wake_disarm();
+    PFIC_EnableIRQ(TMR3_IRQn);
+    pwr_irq_restore(irq_state);
+    return rc;
 }
 
 /*********************************************************************

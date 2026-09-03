@@ -46,6 +46,13 @@ uint8_t OpenBoot_EntryPending(void)
 {
     return openboot_entry_pending;
 }
+#if !KBD_SLEEP_BENCH_HOOK
+#include "sleep_protocol.h"
+/* MR6 explicit-sleep state: the A6 56 -> 5B 37 capability gate and the
+ * A6 54 deferred-sleep latch, serviced by Power_Service() below. Not the
+ * MR5 bench-hook build, which drives A6 54 to a fixed RTC diagnostic sleep. */
+static sleep_proto_t sleep_proto;
+#endif
 #endif
 
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
@@ -76,6 +83,20 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                               const uint8_t *payload, uint8_t len)
 {
     (void)len;
+
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+    /* MR6 sleep protocol runs FIRST so A1/A9/A6 frames cancel a pending
+     * sleep (they return early below). SEND_READY answers the A6 56 unlock;
+     * ARM/CANCEL only update sleep_proto, serviced in the main loop. */
+    switch (SleepProtocol_OnFrame(&sleep_proto, cmd, sub,
+                                  openboot_entry_pending)) {
+    case SLEEP_PROTO_SEND_READY:
+        KeyboardUart_SendStatus(SLEEP_PROTO_STATUS_READY);   /* 5B 37 92 */
+        break;
+    default:
+        break;
+    }
+#endif
 
     if (cmd == 0xA1) {
         RF_QueueHIDReport(payload);
@@ -141,15 +162,19 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         KeyboardUart_SendBattery(100);
         break;
 
-    case 0x54: /* sleep */
+    case 0x54: /* sleep now (MR6). Real arming is done by the sleep-protocol
+                * reducer at the top of this function; here only the MR5
+                * bench build diverts A6 54 to its fixed RTC diagnostic. */
 #if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
-        /* Bench build only: A6 54 arms one measured deep sleep. Not the
-         * real sleep semantics -- those are the UART sleep-protocol rung. */
         PowerSleep_BenchRequest();
 #endif
         break;
-    case 0x55: /* sleep-bt-en */
-    case 0x57: /* sleep-2g4-en */
+    case 0x55: /* sleep-bt-en: reserved BT twin of the 2.4G sleep path;
+                * no BT transport in this firmware, ACK-only (parser already
+                * sent 61 0D 0A). */
+    case 0x57: /* sleep-2g4-en: A6 57 auto-sleep enable is the next rung
+                * (MR7); no-op here so a legacy host cannot arm autonomous
+                * sleep before that contract exists. */
     case 0x62: /* factory BT pair */
         break;
 
@@ -222,6 +247,58 @@ static void OpenBoot_Service(void)
         openboot_request_update();  /* noreturn */
     }
 }
+
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+/* MR6 explicit-sleep service, mirroring OpenBoot_Service's latch-and-defer.
+ * A6 54 (via the reducer) sets sleep_proto.sleep_pending; this drains TX,
+ * tears the link down (sleep => disconnect, the ladder's locked rule) and
+ * enters one GPIO-wake deep sleep. OTA always wins: OpenBoot_Service runs
+ * before this and the checks below defer to a pending entry. On a TX-drain
+ * timeout we ABORT and stay awake rather than sleep with the A6 54 ACK
+ * unsent. Runs after OpenBoot_Service in Main_Circulation. */
+static void Power_Service(void)
+{
+    static uint8_t  svc_state;
+    static uint32_t svc_start;
+
+    switch (svc_state) {
+    case 0:
+        if (!sleep_proto.sleep_pending) {
+            return;
+        }
+        if (openboot_entry_pending) {
+            sleep_proto.sleep_pending = 0;
+            return;
+        }
+        svc_start = SYS_GetSysTickCnt();
+        svc_state = 1;
+        return;
+    default:
+        /* A meaningful frame in the meantime cleared sleep_pending (reducer);
+         * OTA still wins. Either way, stand down. */
+        if (!sleep_proto.sleep_pending || openboot_entry_pending) {
+            sleep_proto.sleep_pending = 0;
+            svc_state = 0;
+            return;
+        }
+        if (!KeyboardUart_TxIdle()) {
+            if ((uint32_t)(SYS_GetSysTickCnt() - svc_start)
+                    < (GetSysClock() / 50u)) {   /* ~20 ms */
+                return;                          /* keep draining */
+            }
+            sleep_proto.sleep_pending = 0;       /* host not draining: abort */
+            svc_state = 0;
+            return;
+        }
+        sleep_proto.sleep_pending = 0;
+        svc_state = 0;
+        RF_FlushBondSave();
+        RF_Disconnect();
+        PowerSleep_ExplicitOnce();
+        return;
+    }
+}
+#endif
 
 #if KBD_IDLE_WFI
 /* Idle-state WFI (power ladder MR2). Heartbeat: WWDG counts whenever Fsys
@@ -330,6 +407,9 @@ void Main_Circulation(void)
 #if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
         PowerSleep_BenchService();
 #endif
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+        Power_Service();
+#endif
         WATCHDOG_FEED();
 #if KBD_IDLE_WFI
         /* Idle the core only in RF_STATE_IDLE: TMOS scheduling and the hop
@@ -338,6 +418,9 @@ void Main_Circulation(void)
          * changes in main-loop context (TMOS handlers), so it needs no
          * re-check below. */
         if (RF_GetState() == RF_STATE_IDLE && !openboot_entry_pending
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+                && !sleep_proto.sleep_pending   /* let Power_Service run */
+#endif
                 && KeyboardUart_RxQuiet()) {
             uint32_t irq_state;
             /* Global-mask critical section (CSR 0x800 MPIE|MIE, rf_task.c
@@ -465,6 +548,9 @@ int main(void)
         KeyboardUart_SendStatus(0x35);
     }
     watchdog_init();
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+    SleepProtocol_Reset(&sleep_proto);   /* boot-scoped: unlock starts cleared */
+#endif
 #if KBD_IDLE_WFI
 #if RF_DIAG_COUNTERS
     pwr_wfi_count = 0;   /* .diag_safe.power is NOLOAD; startup never clears it */
