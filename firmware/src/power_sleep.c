@@ -102,10 +102,13 @@ volatile uint8_t  pwr_last_abort_reason __attribute__((section(".diag_safe.power
 #define PWR_ABORT_RXLINE    7u   /* RX line low / byte in flight at boundary */
 
 #if KBD_SLEEP_BENCH_HOOK
-/* Single SWD-driven phase byte, NEVER cleared by firmware init so a WWDG
- * reset mid-sleep leaves an unambiguous verdict (review finding):
- *   0x01 written over SWD = run one bench sleep
- *   0x10 quiesced   0x20 entered (about to commit)   0x30 returned OK
+/* Bench phase byte, NEVER cleared by firmware init so a WWDG reset
+ * mid-sleep leaves a record that survives a warm reset (review finding).
+ * Driven over UART: A6 54 -> PowerSleep_BenchRequest sets 0x01. SWD reads
+ * cannot observe a sleeping core and NOLOAD RAM is indeterminate after the
+ * power-cycle recovery, so the bench is UART-triggered and the meter +
+ * UART liveness are the witnesses; this byte is a post-mortem aid only.
+ *   0x01 requested   0x10 quiesced   0x20 entered   0x30 returned OK
  *   0x42 window rejected   0x43 boundary veto/late   0x44 TX-drain timeout
  * Phase 0x20 + ll_boot_count bump = the WWDG runs through deep sleep.
  * Phase 0x20 + no bump + no return = wake failed (external reset needed). */
@@ -421,10 +424,11 @@ void HAL_SleepInit(void)
 #if KBD_SLEEP_BENCH_HOOK
 /*********************************************************************
  * Bench hook (EXTRA_CFLAGS-only build): one full-procedure 5 s deep sleep
- * on an SWD-poked request (write 0x01 to pwr_bench_phase), main-loop
- * context. Two-experiment protocol per the review: first prove masked WFE
- * wake with WATCHDOG_ENABLE=0, then answer WWDG-in-deep-sleep with the
- * watchdog on (phase 0x20 + boot-count bump = WWDG runs through sleep). */
+ * per UART request (A6 54 -> PowerSleep_BenchRequest), main-loop context.
+ * Bench-answered on hardware 2026-09-03: RTC deep-sleep wake works, the
+ * floor is below the meter's ~10 uA resolution, and the WWDG is frozen
+ * during deep sleep (a 5 s sleep with the watchdog on held at floor and did
+ * not reset at the 559 ms window). Run WATCHDOG_ENABLE=0 vs on to compare. */
 void PowerSleep_BenchRequest(void)
 {
     pwr_bench_phase = 0x01u;
