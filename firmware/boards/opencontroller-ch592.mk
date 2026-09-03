@@ -12,3 +12,8 @@ KBD_FACTORY_MAC := 0
 # is populated.  Note the RF timing results predate the switch and were
 # measured on the LDO; revalidate against a receiver when convenient.
 KBD_DCDC_ENABLE := 1
+
+# Deep-sleep plumbing (power ladder MR5): runtime-inert until the sleep
+# protocol rung arms it; the knob gates HAL_SLEEP and the app-owned sleep
+# module. Board-owned like KBD_DCDC_ENABLE.
+KBD_DEEP_SLEEP := 1

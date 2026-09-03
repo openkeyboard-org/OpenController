@@ -38,6 +38,16 @@ static uint8_t transport_is_2g4;
 /* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
 static volatile uint8_t openboot_entry_pending;
 
+#if KBD_DEEP_SLEEP
+#include "power_sleep.h"
+/* Exported for the deep-sleep gate: a pending bootloader entry vetoes
+ * sleep (the update path expects a running main loop). */
+uint8_t OpenBoot_EntryPending(void)
+{
+    return openboot_entry_pending;
+}
+#endif
+
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
  * Main_Circulation. Reset-only -- the WWDG interrupt is left disabled because the
  * weak WDOG_BAT_IRQHandler spins forever. Fed every loop iteration; at Fsys/131072
@@ -132,6 +142,12 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         break;
 
     case 0x54: /* sleep */
+#if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
+        /* Bench build only: A6 54 arms one measured deep sleep. Not the
+         * real sleep semantics -- those are the UART sleep-protocol rung. */
+        PowerSleep_BenchRequest();
+#endif
+        break;
     case 0x55: /* sleep-bt-en */
     case 0x57: /* sleep-2g4-en */
     case 0x62: /* factory BT pair */
@@ -232,6 +248,9 @@ void TMR3_IRQHandler(void)
     R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
 }
 
+#ifndef KBD_SLEEP_BENCH_HOOK
+#define KBD_SLEEP_BENCH_HOOK 0
+#endif
 #ifndef RF_DIAG_COUNTERS
 #define RF_DIAG_COUNTERS 1
 #endif
@@ -308,6 +327,9 @@ void Main_Circulation(void)
         RF_ConnectedTick();
         KeyboardUart_Poll();
         OpenBoot_Service();
+#if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
+        PowerSleep_BenchService();
+#endif
         WATCHDOG_FEED();
 #if KBD_IDLE_WFI
         /* Idle the core only in RF_STATE_IDLE: TMOS scheduling and the hop

@@ -157,6 +157,23 @@ endif
 ifneq ($(findstring KBD_DCDC_ENABLE,$(EXTRA_CFLAGS)),)
 $(error KBD_DCDC_ENABLE must not go through EXTRA_CFLAGS; use `make KBD_DCDC_ENABLE=0|1` or the board profile)
 endif
+ifneq ($(words $(strip $(KBD_DEEP_SLEEP))),1)
+$(error BOARD '$(BOARD)' must set KBD_DEEP_SLEEP to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_DEEP_SLEEP))),)
+$(error BOARD '$(BOARD)' has invalid KBD_DEEP_SLEEP='$(KBD_DEEP_SLEEP)')
+endif
+# Same silent-divergence hazard as KBD_DCDC_ENABLE, doubled: HAL_SLEEP must
+# reach the SDK sources as a -D (an app CONFIG.h silently splits the build --
+# quoted-include resolution keeps SDK sources on the SDK CONFIG.h), so BOTH
+# macros are rejected from EXTRA_CFLAGS. A/B goes through
+# `make KBD_DEEP_SLEEP=0|1`, which stays validated and reported.
+ifneq ($(findstring KBD_DEEP_SLEEP,$(EXTRA_CFLAGS)),)
+$(error KBD_DEEP_SLEEP must not go through EXTRA_CFLAGS; use `make KBD_DEEP_SLEEP=0|1` or the board profile)
+endif
+ifneq ($(findstring HAL_SLEEP,$(EXTRA_CFLAGS)),)
+$(error HAL_SLEEP must not go through EXTRA_CFLAGS; it is derived from KBD_DEEP_SLEEP)
+endif
 
 # ---------------------------------------------------------------------------
 # OpenBoot integration
@@ -258,6 +275,14 @@ CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
 CFLAGS += -DKBD_UART1_REMAP=$(KBD_UART1_REMAP)
 CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
 CFLAGS += -DKBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)
+CFLAGS += -DKBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)
+ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
+# HAL_SLEEP=TRUE un-stubs the SDK sleep plumbing (MCU.c wires the TMOS
+# idleCB); the SDK's SLEEP.c is swapped for the app-owned power_sleep.c
+# below (same symbols) -- the stock CH59x_LowPower would deep-sleep a live
+# CONNECTED link because the polled hop scheduler is invisible to TMOS.
+CFLAGS += -DHAL_SLEEP=TRUE
+endif
 
 # Per-build overrides go through EXTRA_CFLAGS. Use `make EXTRA_CFLAGS=...`
 # not `make CFLAGS+=...`; the latter clobbers ARCH.
@@ -325,6 +350,9 @@ APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
 APP_SRC += src/kbd_image_id.c
+ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
+APP_SRC += src/power_sleep.c
+endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 
 # Source files - SDK startup
@@ -337,7 +365,9 @@ STARTUP_SRC := src/startup_CH592_phased.S
 # Source files - SDK HAL (TMOS/BLE init)
 HAL_SRC := $(SDK_BLE_DIR)/HAL/MCU.c
 HAL_SRC += $(SDK_BLE_DIR)/HAL/RTC.c
+ifneq ($(strip $(KBD_DEEP_SLEEP)),1)
 HAL_SRC += $(SDK_BLE_DIR)/HAL/SLEEP.c
+endif
 HAL_SRC += $(SDK_BLE_DIR)/HAL/KEY.c
 HAL_SRC += $(SDK_BLE_DIR)/HAL/LED.c
 
@@ -435,6 +465,7 @@ print-board-config:
 	    'KBD_UART1_REMAP=$(KBD_UART1_REMAP)' \
 	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
 	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
+	    'KBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)' \
 	    'BUILD=$(BUILD)' \
 	    'BUNDLE_BIN=$(BUNDLE_BIN)' \
 	    'FACTORY_BIN=$(FACTORY_BIN)'
