@@ -202,6 +202,13 @@ SECTIONS
         . = ALIGN(4);
         PROVIDE( _diag_safe_start = . );
         *(.diag_safe)
+        /* Legacy counters end here. New (power-ladder) counters live in
+         * .diag_safe.power and MUST stay below this line: exact-name
+         * sections collect in object order, so a counter added to an
+         * earlier object with the bare section name would silently shift
+         * every legacy absolute address the bench scripts read. */
+        PROVIDE( _diag_safe_legacy_end = . );
+        *(.diag_safe.power)
         *(.diag_safe.*)
         . = ALIGN(4);
         PROVIDE( _diag_safe_end = . );
@@ -211,6 +218,14 @@ SECTIONS
            "diag counters must start right after the asm scratch window")
     ASSERT(_diag_safe_end <= _diag_scratch_start + 0x200,
            ".diag_safe overflows the 0x200 diag window")
+    /* Pin the legacy block: 0x200059e8 is its END ADDRESS as of power MR2
+     * (start 0x20005820 + 0x1c8 of legacy counters). It moves only when a
+     * counter is added with the bare .diag_safe name - do that deliberately
+     * (update this constant AND the bench scripts), never by accident.
+     * RF_DIAG_COUNTERS=0 builds have an empty block. */
+    ASSERT(_diag_safe_legacy_end == 0x200059e8
+           || _diag_safe_legacy_end == _diag_safe_start,
+           "legacy .diag_safe counters moved - bench absolute addresses broken")
 
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
