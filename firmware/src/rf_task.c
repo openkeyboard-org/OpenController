@@ -1546,6 +1546,15 @@ uint8_t RF_Select2G4(void)
 
     if (has_bond) {
         rf_tmr0_stop();
+        /* Quiesce-then-sweep, mirroring RF_EnterPairing (review finding):
+         * an A6 51 fresh-pair window may be live here, and a fresh catch
+         * posted microseconds ago -- possibly from a DIFFERENT dongle in
+         * accept mode -- would otherwise survive this bonded re-entry,
+         * pass the PAIRING guard, and connect against the host's A6 30
+         * intent. A swept same-bond catch just re-catches on the next
+         * beacon (<= 20 ms). */
+        RF_Shut();
+        rf_stop_task_atomic(RF_EVT_ENTER_CONNECTED);
         rf_state = RF_STATE_PAIRING;
         pair_flavor = PAIR_FLAVOR_BONDED;
         pair_rx_open = 1;
