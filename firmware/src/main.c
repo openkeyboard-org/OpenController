@@ -248,6 +248,31 @@ volatile uint32_t pwr_wfi_count
 #endif
 #endif /* KBD_IDLE_WFI */
 
+#if KBD_IDLE_WFI
+/* RAM-resident idle wait. WFE with SEVONPEND (PFIC SCTLR bit 4), NOT a
+ * masked WFI: bench-measured on this silicon, a WFI entered with the
+ * global-IRQ CSR masked never wakes on a pending source -- the first WFI
+ * slept until the WWDG reset and the chip reboot-looped (~1 boot/2.7 s,
+ * ll_boot_count climbing; this is also what invalidated the first "1.75 mA
+ * idle" meter figure). With SEVONPEND, an interrupt PENDING at the PFIC is
+ * a wake event even while global delivery stays masked, which is exactly
+ * the semantics the idle site needs. Pattern mirrors the SDK's __WFE():
+ * self-SEV + double wfi-as-wfe so a stale event can't satisfy the real
+ * wait. Flash handling mirrors LowPower_Idle (off until next fetch). */
+__HIGH_CODE
+static void idle_wait_event(void)
+{
+    FLASH_ROM_SW_RESET();
+    R8_FLASH_CTRL = 0x04;
+    PFIC->SCTLR &= ~(1u << 2);                        /* sleep, not deep */
+    PFIC->SCTLR |= (1u << 4) | (1u << 3) | (1u << 5); /* SEVONPEND|WFE|SEV */
+    __asm__ volatile ("wfi");                         /* eats the self-SEV */
+    PFIC->SCTLR |= (1u << 3);
+    __asm__ volatile ("wfi");                         /* real wait */
+    PFIC->SCTLR &= ~((1u << 4) | (1u << 3));
+}
+#endif
+
 __HIGH_CODE
 __attribute__((noinline))
 void Main_Circulation(void)
@@ -268,23 +293,20 @@ void Main_Circulation(void)
                 && KeyboardUart_RxQuiet()) {
             uint32_t irq_state;
             /* Global-mask critical section (CSR 0x800 MPIE|MIE, the
-             * rf_task.c idiom): PFIC per-source enables stay set, so a
-             * UART1/TMR3 interrupt pending at the controller still ends
-             * the WFI -- the handler is simply deferred until the csrrs
-             * below. SYS_DisableAllIrq is NOT usable here: it clears the
-             * PFIC source enables themselves, and a QingKe WFI never
-             * wakes on a source the controller cannot respond to
-             * (adversarial-review blocker). The re-check closes the
-             * check-to-WFI race: a byte landing before the mask has its
-             * interrupt already consumed into the ring and would
-             * otherwise be overslept until the heartbeat. */
+             * rf_task.c idiom) closes the check-to-idle race: a byte
+             * landing before the mask has its interrupt already consumed
+             * into the ring and would otherwise be overslept until the
+             * heartbeat. Inside the mask, idle_wait_event()'s SEVONPEND
+             * WFE wakes on any interrupt PENDING at the PFIC; the handler
+             * itself runs at the csrrs below. (A masked WFI does NOT wake
+             * on this silicon -- see idle_wait_event.) */
             __asm volatile ("csrrc %0, 0x800, %1"
                             : "=r"(irq_state) : "r"(0x88) : "memory");
             if (KeyboardUart_RxQuiet() && R8_UART1_RFC == 0
                     && !openboot_entry_pending) {
                 WATCHDOG_FEED();
                 PWR_DIAG_INC(pwr_wfi_count);
-                LowPower_Idle();
+                idle_wait_event();
             }
             __asm volatile ("csrrs zero, 0x800, %0"
                             :: "r"(irq_state & 0x88) : "memory");
