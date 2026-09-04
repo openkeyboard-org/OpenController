@@ -112,15 +112,18 @@
  * dongle's EV10 reacquire path replies ~0.3 ms after the beacon, which is
  * why a dongle that had connected once still reconnected -- the window had
  * been sized against that path. 6 ticks = 3.75 ms leaves ~1 ms of
- * packet-completion margin over the camp reply (6/6 cold at 6; 3 ticks were
- * not tried and 4 fail). Cost: 12.5% -> 18.75% RX duty in bonded search.
- * Do not go below 5 without re-measuring against a cold-booted dongle. */
+ * packet-completion margin over the camp reply (6/6 cold at 6). Cost:
+ * 12.5% -> 18.75% RX duty in bonded search. KNOWN on bench: 4 ticks fails
+ * (0/8 cold), 6 ticks works (6/6 cold); 5 and 3 were NOT tested. So <= 4 is
+ * proven-bad and < 6 is unproven -- re-measure against a cold-booted dongle
+ * before lowering below the 6-tick default. */
 #ifndef KBD_PAIR_DUTY_CYCLE
 #define KBD_PAIR_DUTY_CYCLE 1
 #endif
 #ifndef KBD_PAIR_RX_WINDOW_TICKS
 #define KBD_PAIR_RX_WINDOW_TICKS 6u        /* 3.75 ms of 20 ms = 18.75% RX duty;
-                                            * >= 5 required, see the bound above */
+                                            * 4 fails on bench, <6 unproven --
+                                            * see the window lower bound above */
 #endif
 
 /* Which flavor of PAIRING we are in. Deliberately an EXPLICIT tag set at the

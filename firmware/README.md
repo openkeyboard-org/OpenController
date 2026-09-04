@@ -136,7 +136,7 @@ only for A/B experiments):
 | `STOCK_RESP_NO_SETCH` | 1 | skip redundant pre-response `RF_SetChannel` |
 | `STOCK_CONNECT_IDX_BIAS` | 1 | first connected hop uses seed+1 |
 | `KBD_PAIR_DUTY_CYCLE` | 1 | bonded-reconnect search listens only in a window after each beacon (power MR4) |
-| `KBD_PAIR_RX_WINDOW_TICKS` | 6 | that window, in 625 µs ticks (3.75 ms); the OpenDongle camp reply completes at beacon + ~2.7 ms, so values below 5 miss it (bench 2026-09-04) |
+| `KBD_PAIR_RX_WINDOW_TICKS` | 6 | that window, in 625 µs ticks (3.75 ms); the OpenDongle camp reply completes at beacon + ~2.7 ms. Bench 2026-09-04: 4 ticks fails (0/8 cold reconnects), 6 works (6/6); 5 and 3 untested, so re-measure before lowering below 6 |
 
 Bench-only interop probes (`STOCK_SUPPRESS_RESPONSES`,
 `STOCK_PARK_AFTER_CATCH`, `STOCK_SEED_BOND`, …) default off via `#ifndef`
