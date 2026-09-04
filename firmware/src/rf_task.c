@@ -95,12 +95,35 @@
  * beacon it heard, so the window covers it. Behavior change: reconnect
  * latency may grow -- bench-measured before merge, window sized from the
  * distribution. EXPLICIT user pairing (A6 51/63) keeps continuous RX: it is
- * user-attended, latency-sensitive, and bounded by the 5.3 s window. */
+ * user-attended, latency-sensitive, and bounded by the 5.3 s window.
+ *
+ * WINDOW LOWER BOUND (bench 2026-09-04, OpenDongle + this module). The
+ * OpenDongle CH570 sends its LEN-15 reconnect reply 2.5 ms after the beacon
+ * it heard (RF_CH570_PAIR_ACK_PRE_TX_TMOS = 4 x 625 us, the Bridge75 stock
+ * keyboard's optimum), ~214 us more to its TX-finish callback (both
+ * software-measured on the dongle: accept -> StartTx 2538..2551 us). This
+ * receiver arms ~0.2 ms after the beacon (estimate), so a 4-tick (2.5 ms)
+ * window closed at beacon + ~2.7 ms -- consistent with that reply completing
+ * on the closing edge, not sniffed -- and MISSED IT EVERY TIME from the
+ * dongle's terminal camps
+ * (its first reconnect after boot, and its channel-8 camp after an EV10
+ * give-up): 0 valid RX in 500 beacons, 3/3 dongle cold boots, no recovery
+ * short of a fresh pair (whose continuous RX tolerates the late reply). The
+ * dongle's EV10 reacquire path replies ~0.3 ms after the beacon, which is
+ * why a dongle that had connected once still reconnected -- the window had
+ * been sized against that path. 6 ticks = 3.75 ms leaves ~1 ms of
+ * packet-completion margin over the camp reply (6/6 cold at 6). Cost:
+ * 12.5% -> 18.75% RX duty in bonded search. KNOWN on bench: 4 ticks fails
+ * (0/8 cold), 6 ticks works (6/6 cold); 5 and 3 were NOT tested. So <= 4 is
+ * proven-bad and < 6 is unproven -- re-measure against a cold-booted dongle
+ * before lowering below the 6-tick default. */
 #ifndef KBD_PAIR_DUTY_CYCLE
 #define KBD_PAIR_DUTY_CYCLE 1
 #endif
 #ifndef KBD_PAIR_RX_WINDOW_TICKS
-#define KBD_PAIR_RX_WINDOW_TICKS 4u        /* 2.5 ms of 20 ms = 12.5% RX duty */
+#define KBD_PAIR_RX_WINDOW_TICKS 6u        /* 3.75 ms of 20 ms = 18.75% RX duty;
+                                            * 4 fails on bench, <6 unproven --
+                                            * see the window lower bound above */
 #endif
 
 /* Which flavor of PAIRING we are in. Deliberately an EXPLICIT tag set at the
