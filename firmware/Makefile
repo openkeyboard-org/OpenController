@@ -294,6 +294,12 @@ CFLAGS += $(EXTRA_CFLAGS)
 # Passed to both .c and .S (AS is gcc).
 RF_DIAG_COUNTERS ?= 1
 CFLAGS += -DRF_DIAG_COUNTERS=$(RF_DIAG_COUNTERS)
+# UART diag dump (A6 71 / A6 72): bench tool returning the .diag_safe counters and
+# the fault/reset record over UART (SWD reads reset the target). Follows
+# RF_DIAG_COUNTERS by default. The byte-identical pre-sleep regression reference
+# is `make KBD_DEEP_SLEEP=0 KBD_UART_DIAG_DUMP=0`.
+KBD_UART_DIAG_DUMP ?= $(RF_DIAG_COUNTERS)
+CFLAGS += -DKBD_UART_DIAG_DUMP=$(KBD_UART_DIAG_DUMP)
 
 # Independent WWDG watchdog (last-resort recovery for an unknown firmware hang),
 # on by default. `make WATCHDOG_ENABLE=0` builds without it.
@@ -350,6 +356,10 @@ APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
 APP_SRC += src/kbd_image_id.c
+ifeq ($(strip $(KBD_UART_DIAG_DUMP)),1)
+APP_SRC += src/diag_frame.c
+APP_SRC += src/diag_dump.c
+endif
 ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
 APP_SRC += src/power_sleep.c
 APP_SRC += src/sleep_protocol.c

@@ -10,14 +10,15 @@
  * idle -- INCLUDING while CONNECTED, because the connected-mode hop scheduler
  * is app-polled off raw RTC reads and invisible to TMOS. Every sleep here is
  * hard-gated (sleep => the RF link was already torn down; never sleep a live
- * link). Entry paths: PowerSleep_ExplicitOnce() (MR6, host commands it with
- * A6 54); and, once the host arms auto-sleep with A6 57 (MR7), two
- * autonomous sites partitioned by RF state -- PowerSleep_IdleAutosleep()
- * from the main loop in RF IDLE (GPIO-only, indefinite "sleep until the
- * host talks"), and the TMOS idle callback CH59x_LowPower in the radio-off
- * slices of a bonded reconnect search (RTC-bounded by the 20 ms beacon
- * deadline TMOS hands it). The split means IDLE sleep never depends on what
- * deadline TMOS passes when it has nothing scheduled (undocumented).
+ * link). EVERY deep sleep runs inside the TMOS idle callback CH59x_LowPower
+ * and returns 0, so the BLE library re-initialises its baseband on the wake
+ * (a sleep taken behind TMOS's back hangs the next RF op -> WWDG reset;
+ * bench-proven 2026-09-04). Main-loop code only REQUESTS a sleep:
+ * PowerSleep_RequestExplicit() for the host A6 54 (after Power_Service has
+ * disconnected the link), and the pwr_autosleep flag for A6 57 auto-sleep.
+ * The idle callback then sleeps in RF IDLE (host wakes it via the RX edge)
+ * and in the radio-off slices of a bonded reconnect search, always honouring
+ * TMOS's next deadline so library housekeeping timers are not starved.
  *
  * Wake sources: RTC trigger (armed per sleep with the caller's deadline;
  * RB_RTC_TRIG_EN is set only while a sleep is armed) and a GPIO falling edge
@@ -68,6 +69,9 @@
 #ifndef WATCHDOG_ENABLE
 #define WATCHDOG_ENABLE 1
 #endif
+#ifndef KBD_UART_DIAG_DUMP
+#define KBD_UART_DIAG_DUMP RF_DIAG_COUNTERS
+#endif
 
 /* The UART1 RX pin doubles as the GPIO wake source. */
 #if KBD_UART1_REMAP
@@ -92,12 +96,46 @@ volatile uint16_t pwr_sleep_aborted   __attribute__((section(".diag_safe.power")
 volatile uint16_t pwr_wake_gpio       __attribute__((section(".diag_safe.power")));
 volatile uint16_t pwr_wake_rtc        __attribute__((section(".diag_safe.power")));
 volatile uint8_t  pwr_last_abort_reason __attribute__((section(".diag_safe.power")));
-#define PWR_DIAG_INC16(x)   do { (x)++; } while (0)
-#define PWR_ABORT(r)        do { pwr_last_abort_reason = (r); \
-                                 pwr_sleep_aborted++; } while (0)
+/* Main-loop liveness: incremented once per Main_Circulation pass (main.c).
+ * Preserved across a WWDG reset like the counters above -- a stalled loop
+ * shows as a frozen value in the post-crash dump. */
+volatile uint16_t pwr_loop_passes __attribute__((section(".diag_safe.power")));
+/* Last main-loop / sleep-path stage reached (forensics build); see main.c. */
+volatile uint8_t  pwr_loop_stage  __attribute__((section(".diag_safe.power")));
+/* After a WATCHDOG-caused boot the forensic counters are FROZEN (not
+ * incremented) until the host zeroes them (A6 72), so the post-crash UART dump
+ * shows the pre-crash values, not the reboot's activity. */
+volatile uint8_t  pwr_forensics_frozen;
+#ifndef KBD_IDLECB_FORENSICS
+#define KBD_IDLECB_FORENSICS 0
+#endif
+#if KBD_IDLECB_FORENSICS
+/* Forensics build only (EXTRA_CFLAGS=-DKBD_IDLECB_FORENSICS=1): repurpose two
+ * dumped counters -- pwr_wake_rtc := idleCB call count, pwr_last_abort_reason
+ * := last idleCB gate reached (1 off, 2 rf-idle, 3 rf-busy, 4 holdoff,
+ * 5 openboot, 6 tx, 7 rx, 8 sleep-called). Never commit enabled. */
+#define IDLECB_GATE(n)  do { if (!pwr_forensics_frozen) { pwr_last_abort_reason = (n); pwr_loop_stage = 0x10u | (n); } } while (0)
+#define IDLECB_CALL()   do { if (!pwr_forensics_frozen) { pwr_wake_rtc++; } } while (0)
+#define PWR_STAGE(n)    do { if (!pwr_forensics_frozen) { pwr_loop_stage = (n); } } while (0)
+#else
+#define IDLECB_GATE(n)  do { } while (0)
+#define IDLECB_CALL()   do { } while (0)
+#define PWR_STAGE(n)    do { } while (0)
+#endif
+void PowerSleep_Stage(uint8_t n) { PWR_STAGE(n); }
+/* Frozen after a WATCHDOG boot until the first UART dump (see HAL_SleepInit /
+ * DiagDump_Send): the pre-crash values are the forensic record. */
+extern volatile uint8_t pwr_forensics_frozen;
+#define PWR_DIAG_INC16(x)   do { if (!pwr_forensics_frozen) { (x)++; } } while (0)
+#define PWR_ABORT(r)        do { if (!pwr_forensics_frozen) { pwr_last_abort_reason = (r); \
+                                 pwr_sleep_aborted++; } } while (0)
 #else
 #define PWR_DIAG_INC16(x)   do { } while (0)
 #define PWR_ABORT(r)        do { } while (0)
+/* No counters => no forensics either. */
+#define IDLECB_GATE(n)      do { } while (0)
+#define IDLECB_CALL()       do { } while (0)
+#define PWR_STAGE(n)        do { } while (0)
 #endif
 
 /* Abort reasons (pwr_last_abort_reason). */
@@ -129,6 +167,18 @@ static volatile uint8_t pwr_autosleep;
 
 /* GPIO-wake activity latch (set on a consumed wake edge). */
 static volatile uint8_t pwr_gpio_woke;
+
+/* Deferred sleep requests, consumed by the TMOS idle callback. EVERY deep
+ * sleep is performed inside CH59x_LowPower and reported to TMOS by returning
+ * 0: the BLE library re-initialises its baseband/LLE on that return, and a
+ * deep sleep taken behind its back (as the first MR6/MR7 code did from the
+ * main loop) leaves the next RF operation hanging inside TMOS_SystemProcess
+ * until the WWDG resets the part (bench, 2026-09-04: reproducible 100%). */
+static volatile uint8_t pwr_explicit_request;   /* A6 54, after quiesce */
+#if KBD_SLEEP_BENCH_HOOK
+static volatile uint8_t  pwr_bench_request;
+static uint32_t pwr_bench_deadline;
+#endif
 
 /* Post-activity holdoff (review #12): after a GPIO wake OR any accepted UART
  * frame, autonomous sleep is refused for KBD_AUTOSLEEP_HOLDOFF_MS so the
@@ -412,6 +462,7 @@ static uint32_t pwr_sleep_until(uint32_t time)
     WWDG_SetCounter(0);   /* full window from the instant sleep begins */
 #endif
     PWR_DIAG_INC16(pwr_sleep_entered);
+    PWR_STAGE(0x21);
 
     /* UNMASK, then the stock deep sleep. A wake IRQ arriving from here on
      * either pends before LowPower_Sleep's __WFI (WFI then returns at once)
@@ -421,6 +472,7 @@ static uint32_t pwr_sleep_until(uint32_t time)
     pwr_irq_restore(irq_state);
     pwr_low_power_sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
     irq_state = pwr_irq_save();
+    PWR_STAGE(0x22);
 
     /* Wake reason: the waking interrupt's handler ran at the WFI wake, so
      * the RTC ISR has already set RTCTigFlag; a GPIO wake ran our handler
@@ -443,90 +495,6 @@ static uint32_t pwr_sleep_until(uint32_t time)
 }
 
 /*********************************************************************
- * PowerSleep_ExplicitOnce -- host-commanded (A6 54) one-shot deep sleep,
- * GPIO-only wake (power ladder MR6). No RTC deadline: the WWDG is frozen in
- * deep sleep (MR5 bench), so the semantic is "sleep until the host wakes us
- * with an RX edge" -- an RTC backstop would only spend active current after
- * N minutes for nothing. Any UART start bit is a falling edge on the RX
- * pin, so the module is never irrecoverably stranded even if a host omits
- * the NULL preamble (that first frame is lost; a retry wakes it).
- *
- * The check-to-WFI race is closed at the PROTOCOL layer for explicit sleep:
- * the host issued A6 54, so it waits the documented entry-settle before
- * sending any wake byte; the wake edge therefore lands well after the WFI.
- * Returns 0 slept, 3 vetoed. Caller (Power_Service) has already drained TX,
- * flushed the bond, and disconnected. */
-uint32_t PowerSleep_ExplicitOnce(void)
-{
-    uint32_t irq_state;
-
-    PWR_DIAG_INC16(pwr_sleep_attempt);
-
-    irq_state = pwr_irq_save();
-    if ((irq_state & 0x08u) == 0u) {       /* deep WFI needs IRQs acceptable */
-        pwr_irq_restore(irq_state);
-        PWR_ABORT(PWR_ABORT_LATE);
-        return 3;
-    }
-
-    /* Silence the 200 ms TMR3 heartbeat around the sleep: it is the only
-     * always-running periodic IRQ, and a TMR3 edge coincident with the
-     * unmasked WFI in LowPower_Sleep's prologue could end the sleep before
-     * a GPIO wake (Fsys still runs there; TMR3 itself freezes once deep
-     * sleep is entered). Restored after wake (review finding). */
-    PFIC_DisableIRQ(TMR3_IRQn);
-
-    pwr_gpio_woke = 0;
-    pwr_gpio_wake_arm();
-    PFIC->SCTLR &= ~((1u << 4) | (1u << 3) | (1u << 2));   /* plain-WFI mode */
-
-    /* Wake-source veto (GPIO only; no RTC armed): an already-asserted edge
-     * or queued byte means the wake could be missed. */
-    if (
-#if PWR_WAKE_PIN_IS_PB
-        (R32_PB_PIN & PWR_WAKE_PIN) == 0 || (R16_PB_INT_IF & PWR_WAKE_PIN)
-        || PFIC_GetPendingIRQ(GPIO_B_IRQn)
-#else
-        (R32_PA_PIN & PWR_WAKE_PIN) == 0 || (R16_PA_INT_IF & PWR_WAKE_PIN)
-        || PFIC_GetPendingIRQ(GPIO_A_IRQn)
-#endif
-            || R8_UART1_RFC != 0 || !KeyboardUart_RxQuiet() || pwr_gpio_woke) {
-        pwr_gpio_wake_disarm();
-        PFIC_EnableIRQ(TMR3_IRQn);
-        pwr_irq_restore(irq_state);
-        PWR_ABORT(PWR_ABORT_RXLINE);
-        return 3;
-    }
-
-#if WATCHDOG_ENABLE
-    WWDG_SetCounter(0);
-#endif
-    PWR_DIAG_INC16(pwr_sleep_entered);
-
-    pwr_irq_restore(irq_state);
-    pwr_low_power_sleep(RB_PWR_RAM2K | RB_PWR_RAM24K | RB_PWR_EXTEND | RB_XT_PRE_EN);
-    irq_state = pwr_irq_save();
-
-    /* Classify BEFORE disarm: pwr_gpio_wake_disarm() itself sets pwr_gpio_woke
-     * from a late pending edge, which would mask an anomalous wake (review).
-     * A clean RX-edge wake ran our handler and returns 0; any other return
-     * (a spurious prologue wake) is reported as 3 so the caller can tell. */
-    uint32_t rc;
-    if (pwr_gpio_woke) {
-        PWR_DIAG_INC16(pwr_wake_gpio);
-        pwr_note_activity();                 /* host woke us: hold off re-sleep */
-        rc = 0;
-    } else {
-        PWR_ABORT(PWR_ABORT_LATE);
-        rc = 3;
-    }
-    pwr_gpio_wake_disarm();
-    PFIC_EnableIRQ(TMR3_IRQn);
-    pwr_irq_restore(irq_state);
-    return rc;
-}
-
-/*********************************************************************
  * Auto-sleep controls (MR7), mirrored from the sleep-protocol reducer. */
 void PowerSleep_SetAutosleep(uint8_t on)
 {
@@ -542,21 +510,30 @@ void PowerSleep_NoteActivity(void)
 }
 
 /*********************************************************************
- * PowerSleep_IdleAutosleep -- main-loop autonomous site for RF IDLE
- * (MR7). Sleeps until the host's RX edge (GPIO-only, no deadline, same
- * one-shot core as the explicit A6 54 path). Returns 0 if it slept and woke,
- * 3 if not applicable / vetoed. The caller has already checked RF IDLE, no
- * OpenBoot entry, no pending explicit sleep, and RX quiet. */
-uint32_t PowerSleep_IdleAutosleep(void)
+ * PowerSleep_RequestExplicit -- Power_Service has quiesced (TX drained,
+ * bond flushed, RF disconnected); the idle callback performs the sleep on
+ * TMOS's next idle pass and reports it to TMOS. Idempotent. The request
+ * stays armed across RTC-deadline wakes (TMOS housekeeping such as the
+ * 120 s HAL calibration event) and is cleared only by a HOST wake (GPIO) or
+ * by PowerSleep_CancelExplicit(). */
+void PowerSleep_RequestExplicit(void)
 {
-    if (!pwr_autosleep || !pwr_holdoff_expired()) {
-        return 3;
-    }
-    if (!KeyboardUart_TxIdle()) {   /* never sleep with a reply still shifting */
-        PWR_ABORT(PWR_ABORT_TX);
-        return 3;
-    }
-    return PowerSleep_ExplicitOnce();
+    pwr_explicit_request = 1;
+}
+
+/* Any state-changing host command (transport select, pair, unpair, OTA,
+ * HID/name) withdraws an armed explicit request -- independently of the
+ * reducer's own sleep_pending, which Power_Service has already consumed by
+ * the time the request is armed (review finding: a stale request would
+ * otherwise fire as a surprise sleep on the next idle). */
+void PowerSleep_CancelExplicit(void)
+{
+    pwr_explicit_request = 0;
+}
+
+uint8_t PowerSleep_SleepPending(void)
+{
+    return pwr_explicit_request;
 }
 
 /*********************************************************************
@@ -570,31 +547,76 @@ uint32_t PowerSleep_IdleAutosleep(void)
 __HIGH_CODE
 uint32_t CH59x_LowPower(uint32_t time)
 {
+    IDLECB_CALL();
+
+#if KBD_SLEEP_BENCH_HOOK
+    if (pwr_bench_request) {
+        pwr_bench_request = 0;
+        {
+            uint32_t rc = pwr_sleep_until(pwr_bench_deadline);
+            pwr_bench_phase = (rc == 0) ? 0x30u : (rc == 2) ? 0x42u : 0x43u;
+            return rc;
+        }
+    }
+#endif
+
+    /* Every sleep below honours `time`, TMOS's next deadline: the HAL keeps
+     * housekeeping timers (e.g. a 120 s calibration event) that an indefinite
+     * sleep would starve (review finding). Sleeping to the deadline and
+     * re-entering costs a few microamps; the host still wakes us any time via
+     * the RX edge. A wake is ALWAYS reported to TMOS as 0 once LowPower_Sleep
+     * was entered -- TMOS re-inits its baseband only on exactly 0. */
+
+    /* Explicit A6 54 sleep, requested by Power_Service after the quiesce.
+     * Vetoed (left armed) unless RF IDLE / no OTA / UART quiet; consumed only
+     * by a HOST (GPIO) wake, so an RTC-deadline wake re-sleeps. */
+    if (pwr_explicit_request) {
+        if (RF_GetState() != RF_STATE_IDLE || OpenBoot_EntryPending()
+                || !KeyboardUart_TxIdle() || !KeyboardUart_RxQuiet()) {
+            IDLECB_GATE(9);
+            return 3;
+        }
+        IDLECB_GATE(8);
+        {
+            uint32_t rc = pwr_sleep_until(time);
+            if (rc == 0 && pwr_gpio_woke) {
+                pwr_explicit_request = 0;   /* the host is back: request done */
+            }
+            return rc;
+        }
+    }
+
     if (!pwr_autosleep) {
+        IDLECB_GATE(1);
         return 3;   /* not armed: behaves exactly as MR6 */
     }
-    if (RF_GetState() == RF_STATE_IDLE) {
-        return 3;   /* main-loop site owns IDLE (GPIO-only, no deadline) */
-    }
-    if (!RF_CanDeepSleep()) {
-        PWR_ABORT(PWR_ABORT_RF);
-        return 3;
-    }
-    if (!pwr_holdoff_expired()) {
-        return 3;   /* host recently spoke: stay awake for its next frame */
-    }
     if (OpenBoot_EntryPending()) {
+        IDLECB_GATE(5);
         PWR_ABORT(PWR_ABORT_OPENBOOT);
         return 3;
     }
+    if (!pwr_holdoff_expired()) {
+        IDLECB_GATE(4);
+        return 3;   /* host recently spoke: stay awake for its next frame */
+    }
     if (!KeyboardUart_TxIdle()) {
+        IDLECB_GATE(6);
         PWR_ABORT(PWR_ABORT_TX);
         return 3;
     }
     if (!KeyboardUart_RxQuiet()) {
+        IDLECB_GATE(7);
         PWR_ABORT(PWR_ABORT_RX);
         return 3;
     }
+    if (RF_GetState() != RF_STATE_IDLE && !RF_CanDeepSleep()) {
+        IDLECB_GATE(3);
+        PWR_ABORT(PWR_ABORT_RF);
+        return 3;   /* CONNECTED, fresh pairing, or the RX window is open */
+    }
+    /* Armed IDLE (sleep to the TMOS deadline, host wakes us any time) or the
+     * armed bonded-search radio-off slice (RTC-bounded by the beacon). */
+    IDLECB_GATE(RF_GetState() == RF_STATE_IDLE ? 2 : 8);
     return pwr_sleep_until(time);
 }
 
@@ -610,12 +632,25 @@ void HAL_SleepInit(void)
     PFIC_EnableIRQ(RTC_IRQn);
 
 #if RF_DIAG_COUNTERS
-    pwr_sleep_attempt = 0;      /* .diag_safe.power is NOLOAD */
+    /* .diag_safe.power is NOLOAD. Zero on every boot EXCEPT a watchdog reset:
+     * after a WWDG reset the pre-crash values are the forensic record (the
+     * UART diag dump reads them), so keep them. R8_RESET_STATUS is stashed at
+     * 0x20005801 by the phased startup (see src/fault_handler.S). */
+#if KBD_UART_DIAG_DUMP
+    if (((*(volatile uint8_t *)0x20005801u) & 0x07u) == 0x02u /* RST_FLAG_WTR */) {
+        pwr_forensics_frozen = 1;   /* keep the pre-crash record until the dump reads it */
+    } else
+#endif
+    {
+    pwr_sleep_attempt = 0;
     pwr_sleep_entered = 0;
     pwr_sleep_aborted = 0;
     pwr_wake_gpio = 0;
     pwr_wake_rtc = 0;
     pwr_last_abort_reason = 0;
+    pwr_loop_passes = 0;
+    pwr_loop_stage = 0;
+    }
     /* pwr_bench_phase deliberately NOT cleared: it must survive a WWDG
      * reset to report the bench verdict (review finding). */
 #endif
@@ -657,10 +692,11 @@ void PowerSleep_BenchService(void)
     pwr_bench_phase = 0x10u;   /* quiesced */
 
     {
-        uint32_t deadline = pwr_rtc_add(RTC_GetCycle32k(), 5u * FREQ_RTC);
+        /* Performed from the idle callback like every other deep sleep (see
+         * CH59x_LowPower); the RTC-bounded 5 s window is armed here. */
+        pwr_bench_deadline = pwr_rtc_add(RTC_GetCycle32k(), 5u * FREQ_RTC);
+        pwr_bench_request = 1;
         pwr_bench_phase = 0x20u;   /* entering -- survives a WWDG reset */
-        uint32_t rc = pwr_sleep_until(deadline);
-        pwr_bench_phase = (rc == 0) ? 0x30u : (rc == 2) ? 0x42u : 0x43u;
     }
 }
 #endif

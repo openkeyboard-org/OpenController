@@ -177,6 +177,17 @@ void KeyboardUart_SendLed(uint8_t led_mask)
     uart_send_frame(0x5A, led_mask);
 }
 
+uint8_t KeyboardUart_SendRaw(const uint8_t *buf, uint8_t len)
+{
+    uint8_t i;
+    for (i = 0; i < len; i++) {
+        if (!uart_send_byte(buf[i])) {
+            break;              /* bounded: a non-draining host aborts the frame */
+        }
+    }
+    return i;
+}
+
 static void reset_parser(void)
 {
     rx_len = 0;

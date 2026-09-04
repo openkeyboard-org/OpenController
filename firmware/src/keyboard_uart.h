@@ -32,6 +32,10 @@ void KeyboardUart_SendLed(uint8_t led_mask);
  * drained - i.e. every queued byte has physically left the wire. */
 uint8_t KeyboardUart_TxIdle(void);
 
+/* Send a pre-formatted frame (diag dump). Per-byte bounded like the other
+ * senders; returns bytes actually queued. */
+uint8_t KeyboardUart_SendRaw(const uint8_t *buf, uint8_t len);
+
 /* Nonzero when no received byte is waiting anywhere on the RX path: ring
  * buffer empty (KBD_IDLE_WFI builds), parser between frames, no latched
  * line error. Hardware FIFO state is deliberately NOT included - the WFI
