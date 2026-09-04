@@ -43,7 +43,8 @@ void DiagDump_Send(void)
 {
     uint8_t frame[DIAG_FRAME_MAX];
     uint8_t n;
-    if (RF_GetState() == RF_STATE_CONNECTED) {
+    uint8_t connected = (RF_GetState() == RF_STATE_CONNECTED);
+    if (connected) {
         n = DiagFrame_FormatEmpty(frame);
     } else {
         diag_snapshot_t s = {0};
@@ -80,12 +81,18 @@ void DiagDump_Send(void)
 #endif
         n = DiagFrame_Format(frame, &s);
     }
-    KeyboardUart_SendRaw(frame, n);
+    uint8_t sent = KeyboardUart_SendRaw(frame, n);
 #if KBD_DEEP_SLEEP
-    /* The frozen post-watchdog record has now been read: thaw so counters go
-     * live again (a field WWDG boot must not freeze diagnostics for the whole
-     * uptime -- review finding). A6 72 also thaws. */
-    pwr_forensics_frozen = 0;
+    /* Thaw ONLY after a COMPLETE, NON-EMPTY frame actually left the UART: the
+     * frozen post-watchdog record has then genuinely been read out. A refusal
+     * while CONNECTED (empty 5D 00 5D) or a truncated send (host not draining,
+     * SendRaw < n) must keep the record frozen so the pre-crash counters are
+     * not lost unread (review findings). A6 72 is the explicit thaw. */
+    if (!connected && sent == n) {
+        pwr_forensics_frozen = 0;
+    }
+#else
+    (void)sent;
 #endif
 }
 
@@ -94,6 +101,12 @@ void DiagDump_Send(void)
  * counter is deliberately kept. */
 void DiagDump_Zero(void)
 {
+    /* Never clear the counters or the retained fault record over a live link
+     * (DiagDump_Send refuses there too): a connected host must not wipe the
+     * diagnostic/forensic state (review finding). */
+    if (RF_GetState() == RF_STATE_CONNECTED) {
+        return;
+    }
     rf_pair_bcast_count = 0; rf_valid_rx_count = 0; entered_connected_count = 0;
     rf_config_count = 0; pwr_pair_rx_off_count = 0; ll_drop_count = 0;
     rf_last_config_status = 0; rf_last_rx_status = 0; rf_last_tx_status = 0;

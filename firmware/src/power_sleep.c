@@ -122,7 +122,6 @@ volatile uint8_t  pwr_forensics_frozen;
 #define IDLECB_CALL()   do { } while (0)
 #define PWR_STAGE(n)    do { } while (0)
 #endif
-void PowerSleep_Stage(uint8_t n) { PWR_STAGE(n); }
 /* Frozen after a WATCHDOG boot until the first UART dump (see HAL_SleepInit /
  * DiagDump_Send): the pre-crash values are the forensic record. */
 extern volatile uint8_t pwr_forensics_frozen;
@@ -137,6 +136,11 @@ extern volatile uint8_t pwr_forensics_frozen;
 #define IDLECB_CALL()       do { } while (0)
 #define PWR_STAGE(n)        do { } while (0)
 #endif
+
+/* Always-present symbol so a KBD_IDLECB_FORENSICS build links even with
+ * RF_DIAG_COUNTERS=0 (the stage byte then has no backing store; PWR_STAGE is a
+ * no-op in that profile). Review finding. */
+void PowerSleep_Stage(uint8_t n) { PWR_STAGE(n); }
 
 /* Abort reasons (pwr_last_abort_reason). */
 #define PWR_ABORT_RF        1u   /* radio not quiescent for deep sleep */
