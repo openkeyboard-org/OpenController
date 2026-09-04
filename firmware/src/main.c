@@ -12,6 +12,12 @@
 #include "CONFIG.h"
 #include "HAL.h"
 #include "keyboard_uart.h"
+#ifndef KBD_UART_DIAG_DUMP
+#define KBD_UART_DIAG_DUMP RF_DIAG_COUNTERS
+#endif
+#if KBD_UART_DIAG_DUMP
+#include "diag_dump.h"
+#endif
 #include "rf_task.h"
 #include "openboot_app.h"
 
@@ -38,8 +44,23 @@ static uint8_t transport_is_2g4;
 /* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
 static volatile uint8_t openboot_entry_pending;
 
+/* Main-loop stage marker for crash forensics (EXTRA_CFLAGS=-DKBD_IDLECB_FORENSICS=1
+ * on a KBD_DEEP_SLEEP build); compiles to nothing otherwise. */
+#ifndef KBD_IDLECB_FORENSICS
+#define KBD_IDLECB_FORENSICS 0
+#endif
+#if KBD_DEEP_SLEEP && KBD_IDLECB_FORENSICS
+#define LOOP_STAGE(n) PowerSleep_Stage(n)
+#else
+#define LOOP_STAGE(n) ((void)0)
+#endif
+
 #if KBD_DEEP_SLEEP
 #include "power_sleep.h"
+#if RF_DIAG_COUNTERS
+extern volatile uint16_t pwr_loop_passes;
+extern volatile uint8_t pwr_forensics_frozen;
+#endif
 /* Exported for the deep-sleep gate: a pending bootloader entry vetoes
  * sleep (the update path expects a running main loop). */
 uint8_t OpenBoot_EntryPending(void)
@@ -100,6 +121,12 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
      * and treat every accepted frame as host activity (holdoff restart). */
     PowerSleep_SetAutosleep(sleep_proto.autosleep);
     PowerSleep_NoteActivity();
+    /* A state-changing command also withdraws an explicit sleep request the
+     * power layer may already hold (Power_Service consumed the reducer's
+     * sleep_pending when it armed it), so it cannot fire later as a surprise. */
+    if (SleepProtocol_IsStateChanging(cmd, sub)) {
+        PowerSleep_CancelExplicit();
+    }
 #endif
 
     if (cmd == 0xA1) {
@@ -197,6 +224,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x70: /* version: stock firmwareB often ACKs only */
         break;
+
+#if KBD_UART_DIAG_DUMP
+    case 0x71: /* diag dump (OpenController bench extension): 5D <len> ... */
+        DiagDump_Send();
+        break;
+    case 0x72: /* diag zero (OpenController bench extension): ACK only */
+        DiagDump_Zero();
+        break;
+#endif
 
     case 0x81: /* OTA mode -> enter the OpenBoot bootloader.
                 * Latch only; OpenBoot_Service() acts from the main loop so
@@ -298,7 +334,7 @@ static void Power_Service(void)
         svc_state = 0;
         RF_FlushBondSave();
         RF_Disconnect();
-        PowerSleep_ExplicitOnce();
+        PowerSleep_RequestExplicit();   /* performed by the TMOS idle callback */
         return;
     }
 }
@@ -342,7 +378,12 @@ void TMR3_IRQHandler(void)
  * (guarded by an ASSERT in ch592f.ld). NOLOAD: zeroed in main(). */
 volatile uint32_t pwr_wfi_count
     __attribute__((section(".diag_safe.power")));
+#if KBD_DEEP_SLEEP
+extern volatile uint8_t pwr_forensics_frozen;
+#define PWR_DIAG_INC(x) do { if (!pwr_forensics_frozen) { (x)++; } } while (0)
+#else
 #define PWR_DIAG_INC(x) do { (x)++; } while (0)
+#endif
 #else
 #define PWR_DIAG_INC(x) do { } while (0)
 #endif
@@ -404,17 +445,21 @@ __attribute__((noinline))
 void Main_Circulation(void)
 {
     while (1) {
-        TMOS_SystemProcess();
-        RF_ConnectedTick();
-        KeyboardUart_Poll();
-        OpenBoot_Service();
+        LOOP_STAGE(1); TMOS_SystemProcess();
+        LOOP_STAGE(2); RF_ConnectedTick();
+        LOOP_STAGE(3); KeyboardUart_Poll();
+        LOOP_STAGE(4); OpenBoot_Service();
 #if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
         PowerSleep_BenchService();
 #endif
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
-        Power_Service();
+        LOOP_STAGE(5); Power_Service();
 #endif
         WATCHDOG_FEED();
+#if KBD_DEEP_SLEEP && RF_DIAG_COUNTERS
+        if (!pwr_forensics_frozen) { pwr_loop_passes++; }   /* liveness for the diag dump */
+#endif
+        LOOP_STAGE(6);
 #if KBD_IDLE_WFI
         /* Idle the core only in RF_STATE_IDLE: TMOS scheduling and the hop
          * servo are POLL-driven, so PAIRING (20 ms beacon cadence) and
@@ -424,16 +469,15 @@ void Main_Circulation(void)
         if (RF_GetState() == RF_STATE_IDLE && !openboot_entry_pending
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
                 && !sleep_proto.sleep_pending   /* let Power_Service run */
+                && !PowerSleep_SleepPending()   /* idleCB owes a deep sleep */
 #endif
                 && KeyboardUart_RxQuiet()) {
             uint32_t irq_state;
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
-            /* MR7: with auto-sleep armed (and the activity holdoff expired),
-             * an idle module deep-sleeps until the host's RX edge instead of
-             * shallow-idling. Woke => restart the loop pass (feed, poll). */
-            if (PowerSleep_IdleAutosleep() == 0) {
-                continue;
-            }
+            /* Deep sleep (explicit or armed auto-sleep) is performed by the TMOS
+             * idle callback so the BLE library is told about it; this shallow
+             * WFE only runs when that callback declined this pass. */
+            LOOP_STAGE(7);
 #endif
             /* Global-mask critical section (CSR 0x800 MPIE|MIE, rf_task.c
              * idiom). Under the mask: drain any stale event FIRST, then
@@ -452,7 +496,9 @@ void Main_Circulation(void)
                     && (R8_TMR3_INT_FLAG & RB_TMR_IF_CYC_END) == 0) {
                 WATCHDOG_FEED();
                 PWR_DIAG_INC(pwr_wfi_count);
+                LOOP_STAGE(9);
                 idle_sleep_once();
+                LOOP_STAGE(10);
             }
             idle_disarm();
             __asm volatile ("csrrs zero, 0x800, %0"
@@ -565,7 +611,17 @@ int main(void)
 #endif
 #if KBD_IDLE_WFI
 #if RF_DIAG_COUNTERS
-    pwr_wfi_count = 0;   /* .diag_safe.power is NOLOAD; startup never clears it */
+    /* .diag_safe.power is NOLOAD; startup never clears it. Deep-sleep builds
+     * keep it across a WATCHDOG boot (forensic record, see power_sleep.c). */
+#if KBD_DEEP_SLEEP && KBD_UART_DIAG_DUMP
+    /* Keep the pre-crash value across a WATCHDOG boot ONLY when a UART dump can
+     * read and thaw it; otherwise nothing consumes the frozen record. */
+    if (((*(volatile uint8_t *)0x20005801u) & 0x07u) != 0x02u) {
+        pwr_wfi_count = 0;
+    }
+#else
+    pwr_wfi_count = 0;
+#endif
 #endif
     heartbeat_init();
 #endif

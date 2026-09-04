@@ -64,6 +64,11 @@ void SleepProtocol_Reset(sleep_proto_t *st);
 sleep_proto_action_t SleepProtocol_OnFrame(sleep_proto_t *st, uint8_t cmd,
                                            uint8_t sub, uint8_t openboot_pending);
 
+/* 1 if this accepted frame is a STATE-CHANGING command (the same set that
+ * cancels a pending sleep in SleepProtocol_OnFrame). Used by the firmware to
+ * withdraw an explicit sleep request already handed to the power layer. */
+uint8_t SleepProtocol_IsStateChanging(uint8_t cmd, uint8_t sub);
+
 /* Elapsed ticks on a modular free-running counter whose reads may step
  * BACKWARD by a few ticks (the CH59x RTC32K quirk rf_task.c already tolerates
  * with a 1024-tick allowance). now < start by <= backstep_tol is ZERO elapsed,

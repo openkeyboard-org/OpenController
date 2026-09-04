@@ -36,6 +36,8 @@ def lib(tmp_path_factory):
     dll.SleepProtocol_OnFrame.argtypes = [
         ctypes.POINTER(State), ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint8]
     dll.SleepProtocol_Reset.argtypes = [ctypes.POINTER(State)]
+    dll.SleepProtocol_IsStateChanging.restype = ctypes.c_uint8
+    dll.SleepProtocol_IsStateChanging.argtypes = [ctypes.c_uint8, ctypes.c_uint8]
     dll.SleepProtocol_ElapsedTicks.restype = ctypes.c_uint32
     dll.SleepProtocol_ElapsedTicks.argtypes = [ctypes.c_uint32] * 4
     return dll
@@ -282,3 +284,14 @@ def test_elapsed_true_wrap(lib):
     assert elapsed(lib, 10, MOD - 5) == 15
     # just beyond the tolerance is treated as a wrap, not a backstep
     assert elapsed(lib, 100000 - TOL - 1, 100000) == MOD - TOL - 1
+
+
+@pytest.mark.parametrize("cmd,sub,expect", [
+    (A6, 0x11, 1), (A6, 0x30, 1), (A6, 0x33, 1), (A6, 0x51, 1), (A6, 0x52, 1), (A6, 0x63, 1), (A6, 0x81, 1),
+    (A1, 0x00, 1), (A9, 0x05, 1),
+    (A6, 0x53, 0), (A6, 0x70, 0), (A6, SUB_SLEEP, 0), (A6, SUB_UNLOCK, 0), (A6, SUB_AUTO, 0), (A6, 0xFF, 0), (ACK, 0x0D, 0),
+])
+def test_is_state_changing_matches_cancel_set(lib, cmd, sub, expect):
+    # The firmware uses this to withdraw an explicit sleep request already
+    # handed to the power layer; it must agree with the reducer's cancel set.
+    assert lib.SleepProtocol_IsStateChanging(cmd, sub) == expect
