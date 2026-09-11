@@ -9,6 +9,8 @@
 #define RF_STATE_IDLE       0
 #define RF_STATE_PAIRING    1
 #define RF_STATE_CONNECTED  2
+#define RF_STATE_RESTING    3   /* resting policy: radio off between one-second probes; the
+                                 * keyboard MCU still sees a connected link (RESTING_POLICY.md) */
 
 void RF_TaskInit(void);
 
@@ -26,6 +28,11 @@ void RF_QueueHIDReport(const uint8_t report[8]);
 /* Poll from the main loop: advances the connected-mode listen channel on the
  * time-based hop (no-op unless connected). */
 void RF_ConnectedTick(void);
+
+#if KBD_REST
+/* True while stage-1 rest probing is scheduled (stage 2 probes nothing). */
+uint8_t RF_RestProbing(void);
+#endif
 
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);

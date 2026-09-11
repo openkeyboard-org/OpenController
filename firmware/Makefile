@@ -292,6 +292,17 @@ CFLAGS += $(EXTRA_CFLAGS)
 # image with `make RF_DIAG_COUNTERS=0` to compile out the counters, their
 # always-on read-modify-writes (incl. the RX-ISR hot path), and their SRAM.
 # Passed to both .c and .S (AS is gcc).
+# Resting policy (RESTING_POLICY.md): silent link drop after 5 s without a host
+# report, 1.010 s probes, no probes after 30 min. 0 compiles the policy out.
+KBD_REST ?= 1
+ifneq ($(words $(strip $(KBD_REST))),1)
+$(error KBD_REST must be a single value, got '$(KBD_REST)')
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_REST))),)
+$(error KBD_REST must be 0 or 1, got '$(KBD_REST)')
+endif
+CFLAGS += -DKBD_REST=$(KBD_REST)
+
 RF_DIAG_COUNTERS ?= 1
 CFLAGS += -DRF_DIAG_COUNTERS=$(RF_DIAG_COUNTERS)
 # UART diag dump (A6 71 / A6 72): bench tool returning the .diag_safe counters and

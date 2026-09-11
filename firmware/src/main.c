@@ -348,15 +348,36 @@ static void Power_Service(void)
  * mirroring rf_task's TMR0 idiom; the later clock-gating rung must never
  * gate TMR3 for this reason. The handler only clears the flag: waking IS
  * the point. */
-static void heartbeat_init(void)
+static void heartbeat_set(uint32_t cnt_end)
 {
     R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
-    R32_TMR3_CNT_END = GetSysClock() / 5u;   /* 200 ms */
+    R32_TMR3_CNT_END = cnt_end;
     R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
     R8_TMR3_INTER_EN = RB_TMR_IE_CYC_END;
     R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
+}
+static void heartbeat_init(void)
+{
+    heartbeat_set(GetSysClock() / 5u);   /* 200 ms */
     PFIC_EnableIRQ(TMR3_IRQn);
 }
+#if KBD_REST
+/* Resting policy: between probes the core idles here, and TMOS timers are only
+ * serviced when something wakes the loop. A 200 ms heartbeat would deliver the
+ * probe timer up to 200 ms late, outside the dongle's 45 ms phase lead, so rest
+ * runs a 4 ms heartbeat (~250 wakes/s, negligible) and the normal period returns
+ * with the session. Gated on stage-1 probing actually being scheduled: stage 2
+ * probes nothing, so the fast heartbeat would be pure wake overhead there. */
+static void heartbeat_follow_rf_state(void)
+{
+    static uint8_t fast;
+    uint8_t want = (uint8_t)(RF_GetState() == RF_STATE_RESTING && RF_RestProbing());
+    if (want != fast) {
+        fast = want;
+        heartbeat_set(want ? GetSysClock() / 250u : GetSysClock() / 5u);
+    }
+}
+#endif
 
 __INTERRUPT
 __HIGH_CODE
@@ -461,12 +482,17 @@ void Main_Circulation(void)
 #endif
         LOOP_STAGE(6);
 #if KBD_IDLE_WFI
-        /* Idle the core only in RF_STATE_IDLE: TMOS scheduling and the hop
+        /* Idle the core only in RF_STATE_IDLE (and RESTING, radio off between
+         * probes, with the fast heartbeat above): TMOS scheduling and the hop
          * servo are POLL-driven, so PAIRING (20 ms beacon cadence) and
          * CONNECTED (~875 us hop grid) must keep spinning. rf_state only
          * changes in main-loop context (TMOS handlers), so it needs no
          * re-check below. */
-        if (RF_GetState() == RF_STATE_IDLE && !openboot_entry_pending
+#if KBD_REST
+        heartbeat_follow_rf_state();
+#endif
+        if ((RF_GetState() == RF_STATE_IDLE || RF_GetState() == RF_STATE_RESTING)
+                && !openboot_entry_pending
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
                 && !sleep_proto.sleep_pending   /* let Power_Service run */
                 && !PowerSleep_SleepPending()   /* idleCB owes a deep sleep */
