@@ -366,11 +366,12 @@ static void heartbeat_init(void)
  * serviced when something wakes the loop. A 200 ms heartbeat would deliver the
  * probe timer up to 200 ms late, outside the dongle's 45 ms phase lead, so rest
  * runs a 4 ms heartbeat (~250 wakes/s, negligible) and the normal period returns
- * with the session. */
+ * with the session. Gated on stage-1 probing actually being scheduled: stage 2
+ * probes nothing, so the fast heartbeat would be pure wake overhead there. */
 static void heartbeat_follow_rf_state(void)
 {
     static uint8_t fast;
-    uint8_t want = (uint8_t)(RF_GetState() == RF_STATE_RESTING);
+    uint8_t want = (uint8_t)(RF_GetState() == RF_STATE_RESTING && RF_RestProbing());
     if (want != fast) {
         fast = want;
         heartbeat_set(want ? GetSysClock() / 250u : GetSysClock() / 5u);

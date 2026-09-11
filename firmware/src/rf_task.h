@@ -29,6 +29,11 @@ void RF_QueueHIDReport(const uint8_t report[8]);
  * time-based hop (no-op unless connected). */
 void RF_ConnectedTick(void);
 
+#if KBD_REST
+/* True while stage-1 rest probing is scheduled (stage 2 probes nothing). */
+uint8_t RF_RestProbing(void);
+#endif
+
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);
 

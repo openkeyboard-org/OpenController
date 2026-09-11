@@ -295,6 +295,9 @@ CFLAGS += $(EXTRA_CFLAGS)
 # Resting policy (RESTING_POLICY.md): silent link drop after 5 s without a host
 # report, 1.010 s probes, no probes after 30 min. 0 compiles the policy out.
 KBD_REST ?= 1
+ifneq ($(words $(strip $(KBD_REST))),1)
+$(error KBD_REST must be a single value, got '$(KBD_REST)')
+endif
 ifeq ($(filter 0 1,$(strip $(KBD_REST))),)
 $(error KBD_REST must be 0 or 1, got '$(KBD_REST)')
 endif

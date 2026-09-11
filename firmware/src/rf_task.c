@@ -164,6 +164,9 @@
                                                * the ~50-120 ms burst is the dongle's post-probe supervision
                                                * hold, not our TX) -- see RESTING_POLICY.md. */
 #endif
+#if KBD_REST && (KBD_REST_PROBE_ANSWERS < 1)
+#error "KBD_REST_PROBE_ANSWERS must be >= 1: the dongle's scheduled-drop detector needs at least one answered poll (rf_win_link_rx >= RF_WIN_MIN_LINK_RX), or every probe drop is classified unscheduled and the detector unlocks."
+#endif
 #ifndef KBD_REST_PROBE_TIMEOUT_TICKS
 #define KBD_REST_PROBE_TIMEOUT_TICKS 640u     /* 400 ms: two of the dongle's 200 ms window periods */
 #endif
@@ -1002,6 +1005,20 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FINISH) {
         RF_DIAG_INC(rf_cb_count[3]);
+#if KBD_REST
+        /* Count a probe answer only once the response actually COMPLETED. RF_Tx()
+         * returning 0 merely starts the transmission, and a started TX can still
+         * reach TX_MODE_TX_FAIL -- counting at start could end the probe having
+         * delivered nothing, which is exactly what makes the dongle classify the
+         * drop as unscheduled (rf_win_link_rx == 0) and unlock its detector.
+         * response_pending distinguishes a connected response from a pairing
+         * beacon, which raises TX_FINISH too; it is cleared just below. */
+        if (response_pending && rest_probe && !rest_probe_wake) {
+            if (++rest_answers >= KBD_REST_PROBE_ANSWERS) {
+                rest_quiet_pending = 1;   /* RF_ConnectedTick ends the probe */
+            }
+        }
+#endif
         response_pending = 0;   /* response done -> hop may retune again */
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
@@ -1064,13 +1081,6 @@ static void rf_do_response_tx(void)
     uint8_t tx_status = RF_Tx(tx_payload, tx_len, 0xFF, 0xFF);
     RF_DIAG_SET(rf_last_tx_status, tx_status);
     RF_DIAG_INC(rf_connected_tx_count);
-#if KBD_REST
-    if (tx_status == 0 && rest_probe && !rest_probe_wake) {
-        if (++rest_answers >= KBD_REST_PROBE_ANSWERS) {
-            rest_quiet_pending = 1;   /* RF_ConnectedTick ends the probe after this TX drains */
-        }
-    }
-#endif
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
         response_pending = 0;
@@ -1857,9 +1867,6 @@ uint8_t RF_Select2G4(void)
 
 void RF_EnterPairing(void)
 {
-#if KBD_REST
-    rest_cancel();
-#endif
     /* A6 51 ("pair current transport") must NOT tear down a healthy link. A host
      * that reconnects with A6 30 + A6 51, or sends a stray/late A6 51 after a
      * bonded reconnect already entered CONNECTED, would otherwise kick us back to
@@ -1868,8 +1875,11 @@ void RF_EnterPairing(void)
      * reconnect failure). Forcing a fresh pair while connected requires an
      * explicit unpair (A6 52) or disconnect first. */
     if (!keyboard_mac_valid || rf_state == RF_STATE_CONNECTED) {
-        return;
+        return;                       /* request ignored: leave the rest timers alone */
     }
+#if KBD_REST
+    rest_cancel();
+#endif
     rf_tmr0_stop();
     /* Quiesce-then-clear, IN THIS ORDER (review finding): the old bonded-AA
      * receiver can still be armed here, and a LEN-15 landing after a bare
@@ -1978,7 +1988,12 @@ void RF_QueueHIDReport(const uint8_t report[8])
      * next few polls so a dropped slot doesn't lose a key-down or key-up. */
     if (changed) {
         hid_resend = HID_RESEND_COUNT;
+    }
 #if KBD_REST
+    /* The policy defines activity as a VALIDATED host report, not as a changed
+     * payload: an unchanged repeat must still restart the inactivity timer and
+     * still wake a resting link. Only hid_resend above is payload-conditional. */
+    {
         if (rf_state == RF_STATE_RESTING) {
             /* A key while resting: probe now (any stage) and keep the session. */
             RF_DIAG_INC(rest_key_wakes);
@@ -1996,9 +2011,18 @@ void RF_QueueHIDReport(const uint8_t report[8])
         } else if (rf_state == RF_STATE_CONNECTED) {
             rest_arm_idle();
         }
-#endif
     }
+#endif
 }
+
+#if KBD_REST
+/* True only while stage-1 probing is scheduled. Stage 2 has no probes, so the
+ * fast heartbeat buys nothing there. */
+uint8_t RF_RestProbing(void)
+{
+    return (uint8_t)(rest_stage == 1u);
+}
+#endif
 
 uint8_t RF_GetState(void)
 {
