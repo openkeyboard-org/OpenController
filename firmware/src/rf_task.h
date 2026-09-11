@@ -9,6 +9,8 @@
 #define RF_STATE_IDLE       0
 #define RF_STATE_PAIRING    1
 #define RF_STATE_CONNECTED  2
+#define RF_STATE_RESTING    3   /* resting policy: radio off between one-second probes; the
+                                 * keyboard MCU still sees a connected link (RESTING_POLICY.md) */
 
 void RF_TaskInit(void);
 

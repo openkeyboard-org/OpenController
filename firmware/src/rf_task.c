@@ -74,6 +74,10 @@
 #define STOCK_CONNECT_IDX_BIAS 1
 #endif
 #define RF_EVT_DISCONNECT         0x0080
+#define RF_EVT_REST_IDLE          0x0400   /* resting policy: no host report for KBD_REST_IDLE_TICKS */
+#define RF_EVT_REST_PROBE         0x0800   /* resting policy: probe cadence */
+#define RF_EVT_REST_PROBE_TIMEOUT 0x1000   /* resting policy: probe not caught / not polled in time */
+#define RF_EVT_REST_STAGE2        0x2000   /* resting policy: stop probing */
 
 #define RF_DEFAULT_ACCESS_ADDR    0x71764126u
 #define RF_CRC_INIT               0x555555u
@@ -133,6 +137,42 @@
  * finding on the plan). */
 #define PAIR_FLAVOR_FRESH   0u             /* A6 51/63: continuous RX */
 #define PAIR_FLAVOR_BONDED  1u             /* boot-with-bond / A6 30: duty-cycled */
+
+/* Resting policy (RESTING_POLICY.md). After KBD_REST_IDLE_TICKS without a host
+ * report on a connected link, drop the session SILENTLY (no frame to the dongle,
+ * which lapses by its own supervision; nothing to the keyboard MCU, which keeps
+ * seeing a connected link) and probe the dongle every KBD_REST_PROBE_TICKS with a
+ * bonded reconnect that answers KBD_REST_PROBE_ANSWERS polls and goes quiet
+ * again. The dongle's detector locks onto that cadence and windows/halts around
+ * it. After KBD_REST_STAGE2_TICKS stop probing until a key. A host report while
+ * resting probes at once and keeps the session. Ticks are TMOS units (625 us).
+ * Values are production parity (5 s / 1.010 s / 30 min), owner-decided
+ * 2026-09-11, tunable. */
+#ifndef KBD_REST
+#define KBD_REST 1
+#endif
+#ifndef KBD_REST_IDLE_TICKS
+#define KBD_REST_IDLE_TICKS          8000u    /* 5 s: production's first inactivity stage */
+#endif
+#ifndef KBD_REST_PROBE_TICKS
+#define KBD_REST_PROBE_TICKS         1616u    /* 1010 ms: inside the dongle's 900-1100 ms cadence window */
+#endif
+#ifndef KBD_REST_PROBE_ANSWERS
+#define KBD_REST_PROBE_ANSWERS       2u       /* polls answered per probe: the dongle's detector needs >= 1;
+                                               * 2 keeps a scheduled drop valid even if one answer is lost.
+                                               * The average current is answer-count-insensitive (bench:
+                                               * the ~50-120 ms burst is the dongle's post-probe supervision
+                                               * hold, not our TX) -- see RESTING_POLICY.md. */
+#endif
+#ifndef KBD_REST_PROBE_TIMEOUT_TICKS
+#define KBD_REST_PROBE_TIMEOUT_TICKS 640u     /* 400 ms: two of the dongle's 200 ms window periods */
+#endif
+#ifndef KBD_REST_STAGE2_TICKS
+#define KBD_REST_STAGE2_TICKS        2880000u /* 30 min: production's second stage */
+#endif
+#ifndef KBD_REST_IDLE_RETRY_TICKS
+#define KBD_REST_IDLE_RETRY_TICKS    160u     /* 100 ms: a report still draining when the idle timer fires */
+#endif
 #define RF_CONNECTED_TIMEOUT_TICKS 5000u   /* ~3.1 s; FIXED connection supervision --
                                             * the dongle's advertised timeout field is
                                             * intentionally not honored (stock scales it
@@ -289,6 +329,13 @@ static volatile uint8_t  bond_save_pending;
  * fault -- see docs/TMOS_REVIEW.md -- but deferring ISR list mutation is good practice
  * regardless and is retained.) */
 static volatile uint8_t  supervision_kick;
+#if KBD_REST
+static uint8_t rest_stage;                    /* 0 not resting, 1 probing, 2 no probes until a key */
+static uint8_t rest_probe;                    /* a probe's search/connection is in flight */
+static uint8_t rest_probe_wake;               /* a host report arrived: this probe becomes the session */
+static uint8_t rest_answers;                  /* polls answered in the current probe */
+static volatile uint8_t rest_quiet_pending;   /* end the probe once its reply TX has drained */
+#endif
 
 #define HID_RESEND_COUNT  6u   /* resend a changed report on this many polls */
 
@@ -318,6 +365,13 @@ volatile uint32_t rf_valid_rx_count __attribute__((section(".diag_safe")));
 /* .diag_safe.power (NOT the bare section): collected after every legacy
  * counter so bench absolute addresses never move -- see ch592f.ld. */
 volatile uint32_t pwr_pair_rx_off_count __attribute__((section(".diag_safe.power")));
+#if KBD_REST
+/* Resting-policy counters. Plain .bss, NOT .diag_safe: the 0x200 diag window is
+ * exactly full, and these are read by symbol from the map, not by absolute
+ * address. They do not survive a fault. */
+volatile uint32_t rest_entries, rest_probes, rest_probe_catches, rest_probe_misses;
+volatile uint32_t rest_key_wakes, rest_stage2_entries;
+#endif
 volatile uint8_t rf_last_config_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_rx_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_tx_status __attribute__((section(".diag_safe")));
@@ -401,6 +455,14 @@ static void rf_pair_broadcast(void);
 static void rf_enter_connected(void);
 static void rf_do_response_tx(void);
 static void rf_tmr0_stop(void);
+#if KBD_REST
+static void rest_cancel(void);
+static void rest_arm_idle(void);
+static void rest_enter(void);
+static void rest_probe_start(void);
+static void rest_probe_end(uint8_t caught);
+static void rest_promote_to_normal(void);
+#endif
 static void rf_tmr0_arm(uint32_t count);
 
 static uint32_t read_be32(const uint8_t *p)
@@ -1002,6 +1064,13 @@ static void rf_do_response_tx(void)
     uint8_t tx_status = RF_Tx(tx_payload, tx_len, 0xFF, 0xFF);
     RF_DIAG_SET(rf_last_tx_status, tx_status);
     RF_DIAG_INC(rf_connected_tx_count);
+#if KBD_REST
+    if (tx_status == 0 && rest_probe && !rest_probe_wake) {
+        if (++rest_answers >= KBD_REST_PROBE_ANSWERS) {
+            rest_quiet_pending = 1;   /* RF_ConnectedTick ends the probe after this TX drains */
+        }
+    }
+#endif
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
         response_pending = 0;
@@ -1107,6 +1176,51 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_SAVE_BOND;
     }
 
+#if KBD_REST
+    if (events & RF_EVT_REST_IDLE) {
+        if (rf_state == RF_STATE_CONNECTED && !rest_probe) {
+            if (hid_resend == 0u && !response_pending) {
+                rest_enter();
+            } else {
+                rf_start_task_atomic(RF_EVT_REST_IDLE, KBD_REST_IDLE_RETRY_TICKS);
+            }
+        }
+        return events ^ RF_EVT_REST_IDLE;
+    }
+
+    if (events & RF_EVT_REST_PROBE) {
+        if (rf_state == RF_STATE_RESTING && rest_stage == 1u) {
+            /* Cadence is start-to-start: re-arm before the probe so its own
+             * duration never stretches the period the dongle measures. */
+            rf_start_task_atomic(RF_EVT_REST_PROBE, KBD_REST_PROBE_TICKS);
+            rest_probe_start();
+        }
+        return events ^ RF_EVT_REST_PROBE;
+    }
+
+    if (events & RF_EVT_REST_PROBE_TIMEOUT) {
+        if (rest_probe) {
+            if (rest_probe_wake) {
+                /* A host report is waiting: keep searching (the beacon loop is
+                 * still running) rather than give up; the catch keeps the session. */
+                rf_start_task_atomic(RF_EVT_REST_PROBE_TIMEOUT, KBD_REST_PROBE_TIMEOUT_TICKS);
+            } else {
+                rest_probe_end(0u);
+            }
+        }
+        return events ^ RF_EVT_REST_PROBE_TIMEOUT;
+    }
+
+    if (events & RF_EVT_REST_STAGE2) {
+        if (rest_stage == 1u) {
+            rest_stage = 2u;
+            rf_stop_task_atomic(RF_EVT_REST_PROBE);
+            RF_DIAG_INC(rest_stage2_entries);
+        }
+        return events ^ RF_EVT_REST_STAGE2;
+    }
+#endif
+
     if (events & RF_EVT_DISCONNECT) {
         if (rf_state == RF_STATE_CONNECTED) {
 #if RF_DIAG_COUNTERS
@@ -1124,6 +1238,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             ll_dropN_since_rx = since_rx; ll_dropN_idx = prev_data_idx;
             ll_dropN_channel = rf_channel; ll_dropN_provis = provisional;
             ll_dropN_rtc = drtc;
+#endif
+#if KBD_REST
+            rest_cancel();
 #endif
             rf_tmr0_stop();
             response_pending = 0;
@@ -1270,6 +1387,13 @@ static void rf_enter_connected(void)
         return;
     }
     RF_DIAG_INC(entered_connected_count);
+#if KBD_REST
+    /* A silent probe: the RF side connects exactly as usual, but the keyboard
+     * MCU is told nothing (it still sees the session) and last_led_sent is kept
+     * so only a real LED change is relayed. The dongle re-relays its LED byte
+     * on every promote, so a resting keyboard still tracks host LED state. */
+    uint8_t silent_probe = (uint8_t)(rest_probe && !rest_probe_wake);
+#endif
     /* Only ever reached from PAIRING (the connected path drops LEN-15 re-keys), so
      * this is always a real IDLE/PAIRING->CONNECTED transition -- announce 5B32. */
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
@@ -1286,7 +1410,11 @@ static void rf_enter_connected(void)
     since_rx = 0;
     response_pending = 0;
     provisional = 1;   /* park-and-listen until the first poll is caught */
+#if KBD_REST
+    bond_save_pending = (uint8_t)!silent_probe;   /* a probe rejoins the same bond: no DataFlash write per second */
+#else
     bond_save_pending = 1;
+#endif
     rf_state = RF_STATE_CONNECTED;
 
 #if RF_DIAG_COUNTERS
@@ -1302,10 +1430,22 @@ static void rf_enter_connected(void)
     rf_stop_task_atomic(RF_EVT_DISCONNECT);   /* reset, don't double-arm a stale timer */
     rf_start_task_atomic(RF_EVT_DISCONNECT, RF_CONNECTED_TIMEOUT_TICKS);
 
+#if KBD_REST
+    if (silent_probe) {
+        return;                       /* KBD_REST_PROBE_TIMEOUT bounds the probe */
+    }
+    if (rest_probe) {
+        rest_promote_to_normal();     /* a key woke us: this connection is the session */
+        return;
+    }
+#endif
     KeyboardUart_SendStatus(0x32);
     KeyboardUart_SendStatus(0x23);
     KeyboardUart_SendLed(0x00);
     last_led_sent = 0x00;
+#if KBD_REST
+    rest_arm_idle();
+#endif
 }
 
 /* Time-based connected-mode hop (stock firmwareB.bin 0x20000E06). Polled from
@@ -1328,6 +1468,12 @@ void RF_ConnectedTick(void)
         return;
     }
     RF_DIAG_INC(connected_tick_calls);   /* hop code past the state gate actually ran */
+#if KBD_REST
+    if (rest_quiet_pending && !response_pending) {
+        rest_probe_end(1u);
+        return;
+    }
+#endif
 
     /* Re-arm the connection-supervision timer here (main-loop context) when the
      * RX ISR flagged an incoming poll. Placed BEFORE the response_pending
@@ -1558,14 +1704,125 @@ void RF_TaskInit(void)
     }
 }
 
+#if KBD_REST
+/* Resting policy helpers (RESTING_POLICY.md). All main-loop context. */
+static void rest_cancel(void)
+{
+    rf_stop_task_atomic(RF_EVT_REST_IDLE);
+    rf_stop_task_atomic(RF_EVT_REST_PROBE);
+    rf_stop_task_atomic(RF_EVT_REST_PROBE_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_REST_STAGE2);
+    rest_stage = 0; rest_probe = 0; rest_probe_wake = 0; rest_answers = 0;
+    rest_quiet_pending = 0;
+}
+
+/* (Re)start the inactivity timer: on a real connect and on every host report. */
+static void rest_arm_idle(void)
+{
+    if (rf_state == RF_STATE_CONNECTED && !rest_probe) {
+        rf_stop_task_atomic(RF_EVT_REST_IDLE);
+        rf_start_task_atomic(RF_EVT_REST_IDLE, KBD_REST_IDLE_TICKS);
+    }
+}
+
+/* Radio off, no frame to anyone: the dongle lapses by its own supervision
+ * (~19 ms after our last reply) into its bonded camp. */
+static void rest_go_quiet(void)
+{
+    rf_tmr0_stop();
+    rf_stop_task_atomic(RF_EVT_DISCONNECT);
+    rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
+    rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_ENTER_CONNECTED);
+    rf_stop_task_atomic(RF_EVT_REST_PROBE_TIMEOUT);
+    response_pending = 0;
+    supervision_kick = 0;
+    pair_rx_open = 0;
+    pair_rx_off_armed = 0;
+    rest_probe = 0; rest_answers = 0; rest_quiet_pending = 0; rest_probe_wake = 0;
+    rf_state = RF_STATE_RESTING;
+    RF_Shut();
+}
+
+static void rest_enter(void)
+{
+    RF_DIAG_INC(rest_entries);
+    rest_go_quiet();
+    rest_stage = 1;
+    rf_start_task_atomic(RF_EVT_REST_PROBE, KBD_REST_PROBE_TICKS);
+    rf_start_task_atomic(RF_EVT_REST_STAGE2, KBD_REST_STAGE2_TICKS);
+}
+
+/* One bonded reconnect: the RF_Select2G4 bonded branch, flagged as a probe so
+ * the connect stays silent toward the MCU and ends after a couple of polls. */
+static void rest_probe_start(void)
+{
+    if (!has_bond || !keyboard_mac_valid) {
+        rest_cancel();                /* nothing to probe: the MCU will re-select */
+        rf_state = RF_STATE_IDLE;
+        RF_Shut();
+        return;
+    }
+    RF_DIAG_INC(rest_probes);
+    rest_probe = 1; rest_answers = 0; rest_quiet_pending = 0;
+    rf_tmr0_stop();
+    RF_Shut();
+    rf_stop_task_atomic(RF_EVT_ENTER_CONNECTED);
+    rf_state = RF_STATE_PAIRING;
+    pair_flavor = PAIR_FLAVOR_BONDED;
+    pair_rx_open = 1;
+    pair_rx_off_armed = 0;
+    rf_access_addr = stored_session_aa;
+    rf_configured_valid = 0;
+    rf_channel = pair_channels[0];
+    pair_bcast_count = 0;
+    rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
+    rf_set_event_atomic(RF_EVT_PAIR_BCAST);
+    rf_stop_task_atomic(RF_EVT_REST_PROBE_TIMEOUT);
+    rf_start_task_atomic(RF_EVT_REST_PROBE_TIMEOUT, KBD_REST_PROBE_TIMEOUT_TICKS);
+}
+
+static void rest_probe_end(uint8_t caught)
+{
+    if (caught) { RF_DIAG_INC(rest_probe_catches); } else { RF_DIAG_INC(rest_probe_misses); }
+    rest_go_quiet();                  /* stage and the cadence timer are untouched */
+}
+
+/* A probe becomes the session: a host report arrived, or the host re-selected
+ * 2.4G. Nothing is announced (the MCU already sees a connected link). */
+static void rest_promote_to_normal(void)
+{
+    rf_stop_task_atomic(RF_EVT_REST_PROBE);
+    rf_stop_task_atomic(RF_EVT_REST_PROBE_TIMEOUT);
+    rf_stop_task_atomic(RF_EVT_REST_STAGE2);
+    rest_stage = 0; rest_probe = 0; rest_probe_wake = 0; rest_answers = 0;
+    rest_quiet_pending = 0;
+    rf_stop_task_atomic(RF_EVT_DISCONNECT);
+    rf_start_task_atomic(RF_EVT_DISCONNECT, RF_CONNECTED_TIMEOUT_TICKS);
+    rest_arm_idle();
+}
+#endif /* KBD_REST */
+
 uint8_t RF_Select2G4(void)
 {
     if (!keyboard_mac_valid) {
         return 0;
     }
     if (rf_state == RF_STATE_CONNECTED) {
+#if KBD_REST
+        if (rest_probe) {
+            rest_probe_wake = 1;
+            rest_quiet_pending = 0;
+            rest_promote_to_normal();   /* the host re-selected 2.4G during a probe: keep it */
+        }
+#endif
         return has_bond;
     }
+#if KBD_REST
+    rest_cancel();                      /* from RESTING or a probe search: a normal bonded reconnect follows */
+#endif
 
     if (has_bond) {
         rf_tmr0_stop();
@@ -1600,6 +1857,9 @@ uint8_t RF_Select2G4(void)
 
 void RF_EnterPairing(void)
 {
+#if KBD_REST
+    rest_cancel();
+#endif
     /* A6 51 ("pair current transport") must NOT tear down a healthy link. A host
      * that reconnects with A6 30 + A6 51, or sends a stray/late A6 51 after a
      * bonded reconnect already entered CONNECTED, would otherwise kick us back to
@@ -1635,6 +1895,9 @@ void RF_EnterPairing(void)
 
 void RF_Disconnect(void)
 {
+#if KBD_REST
+    rest_cancel();
+#endif
     rf_tmr0_stop();
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
     rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
@@ -1664,6 +1927,9 @@ void RF_FlushBondSave(void)
 
 void RF_ClearBond(void)
 {
+#if KBD_REST
+    rest_cancel();
+#endif
     rf_clear_bond_ram();
     bond_save_pending = 0;
     rf_clear_bond_flash();
@@ -1684,8 +1950,8 @@ uint8_t RF_HasBond(void)
  * TMOS only invokes the idle callback when no event is runnable. */
 uint8_t RF_CanDeepSleep(void)
 {
-    if (rf_state == RF_STATE_IDLE) {
-        return 1;
+    if (rf_state == RF_STATE_IDLE || rf_state == RF_STATE_RESTING) {
+        return 1;   /* radio off between probes; the RTC deadline is the next probe */
     }
     if (rf_state == RF_STATE_PAIRING
             && pair_flavor == PAIR_FLAVOR_BONDED && !pair_rx_open) {
@@ -1712,6 +1978,25 @@ void RF_QueueHIDReport(const uint8_t report[8])
      * next few polls so a dropped slot doesn't lose a key-down or key-up. */
     if (changed) {
         hid_resend = HID_RESEND_COUNT;
+#if KBD_REST
+        if (rf_state == RF_STATE_RESTING) {
+            /* A key while resting: probe now (any stage) and keep the session. */
+            RF_DIAG_INC(rest_key_wakes);
+            rest_probe_wake = 1;
+            rf_stop_task_atomic(RF_EVT_REST_PROBE);
+            rf_stop_task_atomic(RF_EVT_REST_STAGE2);
+            rest_probe_start();
+        } else if (rest_probe) {
+            RF_DIAG_INC(rest_key_wakes);
+            rest_probe_wake = 1;
+            rest_quiet_pending = 0;
+            if (rf_state == RF_STATE_CONNECTED) {
+                rest_promote_to_normal();
+            }
+        } else if (rf_state == RF_STATE_CONNECTED) {
+            rest_arm_idle();
+        }
+#endif
     }
 }
 
