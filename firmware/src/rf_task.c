@@ -288,13 +288,30 @@ static uint8_t pending_type_tag;
 static uint16_t pending_interval;
 static uint32_t pending_session_aa;
 
-static uint8_t hid_report[8];
+/* Report FIFO (step 3). Replaces the single `hid_report` slot: a report queued
+ * while the link is down MUST survive until the dongle actually acknowledges it,
+ * otherwise the key-up 60 ms later overwrites the key-down and the first key
+ * from rest is lost (measured 35-40 % loss). Stock's module keeps a 20-slot
+ * ack-retired ring for exactly this reason.
+ * Single-producer / single-consumer: `hid_fifo_tail` is written ONLY by the main
+ * loop (RF_QueueHIDReport, from the UART frame callback); `hid_fifo_head` ONLY by
+ * the RX ISR when the dongle advances its control bit (the acknowledgement).
+ * Free-running indices, power-of-two capacity; occupancy = (uint8_t)(tail-head). */
+#define HID_FIFO_SLOTS 16u
+static uint8_t hid_fifo[HID_FIFO_SLOTS][8];
+static volatile uint8_t hid_fifo_head;      /* ISR-owned: retire on ack */
+static volatile uint8_t hid_fifo_tail;      /* main-loop-owned: enqueue */
+static volatile uint8_t hid_head_sent;      /* head is in flight; an ack may retire it */
+static uint8_t hid_last_queued[8];          /* newest queued state (adjacent-duplicate dedup) */
+static uint8_t hid_last_queued_valid;
 static uint8_t tx_payload[10];
 static uint8_t tx_ctrl;
 static uint8_t prev_data_idx;     /* current connected data-channel index */
 static volatile uint8_t pending_led;
 static volatile uint8_t last_led_sent;
-static volatile uint8_t hid_resend;  /* >0: send LEN=10 HID report this many more polls */
+/* hid_resend (blind attempt counter) removed: the head is re-sent every poll
+ * until acknowledged, and retired ONLY by the ack (see hid_fifo_head). */
+static volatile uint8_t hid_tx_down_inflight; /* a non-zero HID frame started TX; awaiting TX_FINISH to count it as on-air */
 
 /* Connected-mode time-based hop (mirrors stock firmwareB.bin 0x20000E06/0x20000D60).
  * hop_anchor (like tx_ctrl) is written by BOTH the RX ISR (hop_servo / ctrl-ARQ) and the
@@ -340,7 +357,6 @@ static uint8_t rest_answers;                  /* polls answered in the current p
 static volatile uint8_t rest_quiet_pending;   /* end the probe once its reply TX has drained */
 #endif
 
-#define HID_RESEND_COUNT  6u   /* resend a changed report on this many polls */
 
 /* TMR0 one-shot post-poll turnaround. Stock firmwareB.bin FUN_ram_00005abe arms
  * 300 TMR0 counts (~5 us @ 60 MHz), but this main-loop deferred TX path needs a
@@ -382,6 +398,17 @@ volatile uint32_t rest_key_wakes, rest_stage2_entries;
  * of the 6x resend). A key the MCU offered with ll_hid_tx advanced but no host
  * delivery localises the loss downstream of the controller. */
 volatile uint32_t ll_hid_rx, ll_hid_tx;
+/* Down-only split (non-zero report = a key is pressed): rx_down counts key-downs
+ * accepted from the UART, tx_down counts key-downs SELECTED for transmission. */
+volatile uint32_t ll_hid_rx_down, ll_hid_tx_down;
+/* tx_done_down: a key-down frame that actually COMPLETED on air (TX_FINISH),
+ * not merely selected. IMPORTANT: completing on air does NOT mean the dongle
+ * received it -- during a reconnect the controller transmits into a link that is
+ * not up yet and those frames go nowhere (bench-measured: 108 on-air down-frames,
+ * 40 received). These counters bound TRANSMISSION, never delivery; delivery must
+ * be read from the dongle's own counters. */
+volatile uint32_t ll_hid_tx_done_down;
+volatile uint32_t ll_hid_fifo_drop;   /* report dropped: FIFO full (best-effort, as stock) */
 volatile uint8_t rf_last_config_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_rx_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_tx_status __attribute__((section(".diag_safe")));
@@ -980,6 +1007,17 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
             if ((rx_ctrl ^ tx_ctrl) & 0x01) {
                 tx_ctrl = (uint8_t)(((tx_ctrl & (uint8_t)~0x01) |
                                      (rx_ctrl & 0x01)) ^ 0x02);
+                /* The dongle advanced its control bit: it accepted the frame we
+                 * had in flight. That ack -- and ONLY that ack -- retires the
+                 * head, so a report queued while the link was down is never
+                 * discarded by a blind attempt counter. hid_head_sent guards the
+                 * advance that arrives before we have ever sent this head. */
+                if (hid_head_sent) {
+                    hid_head_sent = 0;
+                    if (hid_fifo_tail != hid_fifo_head) {
+                        hid_fifo_head++;
+                    }
+                }
             }
 
             if (len == 3 && rxBuf[3] == 0xA1 && rxBuf[4] != last_led_sent) {
@@ -1012,6 +1050,13 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FINISH) {
         RF_DIAG_INC(rf_cb_count[3]);
+        if (hid_tx_down_inflight && response_pending) {
+            /* response_pending still set == this TX_FINISH is THIS connected response
+             * (the handler clears it just below), not a keepalive/pairing-beacon
+             * finish inheriting a flag left stale by an abandoned TX (codex). */
+            RF_DIAG_INC(ll_hid_tx_done_down);   /* a key-down frame COMPLETED on air */
+        }
+        hid_tx_down_inflight = 0;
 #if KBD_REST
         /* Count a probe answer only once the response actually COMPLETED. RF_Tx()
          * returning 0 merely starts the transmission, and a started TX can still
@@ -1033,6 +1078,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
 
     if (sta == TX_MODE_TX_FAIL) {
         RF_DIAG_INC(rf_cb_count[4]);
+        hid_tx_down_inflight = 0;   /* started but did not complete: not on air */
         response_pending = 0;
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
@@ -1052,10 +1098,12 @@ __HIGH_CODE
 static void rf_do_response_tx(void)
 {
     uint8_t tx_len;
+    uint8_t sel_down = 0;   /* this frame carries a key-down (non-zero report) */
 
     if (!response_pending) {
         return;
     }
+    hid_tx_down_inflight = 0;   /* start clean: set below only if THIS TX is a started down */
 
 #if STOCK_SUPPRESS_RESPONSES
     if (ll_resp_suppressed < (uint32_t)STOCK_SUPPRESS_RESPONSES) {
@@ -1066,16 +1114,31 @@ static void rf_do_response_tx(void)
     }
 #endif
     tx_payload[0] = response_ctrl;
-    if (hid_resend) {
-        tx_payload[1] = 0xA1;
-        for (uint8_t i = 0; i < 8; i++) {
-            tx_payload[2 + i] = hid_report[i];
+    {
+        /* Select the head atomically against the RX-ISR retire: the occupancy
+         * test and the slot index must observe ONE head, or a retire landing
+         * between them would make us transmit an already-acknowledged (older)
+         * state as if it were new (codex). */
+        uint32_t irq = rf_irq_save();
+        uint8_t  h   = hid_fifo_head;
+        if ((uint8_t)(hid_fifo_tail - h) != 0u) {
+            const uint8_t *head = hid_fifo[h & (HID_FIFO_SLOTS - 1u)];
+            tx_payload[1] = 0xA1;
+            for (uint8_t i = 0; i < 8; i++) {
+                tx_payload[2 + i] = head[i];
+            }
+            tx_len = 10;
+            if (head[0]|head[1]|head[2]|head[3]|head[4]|head[5]|head[6]|head[7]) {
+                sel_down = 1;
+            }
+        } else {
+            tx_len = 1;
         }
-        tx_len = 10;
-        hid_resend--;
+        rf_irq_restore(irq);
+    }
+    if (tx_len == 10) {
         RF_DIAG_INC(ll_hid_tx);
-    } else {
-        tx_len = 1;
+        if (sel_down) { RF_DIAG_INC(ll_hid_tx_down); }
     }
     RF_DIAG_SET(last_rf_op, 3);
     RF_Shut();
@@ -1088,6 +1151,15 @@ static void rf_do_response_tx(void)
 #endif
     uint8_t tx_status = RF_Tx(tx_payload, tx_len, 0xFF, 0xFF);
     RF_DIAG_SET(rf_last_tx_status, tx_status);
+    if (tx_status == 0 && tx_len == 10) {
+        /* Only a STARTED transmission makes this head eligible for ack-retire.
+         * Not cleared on failure: an earlier successful send of the same head
+         * keeps its eligibility (codex). */
+        hid_head_sent = 1;
+        if (sel_down) {
+            hid_tx_down_inflight = 1;   /* TX started; TX_FINISH counts it as on-air */
+        }
+    }
     RF_DIAG_INC(rf_connected_tx_count);
     if (tx_status != 0) {
         /* TX did not start -> no TX_FINISH will come; don't block the hop. */
@@ -1197,7 +1269,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 #if KBD_REST
     if (events & RF_EVT_REST_IDLE) {
         if (rf_state == RF_STATE_CONNECTED && !rest_probe) {
-            if (hid_resend == 0u && !response_pending) {
+            if (hid_fifo_tail == hid_fifo_head && !response_pending) {
                 rest_enter();
             } else {
                 rf_start_task_atomic(RF_EVT_REST_IDLE, KBD_REST_IDLE_RETRY_TICKS);
@@ -1262,6 +1334,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 #endif
             rf_tmr0_stop();
             response_pending = 0;
+            hid_head_sent = 0;   /* nothing is in flight across a teardown (codex) */
             bond_save_pending = 0;
             rf_state = RF_STATE_IDLE;
             RF_Shut();
@@ -1424,6 +1497,12 @@ static void rf_enter_connected(void)
     rf_conn_interval = pending_interval;
     prev_data_idx = (uint8_t)((stored_type_tag + STOCK_CONNECT_IDX_BIAS) % NUM_DATA_CHANNELS);
     tx_ctrl = 0x02;
+    /* New session: the control phase restarts, so no queued entry has been
+     * transmitted under it yet. Keep the QUEUE (that is the whole point of the
+     * fix -- a report queued while the link was down must survive), but drop
+     * transmission eligibility so the first accepted poll of the new session
+     * cannot retire an entry the peer never received (codex). */
+    hid_head_sent = 0;
     hop_anchor = pending_anchor;   /* seeded at the 2nd 15-byte (rx-13) */
     since_rx = 0;
     response_pending = 0;
@@ -1701,7 +1780,10 @@ void RF_TaskInit(void)
 #else
     (void)rf_load_bond_from_flash();
 #endif
-    tmos_memset(hid_report, 0, sizeof(hid_report));
+    tmos_memset(hid_fifo, 0, sizeof(hid_fifo));
+    hid_fifo_head = 0; hid_fifo_tail = 0; hid_head_sent = 0;
+    tmos_memset(hid_last_queued, 0, sizeof(hid_last_queued));
+    hid_last_queued_valid = 0;
     if (has_bond && keyboard_mac_valid) {
         rf_state = RF_STATE_PAIRING;
         pair_flavor = PAIR_FLAVOR_BONDED;
@@ -1986,22 +2068,54 @@ uint8_t RF_IdentityValid(void)
 void RF_QueueHIDReport(const uint8_t report[8])
 {
     RF_DIAG_INC(ll_hid_rx);
-    uint8_t changed = 0;
+    uint8_t changed = !hid_last_queued_valid;
     for (uint8_t i = 0; i < 8; i++) {
-        if (hid_report[i] != report[i]) {
+        if (hid_last_queued[i] != report[i]) {
             changed = 1;
         }
-        hid_report[i] = report[i];
     }
-    /* A new report (key event) must be delivered as LEN=10. Resend it on the
-     * next few polls so a dropped slot doesn't lose a key-down or key-up. */
+    if (report[0]|report[1]|report[2]|report[3]|report[4]|report[5]|report[6]|report[7]) {
+        RF_DIAG_INC(ll_hid_rx_down);
+    }
+    /* Enqueue every TRANSITION. Dedup only against the newest QUEUED state, so
+     * down -> up -> same-down is preserved; an unchanged repeat adds nothing the
+     * host does not already have. The entry is retired only by the dongle's ack,
+     * so a key-down queued while the link is down survives the reconnect gap
+     * instead of being overwritten by its own key-up. */
     if (changed) {
-        hid_resend = HID_RESEND_COUNT;
+        if ((uint8_t)(hid_fifo_tail - hid_fifo_head) < HID_FIFO_SLOTS) {
+            uint8_t *slot = hid_fifo[hid_fifo_tail & (HID_FIFO_SLOTS - 1u)];
+            for (uint8_t i = 0; i < 8; i++) {
+                slot[i] = report[i];
+            }
+            __sync_synchronize();       /* payload stores complete BEFORE publishing */
+            hid_fifo_tail++;
+            for (uint8_t i = 0; i < 8; i++) {
+                hid_last_queued[i] = report[i];
+            }
+            hid_last_queued_valid = 1;
+        } else {
+            /* Full: coalesce onto the NEWEST queued entry instead of discarding
+             * this report. Dropping it outright can strand a key forever -- fill
+             * the ring while a key is held, drop the all-keys-up, and nothing
+             * ever retries the release because the MCU only sends changes
+             * (codex). Overwriting the newest sacrifices one intermediate
+             * transition but guarantees the latest physical state is queued.
+             * The newest is never the in-flight head while the ring is full. */
+            uint8_t *slot = hid_fifo[(uint8_t)(hid_fifo_tail - 1u) & (HID_FIFO_SLOTS - 1u)];
+            for (uint8_t i = 0; i < 8; i++) {
+                slot[i] = report[i];
+            }
+            for (uint8_t i = 0; i < 8; i++) {
+                hid_last_queued[i] = report[i];
+            }
+            RF_DIAG_INC(ll_hid_fifo_drop);   /* a transition was coalesced away */
+        }
     }
 #if KBD_REST
     /* The policy defines activity as a VALIDATED host report, not as a changed
      * payload: an unchanged repeat must still restart the inactivity timer and
-     * still wake a resting link. Only hid_resend above is payload-conditional. */
+     * still wake a resting link. Only the FIFO enqueue above is payload-conditional. */
     {
         if (rf_state == RF_STATE_RESTING) {
             /* A key while resting: probe now (any stage) and keep the session. */
