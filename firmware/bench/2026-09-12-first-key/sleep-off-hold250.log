@@ -1,0 +1,11 @@
+sleep-OFF trial  1: idle  97.6s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  2: idle  18.2s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  3: idle  18.2s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  4: idle  18.1s ->  18.2s    LOST      acktmo=0 retries=1 
+sleep-OFF trial  5: idle  18.1s ->  18.2s    LOST      acktmo=0 retries=1 
+sleep-OFF trial  6: idle  18.1s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  7: idle  18.1s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  8: idle  18.2s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF trial  9: idle  18.2s ->  18.2s    LOST      acktmo=0 retries=1 
+sleep-OFF trial 10: idle  18.1s ->   0.0s  DELIVERED   acktmo=0 retries=1 
+sleep-OFF RESULT: 7/10 delivered

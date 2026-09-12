@@ -1,0 +1,11 @@
+ON+1500ms trial  1: idle  89.3s ->  89.4s    LOST      acktmo=0 retries=2 
+ON+1500ms trial  2: idle  16.8s ->   0.0s  DELIVERED   acktmo=0 retries=3 
+ON+1500ms trial  3: idle  16.7s ->   0.0s  DELIVERED   acktmo=0 retries=4 
+ON+1500ms trial  4: idle  16.7s ->   0.0s  DELIVERED   acktmo=0 retries=5 
+ON+1500ms trial  5: idle  16.7s ->   0.0s  DELIVERED   acktmo=0 retries=6 
+ON+1500ms trial  6: idle  16.7s ->  16.8s    LOST      acktmo=0 retries=7 
+ON+1500ms trial  7: idle  16.8s ->   0.0s  DELIVERED   acktmo=0 retries=8 
+ON+1500ms trial  8: idle  16.7s ->  16.8s    LOST      acktmo=0 retries=9 
+ON+1500ms trial  9: idle  16.8s ->  16.8s    LOST      acktmo=0 retries=10 
+ON+1500ms trial 10: idle  16.7s ->  16.8s    LOST      acktmo=0 retries=11 
+ON+1500ms RESULT: 5/10 delivered

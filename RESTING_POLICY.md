@@ -82,7 +82,7 @@ OpenDongle main `23d8509`. The keystroke was checked for arrival AT THE HOST via
 timer, a secondary oracle: it resets on any input and cannot identify the key or prove order. Per-trial
 logs are in the session bench notes, not in this repository:
 
-| configuration | first keys delivered |
+| configuration | trials where the host's HID idle timer reset after the tap |
 |---|---|
 | module deep sleep off, key held 250 ms | 7/10, and 1/6 in a later run |
 | module deep sleep armed, key held 250 ms | **1/10** |
@@ -128,8 +128,9 @@ The `openkeyboard` driver's "Add OpenController UART deep-sleep support" negotia
 negotiates the capability (`autosleep_wanted()` is true unless `OPENCONTROLLER_AUTOSLEEP_DISABLE`),
 sleeps the module explicitly after `OPENCONTROLLER_SLEEP_TIMEOUT_MS` (ten minutes by default, 20 s on
 its bench board) or on the `OC_SLEEP` key, and leads the first frame with a `0x00` preamble and a 5 ms
-gap **only when it believes the module may be asleep**: capability ready, auto-sleep armed, the link
-NOT reported connected, and at least 90 ms of silence (`opencontroller_protocol.c:340-354`). Under
+gap **only when it believes the module may be asleep**: capability ready and either an acknowledged
+explicit sleep, or auto-sleep armed with the link NOT reported connected and at least 90 ms of
+silence (`opencontroller_protocol.c:339-354`). Under
 transparent rest the link still reads CONNECTED, so that driver sends no preamble there and pays the
 same lost-first-byte-and-retry as the stale one. Its bench ledger's line "a tap released before that
 (about 100 ms) is lost" was recorded on 2026-09-04 against explicit sleep, before transparent rest
@@ -145,9 +146,11 @@ rest inhibited while delivery is outstanding -- and the matching ordered bufferi
 advancing on USB transfer completion. Note the UART ACK would then have to become conditional on
 queue admission, so the MCU is not told a report was accepted that was subsequently dropped.
 
-Not yet established: why deep sleep shifts the distribution so sharply. Both mechanisms above are
-latency-sensitive, and the evidence that would separate them is a per-report trace linking UART
-acceptance, TX attempts, peer acknowledgement, dongle admission and USB completion.
+Not established: whether the module's sleep changes the loss rate at all. The sleep-off runs
+themselves ranged from 7/10 to 1/6, so a sleep-dependent effect is suspected, not shown, and its
+attribution to either mechanism is unresolved. The evidence that would settle both is a per-report
+trace linking UART acceptance, TX attempts, peer acknowledgement, dongle admission and USB completion.
+The raw per-trial logs behind the table are in `firmware/bench/2026-09-12-first-key/`.
 
 ## Probe-dwell finding (bench, 2026-09-11)
 
@@ -200,8 +203,9 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    **Caveat found 2026-09-12 (corrected the same day): this is the DONGLE-side rung and it passes.
    The controller's own deep sleep behind it IS reachable: the `openkeyboard/qmk_firmware` driver
    (`em-stm32u073`) arms it by default. The stale `MonacoKeys` tree
-   never did, which is what the first version of this note was looking at. What that sleep costs is
-   the first-key loss recorded under "First key from rest is lost" above.**
+   never did, which is what the first version of this note was looking at. Whether that sleep
+   changes the first-key loss recorded under "First key from rest is lost" above is not yet
+   measured for this driver.**
    Absolute halting current is a separate host-awake proxy (PPK2 can't sample during Mac sleep):
    pull the dongle USB data cable to suspend it while the Mac stays awake (`rest_halt_current.sh`).
    **Measured 2026-09-11: 2.5 mA mean over 30 s, halt floor 0.196 mA between windows -- but that
@@ -388,8 +392,9 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    preamble when it believes the module may be asleep -- which excludes transparent rest, so under
    rest it pays the retried frame measured above just as the stale driver does. `SleepProtocol_Reset`
    leaving `autosleep = 0` still holds on the module side; the MCU re-arms it after every reconnect.
-   What remains true is the cost: with the module asleep, a short tap from rest is lost, which a
-   separate delivery plan under review exists to fix.
+   What remains true is the observed loss: a short tap from rest is often lost, with or without the
+   module's sleep, and whether sleep makes it worse for this driver is unmeasured. A delivery plan is
+   being drafted and reviewed outside this checkout; it is not part of this change.
 
    **Remaining gap: rest removes the MCU's only liveness signal.** With supervision cancelled there
    is no `5B 33`, so a genuinely dead link is invisible to the keyboard. Verified by cutting the

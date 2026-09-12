@@ -1,0 +1,11 @@
+trial  1: host DELIVERED | promotes +1  link_rx +2333
+trial  2: host   LOST    | promotes +1  link_rx +2236
+trial  3: host   LOST    | promotes +1  link_rx +2281
+trial  4: host   LOST    | promotes +2  link_rx +2221
+trial  5: host   LOST    | promotes +1  link_rx +2303
+trial  6: host   LOST    | promotes +1  link_rx +2289
+trial  7: host   LOST    | promotes +1  link_rx +2250
+trial  8: host DELIVERED | promotes +1  link_rx +2313
+trial  9: host DELIVERED | promotes +1  link_rx +2346
+trial 10: host   LOST    | promotes +1  link_rx +2207
+RESULT: 3/10 delivered
