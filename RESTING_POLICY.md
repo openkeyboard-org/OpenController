@@ -66,7 +66,7 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 | D1 | T_idle | **Decided: 5 s (production parity), configurable; may be tuned.** |
 | D2 | T_probe | **Decided: 1010 ms**, jitter <= 15 ms (inside the dongle's 900-1100 window with the 45 ms phase lead). |
 | D3 | Probe dwell | **Decided: target <= 20 ms** promote-to-quiet, measured on the PPK2 raw trace. Production ~10 ms. |
-| D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest, both stages, and the driver sends nothing. See the D4 block below. |
+| D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest, both stages, and the driver puts nothing on the UART while it rests. See the D4 block below. |
 | D5 | Stage 2 | **Decided: include, T_deep = 30 min (production parity).** Built after stage 1 is measured. |
 | D6 | Dongle window period | **Decided: keep 200 ms**; measure the first-key latency (gate 4), revisit if it is noticeable. |
 | D7 | Bench | Move the PPK2 to the controller board's feed for one rung to get the keyboard-side number. |
@@ -222,8 +222,8 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    | `link_state` | `CONNECTED` throughout |
    | `selected_target` | `2G4` throughout |
    | `connection_generation` | unchanged (no second CONNECTED, so no keyboard resync) |
-   | bytes the driver sent during the rest | **0** |
-   | bytes the controller sent during the rest | **0** |
+   | UART bytes the driver sent during the rest | **0** |
+   | UART bytes the controller sent during the rest | **0** |
    | `tx_ack_timeouts` | 0 |
    | key wake | one A1 frame out, ACK back in about 2 ms, no status frames either way |
 
@@ -247,11 +247,14 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
 
    **Stage 2 specifically (controlled, 2026-09-12).** 2100 s of rest under `caffeinate`, so the
    35 min window clears the 30 min stage-2 threshold with margin and the harness is never frozen.
-   The driver sent 0 bytes and the controller sent 0 bytes across the whole window, `link_state`
+   Across the whole window the driver and controller exchanged 0 bytes on the UART, `link_state`
    and `selected_target` never moved, `connection_generation` stayed at 1 and `tx_ack_timeouts`
    stayed at 0 -- across the stage boundary as well as before it. Both key wakes taken after the
    boundary were ordinary: one A1 frame out, ACK back, no reconnect. Stage 2 is invisible to the
-   MCU exactly as stage 1 is, which is the expected result, since both are simply silence. The
+   MCU exactly as stage 1 is, which is the expected result, since both are simply UART silence.
+   Note the scope: "silence" here is the UART between controller and MCU. On air, stage 1 is still
+   probing once a second, and the key wakes carry their own A1 and ACK traffic, measured separately
+   from the rest window. The
    dongle's catch count over the run (+1702 at the measured 0.94 catches/s) accounts for probing
    running to about 1800 s and then stopping, which is the stage-2 entry. No current figure is
    quoted from this run: the meter desynced 4944 times during it, so its numbers were discarded.
