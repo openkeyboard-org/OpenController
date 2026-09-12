@@ -66,7 +66,7 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 | D1 | T_idle | **Decided: 5 s (production parity), configurable; may be tuned.** |
 | D2 | T_probe | **Decided: 1010 ms**, jitter <= 15 ms (inside the dongle's 900-1100 window with the 45 ms phase lead). |
 | D3 | Probe dwell | **Decided: target <= 20 ms** promote-to-quiet, measured on the PPK2 raw trace. Production ~10 ms. |
-| D4 | MCU visibility | **Decided: transparent.** The MCU keeps seeing a connected link. |
+| D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest and the driver sends nothing. See the D4 block below. |
 | D5 | Stage 2 | **Decided: include, T_deep = 30 min (production parity).** Built after stage 1 is measured. |
 | D6 | Dongle window period | **Decided: keep 200 ms**; measure the first-key latency (gate 4), revisit if it is noticeable. |
 | D7 | Bench | Move the PPK2 to the controller board's feed for one rung to get the keyboard-side number. |
@@ -119,6 +119,9 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    controller rested; `bench_autokey_count=1`. Dongle halted throughout: `halts=515, halted 68.2 s,
    avg 132 ms, abandoned=0`, `usb_suspend_episodes +2` -- the R3b halt engages with OUR resting
    keyboard, every halt returned cleanly, and a keystroke from rest wakes the sleeping host.
+   **Caveat found 2026-09-12: this is the DONGLE-side rung and it passes, but the controller's own
+   deep sleep behind it is not reachable by the shipping keyboard firmware, which never arms it.
+   See the D4 block below.**
    Absolute halting current is a separate host-awake proxy (PPK2 can't sample during Mac sleep):
    pull the dongle USB data cable to suspend it while the Mac stays awake (`rest_halt_current.sh`).
    **Measured 2026-09-11: 2.5 mA mean over 30 s, halt floor 0.196 mA between windows -- but that
@@ -205,11 +208,91 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    repeatedly poked the controller out of rest. The earlier 8.47 mA figure is therefore an artefact
    of the stand-in, and 5.74 mA was simply too short a window.
 
-   **Real-product caveat, still open.** The stand-in's auto-pair is bench-only, but the underlying
-   issue is not: QMK's `sync_target()` calls `reconnect_2g4()` whenever `selected_target` reads
-   UNKNOWN, so a keyboard MCU that reacts to the controller's silent rest WILL disrupt it. Design
-   decision D4 (rest is transparent to the MCU) therefore needs the MCU-side driver to hold its
-   link view across a silent rest. Verify on real keyboard firmware before shipping.
+   **D4 VERIFIED against the real MCU driver (2026-09-12). The caveat above is closed.** The
+   MonacoKeys QMK driver (`opencontroller.c` + `opencontroller_protocol.c`) was compiled for the
+   host and run in the loop against the live controller over the probe UART, so the code under test
+   is the shipping driver rather than a stand-in. The only source edit was dropping `static` from
+   `selected_target` so the test could read the link view; driver logic is byte-identical.
+
+   Runs: 300 s, 260 s and one that reached 21 minutes of continuous rest, each followed by key
+   wakes. Every one gave the same result:
+
+   | observable | result |
+   |---|---|
+   | `link_state` | `CONNECTED` throughout |
+   | `selected_target` | `2G4` throughout |
+   | `connection_generation` | unchanged (no second CONNECTED, so no keyboard resync) |
+   | bytes the driver sent during the rest | **0** |
+   | bytes the controller sent during the rest | **0** |
+   | `tx_ack_timeouts` | 0 |
+   | key wake | one A1 frame out, ACK back in about 2 ms, no status frames either way |
+
+   Why it holds, read off the driver source. `link_state` is written only by `handle_status()` from
+   a received `5B` frame, by `ocp_init`, and by `abort_transaction`; there is no RX-silence timeout
+   anywhere in the driver (`expire_partial_frame` only resets a half-received frame). Nothing in
+   `ocp_service` transmits on a timer: it emits only for a pending reply ACK, an in-flight retry, a
+   queued control action, a resync, or a pending host report. `selected_target` becomes
+   `OC_TARGET_UNKNOWN` only at `bluetooth_init()`, at OpenBoot bridge release, on the user's
+   2.4 GHz keycode, on a `force_target()` queue failure, and on `ocp_take_tx_failure()`. That last
+   one is the only silence-adjacent path and it needs an outbound frame to go unacknowledged three
+   times at 20 ms -- during a quiet rest the driver sends nothing, so no transaction is ever in
+   flight. With `selected_target == 2G4` and the desired target also 2G4, `sync_target()` returns
+   through `select_target(target, false)`'s equality early-out and queues nothing.
+
+   The controller half is silent by construction: `rest_go_quiet()` cancels `RF_EVT_DISCONNECT`
+   before the radio goes down, so the 3.1 s supervision timeout can never emit a `5B 33`; a silent
+   probe returns from `rf_enter_connected()` before the status emit, and a key-woken probe promotes
+   via `rest_promote_to_normal()`, which returns before it too. The MCU therefore never sees a
+   disconnect and never sees a second connect.
+
+   One run went much further than planned: the Mac slept mid-test and the controller rested for
+   8.5 hours, well past the 30 min stage-2 threshold. The driver still read `CONNECTED` / `2G4` /
+   generation 1 with zero ACK timeouts when the host came back, so the view survives stage 2 as
+   well. The keystroke issued in the first 30 ms after resume was the one abort seen anywhere in
+   this work: three attempts went unacknowledged and then all three ACKs arrived late, counted as
+   `rx_spurious_acks`. Late ACKs are the signature of the host's serial stack delivering buffered
+   bytes after a long sleep, not of a sleeping controller, and the deliberate deep-sleep test below
+   backs that up. The driver recovered by itself in about a second via `reconnect_2g4()` and the
+   link came straight back. Stage 2 has not been re-run under controlled conditions.
+
+   This also confirms the stand-in diagnosis directly. The Nucleo, left running with its UART moved
+   to the probe, sits in exactly the predicted failure state: `selected_target=UNKNOWN`,
+   `link_state=DISCONNECTED`, `reselect_deferred=1` and `tx_ack_timeouts=52504`. That is what an MCU
+   receiving no ACKs looks like, and it is not what an MCU facing a resting controller looks like.
+
+   Sustained current re-confirmed on the same runs: **5.998 mA over a clean 190 s window** with no
+   session start and no keystroke inside it, against the 5.96 mA of record. A 290 s window opened
+   3 s after a connect read 6.84 mA purely because the dongle's detector was still settling, which
+   is worth remembering when choosing where a measurement window starts.
+
+   **The controller's own deep sleep costs exactly one retransmitted frame, and the driver absorbs
+   it.** Measured by arming auto-sleep out of band (`A6 56` then `A6 57`, which the QMK driver
+   cannot do) and then running the real driver against it: every key wake took two A1 frames 20 ms
+   apart instead of one, with `tx_ack_timeouts` still 0 and no reconnect, 4/4. That is the
+   documented lost-waking-byte contract -- the CH592 has no UART wake source, so the first byte is
+   consumed waking the part -- and the driver's three-attempt, 20 ms budget covers it with two
+   attempts to spare. A single frame sent alone is simply lost: bare `A1` after 60 s quiet gets no
+   ACK at all, and so does a `0x00` preamble followed by a 300 ms gap, because the controller
+   re-sleeps in between. A preamble followed by the frame within 5 to 60 ms works every time. So the
+   retry, not a preamble, is what makes this safe.
+
+   **Consequence: the "host asleep" rung is not reachable by the product as it stands.** The
+   shipping QMK driver's whole command vocabulary is `A6 11`, `A6 30`, `A6 51`, `A6 52`, `A6 81` and
+   `A1` reports. It never sends `A6 56`/`A6 57`, and `SleepProtocol_Reset` leaves `autosleep = 0`,
+   so `PowerSleep_Idle` returns 3 ("not armed") forever and the controller never deep-sleeps. Rest
+   still works, because rest is RF-side. Closing the gap is a two-frame MCU-side change, and the
+   measurement above says the wake cost of making it is one retransmitted keystroke frame.
+
+   **Remaining gap: rest removes the MCU's only liveness signal.** With supervision cancelled there
+   is no `5B 33`, so a genuinely dead link is invisible to the keyboard. Verified by cutting the
+   dongle's power at the PPK2 series switch and then pressing a key: the controller ACKed the A1 in
+   2.0 ms, so the MCU had every reason to believe the keystroke went out, and no status frame ever
+   said otherwise. The link resumed by itself once the dongle was powered again. Note also that a
+   key-woken probe sets `rest_probe_wake`, and the `RF_EVT_REST_PROBE_TIMEOUT` handler then re-arms
+   itself indefinitely while `rest_probe_start()` has stopped the normal 5.3 s `RF_EVT_PAIR_TIMEOUT`
+   give-up, so the search after a key has no bound in code. That is what gets the keystroke
+   delivered, but it deserves a bound and a `5B 33` on give-up so a keyboard out of range does not
+   beacon forever.
 
    **CLEAN ASLEEP RE-MEASURE (2026-09-11, quiet UART master, 120 s):** **2.593 mA**, halt floor
    0.197 mA (p05/p50 both 0.198). Essentially identical to the earlier 2.55 mA, so unlike the awake
