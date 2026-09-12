@@ -71,6 +71,61 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 | D6 | Dongle window period | **Decided: keep 200 ms**; measure the first-key latency (gate 4), revisit if it is noticeable. |
 | D7 | Bench | Move the PPK2 to the controller board's feed for one rung to get the keyboard-side number. |
 
+## First key from rest is lost (bench, 2026-09-12) -- OPEN DEFECT
+
+Gate 4 was never run until now. It fails, and it failed before any of the deep-sleep work: the
+first keystroke after the link has gone to rest is often never delivered to the host.
+
+Measured on the real stand-in MCU running the real QMK driver, with the keystroke checked for
+arrival AT THE HOST (macOS HID idle timer resets on any input) rather than on the wire:
+
+| configuration | first keys delivered |
+|---|---|
+| module deep sleep off, key held 250 ms | 7/10, and 1/6 in a later run |
+| module deep sleep armed, key held 250 ms | **1/10** |
+| module deep sleep armed, key held 1500 ms | 5/10 |
+
+Every one of those runs reported zero UART ACK timeouts, zero checksum errors, no reconnect, and a
+link reporting CONNECTED throughout. **Nothing on either side counts the loss.**
+
+The link is not the problem. On each lost keystroke the dongle still promoted a session and
+answered about 2280 polls on it -- indistinguishable from the delivered ones. The session comes
+back fine; the keystroke is simply not carried in it.
+
+Two mechanisms in this firmware, both proven in code (second one found by a Codex review):
+
+1. **Attempt-based retirement.** `rf_do_response_tx()` decrements `hid_resend` *before* calling
+   `RF_Tx()` (`rf_task.c:1061`), and in `LLE_MODE_BASIC` a local TX completion is not a reception.
+   Six attempts are about 5 ms at poll cadence, after which the controller sends only a keepalive
+   and the press is gone while the link stays healthy. Holding the key longer adds no retries:
+   `hid_resend` is only reloaded for a *changed* payload (`rf_task.c:1980`), so a repeat of the
+   same report does not re-arm it.
+2. **Single-slot overwrite.** `hid_report[8]` (`rf_task.c:1978`) is overwritten by every report
+   regardless of whether the previous one was ever transmitted. A 50 ms press whose release lands
+   during a 100 ms reconnect leaves only the release to send. HID reports carry state, but keeping
+   only the newest state does not keep a transition the host never saw. The UART ACK is no
+   protection: `keyboard_uart.c:246` acknowledges the frame *before* the callback queues it.
+
+A third, in OpenDongle: its RF-to-USB handoff is also a single slot and `USB_SendKeyboard()`
+overwrites EP1 without checking that the previous report was consumed, so a fixed controller queue
+could still collapse a press/release pair at the dongle.
+
+**Consequence for the module's own deep sleep.** It is implemented (MCU sends `A6 56` then
+`A6 57`) and it works at the protocol level, costing exactly one retransmitted frame per wake. It
+is nevertheless **defaulted OFF**, because the extra wake latency turns an occasional loss into the
+normal case: 1/10. It must stay off until the above is fixed.
+
+**The fix is a design change, not a tuning knob.** Raising the retry count or holding keys longer
+is probabilistic. What is needed is an ordered report queue with an immutable in-flight entry,
+retired only on evidence that *that* report reached the peer, preserved across a reconnect, with
+rest inhibited while delivery is outstanding -- and the matching ordered buffering in the dongle,
+advancing on USB transfer completion. Note the UART ACK would then have to become conditional on
+queue admission, so the MCU is not told a report was accepted that was subsequently dropped.
+
+Not yet established: why deep sleep shifts the distribution so sharply. Both mechanisms above are
+latency-sensitive, and the evidence that would separate them is a per-report trace linking UART
+acceptance, TX attempts, peer acknowledgement, dongle admission and USB completion.
+
 ## Probe-dwell finding (bench, 2026-09-11)
 
 Measured on the PPK2 (dongle 3V3 feed, host awake), first working build:
@@ -326,4 +381,6 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    first-key latency) and its ~125 ms radio-on reaction to catching a probe. R3b's 1.35 mA was a
    manual inline meter; it is not reproducible on the PPK2 and should be treated as meter error.
 4. First key from rest: latency <= 220 ms (mark on the tap, HID tickle on the host), no lost key.
+   **FAILED, measured 2026-09-12 -- see "First key from rest is lost" below. This gate had never
+   been run, and it does not pass.**
 5. Controller-side current between probes (after D7): deep sleep confirmed by the PPK2 trace.
