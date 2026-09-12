@@ -375,6 +375,13 @@ volatile uint32_t pwr_pair_rx_off_count __attribute__((section(".diag_safe.power
 volatile uint32_t rest_entries, rest_probes, rest_probe_catches, rest_probe_misses;
 volatile uint32_t rest_key_wakes, rest_stage2_entries;
 #endif
+/* Report-delivery observability (report-delivery step 1). Plain .bss, read by
+ * symbol over SWD post-run (SWD resets the controller and drops the link, so
+ * never mid-test): ll_hid_rx counts host reports handed to the RF layer over
+ * UART; ll_hid_tx counts LEN-10 HID frames actually put on air (>= rx because
+ * of the 6x resend). A key the MCU offered with ll_hid_tx advanced but no host
+ * delivery localises the loss downstream of the controller. */
+volatile uint32_t ll_hid_rx, ll_hid_tx;
 volatile uint8_t rf_last_config_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_rx_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_tx_status __attribute__((section(".diag_safe")));
@@ -1066,6 +1073,7 @@ static void rf_do_response_tx(void)
         }
         tx_len = 10;
         hid_resend--;
+        RF_DIAG_INC(ll_hid_tx);
     } else {
         tx_len = 1;
     }
@@ -1977,6 +1985,7 @@ uint8_t RF_IdentityValid(void)
 
 void RF_QueueHIDReport(const uint8_t report[8])
 {
+    RF_DIAG_INC(ll_hid_rx);
     uint8_t changed = 0;
     for (uint8_t i = 0; i < 8; i++) {
         if (hid_report[i] != report[i]) {
