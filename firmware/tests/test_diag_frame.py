@@ -4,13 +4,14 @@ from pathlib import Path
 import pytest
 
 FW = Path(__file__).resolve().parent.parent
-PAYLOAD_LEN, HEADER = 65, 0x5D
-FMT = "<BBIIIIIIIHHHHHBBBBIBBIIIHB"     # matches diag_frame.h v2 layout
+PAYLOAD_LEN, HEADER = 85, 0x5D
+FMT = "<BBIIIIIIIHHHHHBBBBIBBIIIHBIIIII"     # matches diag_frame.h v3 layout
 FIELDS = ["version","rf_state","ll_boot_count","rf_pair_bcast_count","rf_valid_rx_count",
           "entered_connected_count","rf_config_count","pwr_pair_rx_off_count","pwr_wfi_count",
           "pwr_sleep_attempt","pwr_sleep_entered","pwr_sleep_aborted","pwr_wake_gpio","pwr_wake_rtc",
           "pwr_last_abort_reason","rf_last_config_status","rf_last_rx_status","rf_last_tx_status",
-          "ll_drop_count","boot_reset_status","fault_marker","fault_mepc","fault_mcause","fault_mtval","pwr_loop_passes","pwr_loop_stage"]
+          "ll_drop_count","boot_reset_status","fault_marker","fault_mepc","fault_mcause","fault_mtval","pwr_loop_passes","pwr_loop_stage",
+          "ll_hid_rx","ll_hid_tx","ll_hid_rx_down","ll_hid_tx_down","ll_hid_tx_done_down"]
 
 class Snap(ctypes.Structure):
     _fields_ = [("rf_state", ctypes.c_uint8),
@@ -26,7 +27,10 @@ class Snap(ctypes.Structure):
                 ("ll_drop_count", ctypes.c_uint32),
                 ("boot_reset_status", ctypes.c_uint8), ("fault_marker", ctypes.c_uint8),
                 ("fault_mepc", ctypes.c_uint32), ("fault_mcause", ctypes.c_uint32), ("fault_mtval", ctypes.c_uint32),
-                ("pwr_loop_passes", ctypes.c_uint16), ("pwr_loop_stage", ctypes.c_uint8)]
+                ("pwr_loop_passes", ctypes.c_uint16), ("pwr_loop_stage", ctypes.c_uint8),
+                ("ll_hid_rx", ctypes.c_uint32), ("ll_hid_tx", ctypes.c_uint32),
+                ("ll_hid_rx_down", ctypes.c_uint32), ("ll_hid_tx_down", ctypes.c_uint32),
+                ("ll_hid_tx_done_down", ctypes.c_uint32)]
 
 @pytest.fixture(scope="module")
 def lib(tmp_path_factory):
@@ -52,9 +56,9 @@ def test_layout_and_checksum(lib):
     for idx, name in enumerate(FIELDS):
         w = {"B": 0xFF, "H": 0xFFFF, "I": 0xFFFFFFFF}[FMT[1 + idx]]
         vals[name] = (idx * 0x01010101 + 0x0F) & w
-    vals["version"] = 2
+    vals["version"] = 3
     snap = Snap(**{k: v for k, v in vals.items() if k != "version"})
-    buf = ctypes.create_string_buffer(80)
+    buf = ctypes.create_string_buffer(96)
     n = lib.DiagFrame_Format(buf, ctypes.byref(snap))
     assert n == PAYLOAD_LEN + 3
     assert decode(buf.raw[:n]) == vals
@@ -66,7 +70,7 @@ def test_empty_frame(lib):
 
 def test_checksum_covers_header_and_len(lib):
     snap = Snap()   # all zero
-    buf = ctypes.create_string_buffer(80)
+    buf = ctypes.create_string_buffer(96)
     n = lib.DiagFrame_Format(buf, ctypes.byref(snap))
     f = buf.raw[:n]
-    assert f[-1] == (0x5D + PAYLOAD_LEN + 2) & 0xFF   # version=2 is the only nonzero payload byte
+    assert f[-1] == (0x5D + PAYLOAD_LEN + 3) & 0xFF   # version=3 is the only nonzero payload byte

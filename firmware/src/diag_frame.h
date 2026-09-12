@@ -8,7 +8,10 @@
  *              bytes (5D, len, payload) & 0xFF. len == 0 => refused (CONNECTED).
  *   A6 72 18   host: zero the dumped counters (ll_boot_count kept)
  *
- * Payload v2, little-endian, fixed order (DIAG_PAYLOAD_LEN bytes):
+ * Payload v3, little-endian, fixed order (DIAG_PAYLOAD_LEN bytes). A strict v2
+ * reader must be updated: the length grew 65 -> 85 and the version byte is now 3;
+ * all pre-existing field offsets are unchanged.
+ * Layout:
  *   u8  version(=2)  u8 rf_state
  *   u32 ll_boot_count  u32 rf_pair_bcast_count  u32 rf_valid_rx_count
  *   u32 entered_connected_count  u32 rf_config_count  u32 pwr_pair_rx_off_count
@@ -26,6 +29,9 @@
  *   u32 fault_mepc  u32 fault_mcause  u32 fault_mtval
  *   u16 pwr_loop_passes    main-loop passes (liveness; frozen after a WWDG boot)
  *   u8  pwr_loop_stage     last stage reached (forensics build; 0 otherwise)
+ *   -- v3 additions (report-delivery observability) --
+ *   u32 ll_hid_rx  u32 ll_hid_tx  u32 ll_hid_rx_down  u32 ll_hid_tx_down
+ *   u32 ll_hid_tx_done_down
  */
 #ifndef DIAG_FRAME_H
 #define DIAG_FRAME_H
@@ -34,8 +40,8 @@
 #define DIAG_SUB_DUMP        0x71u
 #define DIAG_SUB_ZERO        0x72u
 #define DIAG_FRAME_HEADER    0x5Du
-#define DIAG_PAYLOAD_VERSION 2u
-#define DIAG_PAYLOAD_LEN     65u
+#define DIAG_PAYLOAD_VERSION 3u
+#define DIAG_PAYLOAD_LEN     85u   /* v3: +5 u32 ll_hid_* report-delivery counters */
 #define DIAG_FRAME_MAX       (DIAG_PAYLOAD_LEN + 3u)   /* hdr + len + payload + chk */
 
 typedef struct {
@@ -52,6 +58,10 @@ typedef struct {
     uint32_t fault_mepc, fault_mcause, fault_mtval;
     uint16_t pwr_loop_passes;
     uint8_t  pwr_loop_stage;
+    /* v3 report-delivery counters (rf_task.c, plain .bss): rx/tx = all HID reports
+     * queued from UART / LEN-10 frames selected; *_down = non-zero (key-down) only;
+     * tx_done_down = key-down frames that COMPLETED on air (TX_FINISH). */
+    uint32_t ll_hid_rx, ll_hid_tx, ll_hid_rx_down, ll_hid_tx_down, ll_hid_tx_done_down;
 } diag_snapshot_t;
 
 /* Serialise `snap` into `out` (>= DIAG_FRAME_MAX bytes). Returns frame length. */

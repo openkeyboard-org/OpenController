@@ -54,5 +54,10 @@ uint8_t DiagFrame_Format(uint8_t *out, const diag_snapshot_t *s)
     p = put32(p, s->fault_mtval);
     p = put16(p, s->pwr_loop_passes);
     p = put8(p, s->pwr_loop_stage);
+    p = put32(p, s->ll_hid_rx);
+    p = put32(p, s->ll_hid_tx);
+    p = put32(p, s->ll_hid_rx_down);
+    p = put32(p, s->ll_hid_tx_down);
+    p = put32(p, s->ll_hid_tx_done_down);
     return finish(out, p);
 }
