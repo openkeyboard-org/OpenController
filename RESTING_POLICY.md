@@ -73,11 +73,14 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 
 ## First key from rest is lost (bench, 2026-09-12) -- OPEN DEFECT
 
-Gate 4 was never run until now. It fails, and it failed before any of the deep-sleep work: the
+Gate 4 was never run until now. It fails, and it fails with the module's sleep disabled as well: the
 first keystroke after the link has gone to rest is often never delivered to the host.
 
-Measured on the real stand-in MCU running the real QMK driver, with the keystroke checked for
-arrival AT THE HOST (macOS HID idle timer resets on any input) rather than on the wire:
+Measured on the Nucleo stand-in built from `MonacoKeys-qmk_firmware` `99582b6bc2` plus an
+uncommitted arming patch that sent no wake preamble, against OpenController main `8a3e0c2` and
+OpenDongle main `23d8509`. The keystroke was checked for arrival AT THE HOST via the macOS HID idle
+timer, a secondary oracle: it resets on any input and cannot identify the key or prove order. Per-trial
+logs are in the session bench notes, not in this repository:
 
 | configuration | first keys delivered |
 |---|---|
@@ -88,42 +91,52 @@ arrival AT THE HOST (macOS HID idle timer resets on any input) rather than on th
 Every one of those runs reported zero UART ACK timeouts, zero checksum errors, no reconnect, and a
 link reporting CONNECTED throughout. **Nothing on either side counts the loss.**
 
-The link is not the problem. On each lost keystroke the dongle still promoted a session and
-answered about 2280 polls on it -- indistinguishable from the delivered ones. The session comes
-back fine; the keystroke is simply not carried in it.
+A failed reconnect is not the explanation. On each lost keystroke the dongle still promoted a
+session and the controller answered about 2280 of its polls -- indistinguishable from the delivered
+ones. That rules out the session not coming back; it does not show where the report's own frames
+were lost.
 
 Two mechanisms in this firmware, both proven in code (second one found by a Codex review):
 
 1. **Attempt-based retirement.** `rf_do_response_tx()` decrements `hid_resend` *before* calling
-   `RF_Tx()` (`rf_task.c:1061`), and in `LLE_MODE_BASIC` a local TX completion is not a reception.
+   `RF_Tx()` (`rf_task.c:1068`; the `RF_Tx()` call is `:1081`), and in `LLE_MODE_BASIC` a local TX completion is not a reception.
    Six attempts are about 5 ms at poll cadence, after which the controller sends only a keepalive
    and the press is gone while the link stays healthy. Holding the key longer adds no retries:
-   `hid_resend` is only reloaded for a *changed* payload (`rf_task.c:1980`), so a repeat of the
+   `hid_resend` is only reloaded for a *changed* payload (`rf_task.c:1989`), so a repeat of the
    same report does not re-arm it.
-2. **Single-slot overwrite.** `hid_report[8]` (`rf_task.c:1978`) is overwritten by every report
+2. **Single-slot overwrite.** `hid_report[8]` (`rf_task.c:291`, overwritten at `:1985`) is overwritten by every report
    regardless of whether the previous one was ever transmitted. A 50 ms press whose release lands
    during a 100 ms reconnect leaves only the release to send. HID reports carry state, but keeping
    only the newest state does not keep a transition the host never saw. The UART ACK is no
-   protection: `keyboard_uart.c:246` acknowledges the frame *before* the callback queues it.
+   protection: `keyboard_uart.c:247` acknowledges the frame *before* the callback at `:249` queues it.
 
 A third, in OpenDongle: its RF-to-USB handoff is also a single slot and `USB_SendKeyboard()`
 overwrites EP1 without checking that the previous report was consumed, so a fixed controller queue
 could still collapse a press/release pair at the dongle.
 
-**Consequence for the module's own deep sleep (corrected 2026-09-12).** There are two keyboard
-MCU driver trees, and the earlier version of this paragraph was written against the stale one.
-`MonacoKeys-qmk_firmware` (branch `MK65MX_WIRELESS`, last driver change 2026-08-11) never arms the
-module's sleep; the bench stand-in was built from it, and the 1/10 above was measured with a naive
-arming added to it that sent no wake preamble. The authoritative tree is `openkeyboard/qmk_firmware`,
-branch `em-stm32u073`: its 2026-09-04 commit "Add OpenController UART deep-sleep support" negotiates
-`A6 56` -> `5B 37 92`, **arms auto-sleep by default** (`autosleep_wanted()` is true unless
-`OPENCONTROLLER_AUTOSLEEP_DISABLE`), sleeps the module explicitly after `OPENCONTROLLER_SLEEP_TIMEOUT_MS`
-(ten minutes) or on the `OC_SLEEP` key, and leads the first frame after any silence with a `0x00`
-preamble and a 5 ms gap. So deep sleep is LIVE for anything built from that tree, and this loss is
-exposed there today. Its own validation ledger (`keyboards/handwired/opencontroller_bench/readme.md`)
-already records it in one line: "a tap released before that (about 100 ms) is lost". The exact
-delivery rate under that driver has not yet been measured on its bench; the 1/10 figure is for the
-stale driver without a preamble and should not be quoted for the shipping one.
+**Consequence for the module's own deep sleep (corrected 2026-09-12, twice).** There are two
+keyboard MCU driver trees. They diverged on 2026-08-11 at `99582b6bc2`; since then
+`openkeyboard/qmk_firmware` (branch `em-stm32u073`) has the only two commits touching the driver,
+both from 2026-09-04, while `MonacoKeys-qmk_firmware` (branch `MK65MX_WIRELESS`) has forty commits of
+its own that touch the driver directory only through one documentation commit. Neither descends from
+the other, and which one ships is not recorded here. The bench stand-in was built from the
+MonacoKeys tree, whose driver never arms the module's sleep; the 1/10 above was measured with a naive
+arming added to it that sent no wake preamble, and must not be quoted for the other tree.
+
+The `openkeyboard` driver's "Add OpenController UART deep-sleep support" negotiates `A6 56` ->
+`5B 37 92`, **arms auto-sleep by default** on any build with `OPENCONTROLLER_ENABLE` whose module
+negotiates the capability (`autosleep_wanted()` is true unless `OPENCONTROLLER_AUTOSLEEP_DISABLE`),
+sleeps the module explicitly after `OPENCONTROLLER_SLEEP_TIMEOUT_MS` (ten minutes by default, 20 s on
+its bench board) or on the `OC_SLEEP` key, and leads the first frame with a `0x00` preamble and a 5 ms
+gap **only when it believes the module may be asleep**: capability ready, auto-sleep armed, the link
+NOT reported connected, and at least 90 ms of silence (`opencontroller_protocol.c:340-354`). Under
+transparent rest the link still reads CONNECTED, so that driver sends no preamble there and pays the
+same lost-first-byte-and-retry as the stale one. Its bench ledger's line "a tap released before that
+(about 100 ms) is lost" was recorded on 2026-09-04 against explicit sleep, before transparent rest
+existed; on that path the driver marks the link DISCONNECTED, withholds reports until CONNECTED and
+keeps one pending state (`opencontroller_protocol.c:624`, `:683`), so the tap is lost on the MCU side.
+That is a second, independently recorded loss path, not corroboration of the controller mechanism,
+and it needs fixing too.
 
 **The fix is a design change, not a tuning knob.** Raising the retry count or holding keys longer
 is probabilistic. What is needed is an ordered report queue with an immutable in-flight entry,
@@ -185,8 +198,8 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    avg 132 ms, abandoned=0`, `usb_suspend_episodes +2` -- the R3b halt engages with OUR resting
    keyboard, every halt returned cleanly, and a keystroke from rest wakes the sleeping host.
    **Caveat found 2026-09-12 (corrected the same day): this is the DONGLE-side rung and it passes.
-   The controller's own deep sleep behind it IS reachable: the authoritative keyboard firmware
-   (`openkeyboard/qmk_firmware`, `em-stm32u073`) arms it by default. The stale `MonacoKeys` tree
+   The controller's own deep sleep behind it IS reachable: the `openkeyboard/qmk_firmware` driver
+   (`em-stm32u073`) arms it by default. The stale `MonacoKeys` tree
    never did, which is what the first version of this note was looking at. What that sleep costs is
    the first-key loss recorded under "First key from rest is lost" above.**
    Absolute halting current is a separate host-awake proxy (PPK2 can't sample during Mac sleep):
@@ -357,25 +370,26 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
 
    **The controller's own deep sleep costs exactly one retransmitted frame, and the driver absorbs
    it.** Measured by arming auto-sleep out of band (`A6 56` then `A6 57`, which the stale
-   `MonacoKeys` driver could not do; the authoritative tree does, and adds a wake preamble) and then
-   running that stale driver against it: every key wake took two A1 frames 20 ms
+   `MonacoKeys` driver could not do; the `openkeyboard` tree does, and adds a wake preamble outside
+   transparent rest) and then running that stale driver against it: every key wake took two A1 frames 20 ms
    apart instead of one, with `tx_ack_timeouts` still 0 and no reconnect, 4/4. That is the
    documented lost-waking-byte contract -- the CH592 has no UART wake source, so the first byte is
-   consumed waking the part -- and the driver's three-attempt, 20 ms budget covers it with two
-   attempts to spare. A single frame sent alone is simply lost: bare `A1` after 60 s quiet gets no
+   consumed waking the part -- and the driver's three-attempt, 20 ms budget covers it with one
+   attempt to spare. A single frame sent alone is simply lost: bare `A1` after 60 s quiet gets no
    ACK at all, and so does a `0x00` preamble followed by a 300 ms gap, because the controller
-   re-sleeps in between. A preamble followed by the frame within 5 to 60 ms works every time. So the
-   retry, not a preamble, is what makes this safe.
+   re-sleeps in between. A preamble followed by the frame within 5 to 60 ms worked in every trial. Under transparent rest
+   no driver sends a preamble, because the link still reads CONNECTED, so there it is the retry that
+   carries the frame.
 
-   **Correction (2026-09-12): the "host asleep" rung IS reachable by the product.** The vocabulary
-   above (`A6 11`, `A6 30`, `A6 51`, `A6 52`, `A6 81`, `A1`) is the stale `MonacoKeys-qmk_firmware`
-   driver's. The authoritative `openkeyboard/qmk_firmware` driver (`em-stm32u073`, 2026-09-04)
-   sends `A6 56`/`A6 57` on every link-up, defaults auto-sleep on, adds `A6 54` after ten idle
-   minutes, and sends the `0x00` wake preamble the protocol contract asks for, so it does not even
-   pay the retransmitted frame measured above. `SleepProtocol_Reset` leaving `autosleep = 0` still
-   holds on the module side; the MCU re-arms it after every reconnect. What remains true is the
-   cost: with the module asleep, a short tap from rest is lost, which that tree's own bench ledger
-   records and which the plan in `REPORT_DELIVERY.md` exists to fix.
+   **Correction (2026-09-12): the "host asleep" rung IS reachable.** The vocabulary above (`A6 11`,
+   `A6 30`, `A6 51`, `A6 52`, `A6 81`, `A1`) is the `MonacoKeys-qmk_firmware` driver's. The
+   `openkeyboard/qmk_firmware` driver (`em-stm32u073`, 2026-09-04) sends `A6 56`/`A6 57` on every
+   link-up, defaults auto-sleep on, adds `A6 54` after ten idle minutes, and sends the `0x00` wake
+   preamble when it believes the module may be asleep -- which excludes transparent rest, so under
+   rest it pays the retried frame measured above just as the stale driver does. `SleepProtocol_Reset`
+   leaving `autosleep = 0` still holds on the module side; the MCU re-arms it after every reconnect.
+   What remains true is the cost: with the module asleep, a short tap from rest is lost, which a
+   separate delivery plan under review exists to fix.
 
    **Remaining gap: rest removes the MCU's only liveness signal.** With supervision cancelled there
    is no `5B 33`, so a genuinely dead link is invisible to the keyboard. Verified by cutting the
