@@ -66,7 +66,7 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 | D1 | T_idle | **Decided: 5 s (production parity), configurable; may be tuned.** |
 | D2 | T_probe | **Decided: 1010 ms**, jitter <= 15 ms (inside the dongle's 900-1100 window with the 45 ms phase lead). |
 | D3 | Probe dwell | **Decided: target <= 20 ms** promote-to-quiet, measured on the PPK2 raw trace. Production ~10 ms. |
-| D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest and the driver sends nothing. See the D4 block below. |
+| D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest, both stages, and the driver sends nothing. See the D4 block below. |
 | D5 | Stage 2 | **Decided: include, T_deep = 30 min (production parity).** Built after stage 1 is measured. |
 | D6 | Dongle window period | **Decided: keep 200 ms**; measure the first-key latency (gate 4), revisit if it is noticeable. |
 | D7 | Bench | Move the PPK2 to the controller board's feed for one rung to get the keyboard-side number. |
@@ -214,8 +214,8 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    is the shipping driver rather than a stand-in. The only source edit was dropping `static` from
    `selected_target` so the test could read the link view; driver logic is byte-identical.
 
-   Runs: 300 s, 260 s and one that reached 21 minutes of continuous rest, each followed by key
-   wakes. Every one gave the same result:
+   Runs: 300 s, 260 s, 21 minutes, and a controlled 35 minutes that crosses the stage-2 threshold,
+   each followed by key wakes. Every one gave the same result:
 
    | observable | result |
    |---|---|
@@ -245,15 +245,35 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    via `rest_promote_to_normal()`, which returns before it too. The MCU therefore never sees a
    disconnect and never sees a second connect.
 
-   One run went much further than planned: the Mac slept mid-test and the controller rested for
-   8.5 hours, well past the 30 min stage-2 threshold. The driver still read `CONNECTED` / `2G4` /
-   generation 1 with zero ACK timeouts when the host came back, so the view survives stage 2 as
-   well. The keystroke issued in the first 30 ms after resume was the one abort seen anywhere in
-   this work: three attempts went unacknowledged and then all three ACKs arrived late, counted as
-   `rx_spurious_acks`. Late ACKs are the signature of the host's serial stack delivering buffered
-   bytes after a long sleep, not of a sleeping controller, and the deliberate deep-sleep test below
-   backs that up. The driver recovered by itself in about a second via `reconnect_2g4()` and the
-   link came straight back. Stage 2 has not been re-run under controlled conditions.
+   **Stage 2 specifically (controlled, 2026-09-12).** 2100 s of rest under `caffeinate`, so the
+   35 min window clears the 30 min stage-2 threshold with margin and the harness is never frozen.
+   The driver sent 0 bytes and the controller sent 0 bytes across the whole window, `link_state`
+   and `selected_target` never moved, `connection_generation` stayed at 1 and `tx_ack_timeouts`
+   stayed at 0 -- across the stage boundary as well as before it. Both key wakes taken after the
+   boundary were ordinary: one A1 frame out, ACK back, no reconnect. Stage 2 is invisible to the
+   MCU exactly as stage 1 is, which is the expected result, since both are simply silence. The
+   dongle's catch count over the run (+1702 at the measured 0.94 catches/s) accounts for probing
+   running to about 1800 s and then stopping, which is the stage-2 entry. No current figure is
+   quoted from this run: the meter desynced 4944 times during it, so its numbers were discarded.
+   The 5.998 mA above, taken while the desync counter did not move, remains the figure of record.
+
+   Separately, one earlier run went much further than planned: the Mac slept mid-test, which froze
+   the harness, and the controller was left resting for 8.5 hours. Read that one as long-rest
+   evidence only -- the driver still held `CONNECTED` / `2G4` / generation 1 with zero ACK timeouts
+   when the host came back, so its view survives a silence of that length. It is not the stage-2
+   evidence; the controlled run above is. Auto-sleep was OFF for it, which matters because it rules
+   deep sleep out: four minutes after that run, a `0x00` byte followed by a 300 ms gap and an
+   `A6 30` was answered on the first attempt, which a deep-sleeping controller demonstrably cannot
+   do (the identical sequence failed twice once auto-sleep was armed), and nothing sent in between
+   clears the flag -- the reconnect used `A6 11` and `A6 30`, while only `A6 51`, `A6 52`, `A6 63`
+   and `A6 56` clear it.
+
+   The keystroke issued in the first 30 ms after that resume was the one abort seen anywhere in this
+   work: three attempts went unacknowledged and then all three ACKs arrived late, counted as
+   `rx_spurious_acks`. With deep sleep excluded, late ACKs point at the host's serial stack
+   delivering buffered bytes after a long sleep rather than at the firmware. The driver recovered by
+   itself in about a second via `reconnect_2g4()` and the link came straight back. Wrap long bench
+   runs in `caffeinate`.
 
    This also confirms the stand-in diagnosis directly. The Nucleo, left running with its UART moved
    to the probe, sits in exactly the predicted failure state: `selected_target=UNKNOWN`,
