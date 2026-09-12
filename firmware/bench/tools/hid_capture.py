@@ -50,6 +50,8 @@ from Quartz import (
     kCGEventKeyUp,
     kCGEventFlagsChanged,
     kCGKeyboardEventKeycode,
+    kCGEventTapDisabledByTimeout,
+    kCGEventTapDisabledByUserInput,
 )
 
 # CGEventTapLocation enum -- not exported by name in every pyobjc build.
@@ -76,6 +78,7 @@ class Capture:
         self.out = open(out, "w") if out else None
         self.quiet = quiet
         self.n = 0
+        self.tap = None
 
     def emit(self, ev, keycode, flags):
         if self.keys is not None and keycode not in self.keys:
@@ -92,6 +95,12 @@ class Capture:
 
 def _callback(proxy, etype, event, cap):
     try:
+        if etype in (kCGEventTapDisabledByTimeout, kCGEventTapDisabledByUserInput):
+            # macOS disables a listen tap across system sleep / long stalls; re-arm it.
+            tap = getattr(cap, "tap", None)
+            if tap is not None:
+                CGEventTapEnable(tap, True)
+            return event
         if etype == kCGEventFlagsChanged:
             kc = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode)
             cap.emit("flags", kc, CGEventGetFlags(event))
@@ -117,6 +126,7 @@ def _make_tap(cap):
     src = CFMachPortCreateRunLoopSource(None, tap, 0)
     CFRunLoopAddSource(CFRunLoopGetCurrent(), src, Quartz.kCFRunLoopCommonModes)
     CGEventTapEnable(tap, True)
+    cap.tap = tap   # so the callback can re-enable after a sleep/timeout disable
     return tap
 
 
