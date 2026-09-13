@@ -310,6 +310,14 @@ static volatile uint8_t hid_fifo_tail;      /* main-loop-owned: enqueue */
 static volatile uint8_t hid_head_sent;      /* head is in flight; an ack may retire it */
 static uint8_t hid_last_queued[8];          /* newest queued state (adjacent-duplicate dedup) */
 static uint8_t hid_last_queued_valid;
+
+/* True while the newest host report holds any key or modifier. */
+static inline uint8_t hid_key_held(void)
+{
+    return (uint8_t)(hid_last_queued_valid
+                     && (hid_last_queued[0]|hid_last_queued[1]|hid_last_queued[2]|hid_last_queued[3]
+                        |hid_last_queued[4]|hid_last_queued[5]|hid_last_queued[6]|hid_last_queued[7]));
+}
 static uint8_t tx_payload[10];
 static uint8_t tx_ctrl;
 static uint8_t prev_data_idx;     /* current connected data-channel index */
@@ -1276,7 +1284,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 #if KBD_REST
     if (events & RF_EVT_REST_IDLE) {
         if (rf_state == RF_STATE_CONNECTED && !rest_probe) {
-            if (hid_fifo_tail == hid_fifo_head && !response_pending) {
+            /* A held key produces no reports, so it never restarts this
+             * timer; resting on it would have the dongle release it at the
+             * host (keys-up on the lapse) while the user still holds it --
+             * bench 2026-09-13: a 7 s hold was released at T_idle, auto-repeat
+             * and all. Keep the link while the newest report holds anything;
+             * the release restarts the full T_idle through rest_arm_idle. */
+            if (hid_fifo_tail == hid_fifo_head && !response_pending && !hid_key_held()) {
                 rest_enter();
             } else {
                 rf_start_task_atomic(RF_EVT_REST_IDLE, KBD_REST_IDLE_RETRY_TICKS);
@@ -1342,6 +1356,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
             rf_tmr0_stop();
             response_pending = 0;
             hid_head_sent = 0;   /* nothing is in flight across a teardown (codex) */
+            /* The dongle releases every key on the host when it lapses, so the
+             * newest queued state no longer describes the host: the next report
+             * must be queued even when it repeats it (the host driver re-asserts
+             * a held key after the reconnect). */
+            hid_last_queued_valid = 0;
             bond_save_pending = 0;
             rf_state = RF_STATE_IDLE;
             RF_Shut();
