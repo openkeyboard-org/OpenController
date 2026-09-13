@@ -23,7 +23,9 @@
 #define DIAG_FAULT_MTVAL    (*(volatile uint32_t *)0x20005810u)
 
 #if RF_DIAG_COUNTERS && KBD_UART_DIAG_DUMP
-/* Counters owned by rf_task.c (external linkage, .diag_safe*). */
+/* Counters owned by rf_task.c (external linkage). The originals live in
+ * .diag_safe* and survive a reset; the ll_hid_* report-delivery counters below
+ * are plain .bss and are therefore zeroed by any reboot. */
 extern volatile uint32_t ll_boot_count, rf_pair_bcast_count, rf_valid_rx_count;
 extern volatile uint32_t entered_connected_count, rf_config_count, pwr_pair_rx_off_count;
 extern volatile uint32_t ll_drop_count;
@@ -77,6 +79,7 @@ void DiagDump_Send(void)
         s.ll_hid_rx_down = ll_hid_rx_down;
         s.ll_hid_tx_down = ll_hid_tx_down;
         s.ll_hid_tx_done_down = ll_hid_tx_done_down;
+        s.ll_hid_fifo_drop = ll_hid_fifo_drop;
         s.boot_reset_status = DIAG_RESET_STATUS;
         s.fault_marker = DIAG_FAULT_MARKER;
         s.fault_mepc = DIAG_FAULT_MEPC;

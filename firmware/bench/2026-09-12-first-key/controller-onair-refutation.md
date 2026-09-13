@@ -151,14 +151,19 @@ driver, not surfaced to the session), not a firmware loss.
 Replaced the single `hid_report` slot + blind `hid_resend` attempt counter with a 16-slot
 single-producer/single-consumer ring (stock's module keeps 20):
 - enqueue in RF_QueueHIDReport (main loop), deduped only against the NEWEST QUEUED state so
-  down -> up -> same-down is preserved; a full ring drops the newest (best-effort, as stock).
+  down -> up -> same-down is preserved. A FULL ring does NOT drop the report: it overwrites the
+  newest queued entry and counts ll_hid_fifo_drop, coalescing one intermediate transition while
+  preserving the latest physical state (dropping an all-keys-up outright would strand a key).
 - the head is re-sent on every poll and retired ONLY when the dongle advances its control bit
   (rf_task.c ack site) -- `hid_head_sent` guards an advance that precedes our first send.
 - rest gate now requires an EMPTY fifo (was: resend counter zero).
 
 ### Result (same recipe, same oracle, dongle-routed)
     BEFORE (single slot):  8/12 and 7/12 delivered   = 15/24  (62 %)
-    AFTER  (ack FIFO):    12/12 and 10/12 delivered  = 22/24  (92 %)
+    AFTER  (ack FIFO):    12/12 and 10/12 delivered  = 22/24  (92 %)   <- first build
+    AFTER  (hardened):    12/12 and 12/12 delivered  = 24/24 (100 %)   <- current, superseded the above
+  NOTE: these are END-TO-END HOST DELIVERIES (CGEvent oracle). The separate
+  rx_down/tx_down/tx_done_down equality is on-air completion, NOT host delivery.
 Counters after a clean 12-trial run: fifo_drop=0, rx_down=24, tx_down=24, tx_done_down=24
 -> every enqueued key-down is put on air and acknowledged; no blind resends, no queue overflow.
 

@@ -298,6 +298,9 @@ static uint32_t pending_session_aa;
  * the RX ISR when the dongle advances its control bit (the acknowledgement).
  * Free-running indices, power-of-two capacity; occupancy = (uint8_t)(tail-head). */
 #define HID_FIFO_SLOTS 16u
+#if (HID_FIFO_SLOTS & (HID_FIFO_SLOTS - 1u)) != 0u
+#error "HID_FIFO_SLOTS must be a power of two: the head/tail indices are free-running and masked"
+#endif
 static uint8_t hid_fifo[HID_FIFO_SLOTS][8];
 static volatile uint8_t hid_fifo_head;      /* ISR-owned: retire on ack */
 static volatile uint8_t hid_fifo_tail;      /* main-loop-owned: enqueue */
@@ -394,8 +397,9 @@ volatile uint32_t rest_key_wakes, rest_stage2_entries;
 /* Report-delivery observability (report-delivery step 1). Plain .bss, read by
  * symbol over SWD post-run (SWD resets the controller and drops the link, so
  * never mid-test): ll_hid_rx counts host reports handed to the RF layer over
- * UART; ll_hid_tx counts LEN-10 HID frames actually put on air (>= rx because
- * of the 6x resend). A key the MCU offered with ll_hid_tx advanced but no host
+ * UART; ll_hid_tx counts LEN-10 HID frames SELECTED for transmission -- it is
+ * incremented before RF_Tx(), so a transmission that fails to start still counts,
+ * and it must not be read as "reached the air". A key the MCU offered with ll_hid_tx advanced but no host
  * delivery localises the loss downstream of the controller. */
 volatile uint32_t ll_hid_rx, ll_hid_tx;
 /* Down-only split (non-zero report = a key is pressed): rx_down counts key-downs

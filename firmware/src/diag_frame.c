@@ -59,5 +59,6 @@ uint8_t DiagFrame_Format(uint8_t *out, const diag_snapshot_t *s)
     p = put32(p, s->ll_hid_rx_down);
     p = put32(p, s->ll_hid_tx_down);
     p = put32(p, s->ll_hid_tx_done_down);
+    p = put32(p, s->ll_hid_fifo_drop);
     return finish(out, p);
 }

@@ -59,9 +59,13 @@ kCGHIDEventTapLocation = 0
 kCGSessionEventTapLocation = 1
 
 # macOS virtual keycodes the bench uses as device-attributable test keys.
+# macOS defines virtual keycodes only up to F20 (Carbon HIToolbox Events.h); there
+# is no kVK_F24, and 111 is kVK_F12 -- listing it as "F24" was wrong and made an
+# F24 capture look merely empty rather than impossible. A test key is only usable
+# here if macOS surfaces a CGEvent for it, so F24 (HID 0x73) cannot be one.
 KEYCODES = {
     "F13": 105, "F14": 107, "F15": 113, "F16": 106, "F17": 64,
-    "F18": 79, "F19": 80, "F20": 90, "F24": 111,
+    "F18": 79, "F19": 80, "F20": 90, "F12": 111,
     "A": 0,  # only if nothing else is typing 'a'
     "LCTRL": 59, "LSHIFT": 56, "LALT": 58, "LGUI": 55,
 }
@@ -134,14 +138,20 @@ def cmd_capture(a):
     cap = Capture([_resolve(k) for k in a.keys.split(",")] if a.keys else None, a.out, a.quiet)
     _make_tap(cap)
     loop = CFRunLoopGetCurrent()
+    timer = None
     if a.seconds:
-        # stop the run loop after N seconds via a background timer thread
+        # stop the run loop after N seconds via a background timer thread; daemonised
+        # so a Ctrl-C exit is never held open by a pending timeout
         import threading
-        threading.Timer(a.seconds, lambda: CFRunLoopStop(loop)).start()
+        timer = threading.Timer(a.seconds, lambda: CFRunLoopStop(loop))
+        timer.daemon = True
+        timer.start()
     signal.signal(signal.SIGINT, lambda *_: CFRunLoopStop(loop))
     sys.stderr.write(f"capturing {'all keys' if cap.keys is None else sorted(cap.keys)}"
                      f"{' for %.0fs' % a.seconds if a.seconds else ' (Ctrl-C to stop)'}\n")
     CFRunLoopRun()
+    if timer is not None:
+        timer.cancel()
     if cap.out:
         cap.out.close()
     sys.stderr.write(f"captured {cap.n} events\n")
@@ -176,8 +186,11 @@ def cmd_selftest(a):
                         CGEventCreateKeyboardEvent(None, KEYCODES["F13"], down))
             time.sleep(0.02)
     threading.Thread(target=inject, daemon=True).start()
-    threading.Timer(3.0, lambda: CFRunLoopStop(loop)).start()
+    guard = threading.Timer(3.0, lambda: CFRunLoopStop(loop))
+    guard.daemon = True
+    guard.start()
     CFRunLoopRun()
+    guard.cancel()
     ok = [("down", 105), ("up", 105)] == seen[:2]
     print("selftest:", "PASS" if ok else f"FAIL (saw {seen})")
     sys.exit(0 if ok else 1)
