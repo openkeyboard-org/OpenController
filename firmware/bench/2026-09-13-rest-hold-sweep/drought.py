@@ -67,7 +67,8 @@ class Tapper:
     def close(self): self.ocd.sock.close()
 def episode(label,H,L,tp):
     if not wait_settled():
-        emit(f"{label} L={L}s: SKIPPED, not settled (the baseline and the outage would include residual activity)"); return
+        emit(f"{label} L={L}s: SKIPPED, not settled (the baseline and the outage would include residual activity)")
+        return
     d0=diag(); drop0=int(d0["ll_drop"]) if "ll_drop" in d0 else None
     floor=stats_last(5).get("p05_mA",stats_last(5).get("p05_mA_1ms"))
     tp.arm(); time.sleep(1.2)                       # key -> link CONNECTED, hold running; drought starts ~1 s in
