@@ -64,6 +64,8 @@ if __name__=="__main__":
         # settle
         t0=time.time()
         while net(5)>=0.3 and time.time()-t0<150: time.sleep(5)
+        if net(5)>=0.3:
+            emit(f"{label} {mode} L={L}s: SKIPPED, not settled after 150 s"); sys.exit(2)
         if mode=="held": tp.arm(); time.sleep(1.2)
         emit(f"{label} {mode} L={L}s: pre dongle={dongle()} net={net(2):.1f}mA nucleo[{nucleo()}]")
         rail(False); time.sleep(L); rail(True); t_on=time.time()
