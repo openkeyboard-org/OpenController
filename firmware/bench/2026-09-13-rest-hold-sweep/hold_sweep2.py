@@ -138,7 +138,8 @@ def phase_charge(label,H,n,tp):
         emit(f"{label} C{ep}: waited={waited:.0f}s floor={floor/1000:.3f}/{a['post_floor']:.3f}mA rest_rate={rest_rate*1000:.0f}uA | recon={a['recon']*1000:.0f}ms hold={a['hold']:.2f}s rest_entry={a['rest_entry']:.2f}s above_thr={a['above']:.2f}s bursts={a['bursts']} peak={a['peak']:.1f}mA | total={a['total']:.1f}mC cf={a['cf']:.1f} EXCESS={a['excess']:.1f}mC | lock@{'CENSORED' if a['lock'] is None else str(a['lock'])+'s'} (tail {a['span']:.0f}s) dongle={dongle()}")
         rows.append(a); time.sleep(10)
     if not rows:
-        emit(f"{label} CHARGE: 0 of {n} episodes recorded (none started from certified rest)"); return
+        emit(f"{label} CHARGE: 0 of {n} episodes recorded (none started from certified rest)")
+        return
     ex=[r["excess"] for r in rows]; hb=[r["hold"] for r in rows]; lk=[r["lock"] for r in rows if r["lock"] is not None]; rc=[r["recon"]*1000 for r in rows]
     emit(f"{label} CHARGE n={len(rows)} of {n}: excess mC mean={st.mean(ex):.1f} min={min(ex):.1f} max={max(ex):.1f} sd={st.pstdev(ex):.2f} | hold mean={st.mean(hb):.2f}s | recon ms med={st.median(rc):.0f} max={max(rc):.0f} | lock s: {('med=%.0f max=%.0f'%(st.median(lk),max(lk))) if lk else 'none'} certified {len(lk)}/{len(rows)}")
 def phase_deliv(label,H,n,base_rest,jit,sub,tp,rng):
