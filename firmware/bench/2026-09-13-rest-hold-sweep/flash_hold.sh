@@ -2,7 +2,9 @@
 set -o pipefail   # a failed make must not be masked by the grep|tail that trims its output
 # usage: flash_hold.sh <label> [KBD_REST_IDLE_MS]   (omit = the Makefile default)
 # Bench environment (env-overridable; defaults are the 2026-09-13 bench):
+#   OPENCONTROLLER_REPO (this repo's root; defaults to three levels up from this script),
 #   OPENKEYBOARD_QMK, OPENDONGLE_TOOL, MINICHLINK, MRS_TOOLCHAIN, OPENBOOT_TOOLCHAIN, KBD_PROBE,
+#   BENCH_DIR (where the logs are written; defaults to this script's directory),
 #   BENCH_BIN (a directory of PATH shims: GNU make + `stat -c%s`, see the memory notes)
 S=${BENCH_DIR:-$(cd "$(dirname "$0")" && pwd)}
 REPO=${OPENCONTROLLER_REPO:-$(cd "$(dirname "$0")/../../.." && pwd)}

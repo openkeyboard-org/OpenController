@@ -2135,6 +2135,12 @@ void RF_QueueHIDReport(const uint8_t report[8])
             for (uint8_t i = 0; i < 8; i++) {
                 hid_last_queued[i] = report[i];
             }
+            /* Must be set here too, not just on the enqueue path: the teardown
+             * clears it, so a report that arrives while the ring is full would
+             * otherwise leave it false for good -- disabling the dedup AND
+             * hid_key_held(), which would let the link rest under a held key,
+             * the defect this gate exists to prevent (Copilot). */
+            hid_last_queued_valid = 1;
             RF_DIAG_INC(ll_hid_fifo_drop);   /* a transition was coalesced away */
         }
     }
