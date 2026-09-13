@@ -2024,6 +2024,14 @@ void RF_Disconnect(void)
 #if KBD_REST
     rest_cancel();
 #endif
+    /* Every caller of this (SELECT_USB/BT, unpair, factory pair, the update
+     * path, explicit sleep) drops the link, so the dongle lapses and releases
+     * every key on the host. The newest queued state no longer describes the
+     * host, and keeping it would let the adjacent-duplicate check swallow a
+     * re-press of the same key -- the same reason the supervision teardown
+     * clears it. Callers that send a release barrier first are unaffected;
+     * those that do not are the hole (CodeRabbit). */
+    hid_last_queued_valid = 0;
     rf_tmr0_stop();
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
     rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
