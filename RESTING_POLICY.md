@@ -326,4 +326,24 @@ lost answer still leaves >= 1 so the drop counts as scheduled).
    first-key latency) and its ~125 ms radio-on reaction to catching a probe. R3b's 1.35 mA was a
    manual inline meter; it is not reproducible on the PPK2 and should be treated as meter error.
 4. First key from rest: latency <= 220 ms (mark on the tap, HID tickle on the host), no lost key.
+   **RAN 2026-09-12/13: it FAILED, and is now FIXED.** ~38 % of first keys from rest never reached
+   the host (15/24). Cause: the module held ONE 8-byte `hid_report` and retired it on a blind
+   6-attempt counter, so a tap landing while the link rested was transmitted into a link that was
+   not up yet -- those frames go nowhere -- and 60 ms later the key-up overwrote the same slot, so
+   only the release was sent. Per trial the lost taps put ZERO down-frames into the dongle while
+   delivered taps put 2-6. Fixed by retiring reports on the dongle's acknowledgement from a queue
+   instead (this PR): **24/24**. A second, smaller loss then surfaced at the dongle's single EP1
+   slot once the queue drained a tap's down and up ~0.87 ms apart, inside the host's 1 ms poll --
+   fixed by OpenDongle #51 (EP1 queue): 12/12 at a 5 ms hold, where the single slot gave 10/12.
+
+   Two measurement traps invalidated an earlier attempt at this gate, and both are worth keeping in
+   mind for any future delivery measurement:
+   - **The macOS HID idle timer is not a delivery oracle.** It resets on ANY input, so the key-up
+     resets it even when the key-down was lost, and background typing resets it regardless. Use a
+     key-down-specific host oracle (the bench `oracle` keymap emits F13, which macOS surfaces as a
+     CGEvent; the default F24 produces no event at all).
+   - **Check the report actually traverses the dongle.** The bench driver's default host is AUTO,
+     which resolves to the host MCU's OWN USB whenever that is plugged in -- so taps never reached
+     the module and a host-side oracle still reported success. `bench.py status` must show
+     `host BLUETOOTH`.
 5. Controller-side current between probes (after D7): deep sleep confirmed by the PPK2 trace.
