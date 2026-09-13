@@ -6,12 +6,23 @@ C: key-from-settled-rest episodes, full tail captured (reconnect, hold, rest ent
    total mC over the workload until lock, delivered count, latency split by reconnect vs held keys.
 usage: hold_sweep2.py <label> <hold_s> [--image BIN] [--charge 6] [--far 24] [--near 12] [--work 1] [--seed 7]"""
 import argparse, csv, hashlib, json, os, random, signal, socket, subprocess, sys, threading, time, statistics as st
+# Bench environment (override with environment variables; defaults are the 2026-09-13 bench):
+#   OPENKEYBOARD_QMK   qmk_firmware checkout with keyboards/handwired/opencontroller_bench
+#   OPENDONGLE_TOOL    the `opendongle` host tool binary
+#   MINICHLINK         minichlink binary (WCH-Link probe control)
+#   DONGLE_PROBE       WCH-Link serial powering/attached to the dongle (rail control)
+#   PPK2D_SOCK         ppk2d unix socket (PPK2 inline on the controller rail)
+#   HID_CAPTURE        firmware/bench/tools/hid_capture.py of this repo
+#   BENCH_PY           python with pyobjc-Quartz for the CGEventTap oracle
 S=os.path.dirname(os.path.abspath(__file__))
-Q="/Users/eric.molitor/Development/openkeyboard/qmk_firmware"; BD=Q+"/keyboards/handwired/opencontroller_bench"
+Q=os.environ.get("OPENKEYBOARD_QMK", os.path.expanduser("~/Development/openkeyboard/qmk_firmware")); BD=Q+"/keyboards/handwired/opencontroller_bench"
 E=Q+"/.build/handwired_opencontroller_bench_oracle.elf"
-T="/Users/eric.molitor/Development/openkeyboard/OpenController/firmware/bench/tools/hid_capture.py"
-VPY=S+"/vpy/bin/python"; D=os.path.expanduser("~/Development/openkeyboard/OpenDongle/tools/target/release/opendongle")
-SOCK=os.path.expanduser("~/.ppk2d.sock"); FS=100000; FLOOR_NOM=1.55; LOG=S+"/hold_sweep.log"; THR_NET=1500.0
+REPO=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+T=os.environ.get("HID_CAPTURE", os.path.join(REPO, "firmware", "bench", "tools", "hid_capture.py"))
+VPY=os.environ.get("BENCH_PY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpy", "bin", "python"))
+D=os.environ.get("OPENDONGLE_TOOL", os.path.expanduser("~/Development/openkeyboard/OpenDongle/tools/target/release/opendongle"))
+SOCK=os.environ.get("PPK2D_SOCK", os.path.expanduser("~/.ppk2d.sock"))
+FS=100000; FLOOR_NOM=float(os.environ.get("BENCH_FLOOR_MA", "1.55")); LOG=S+"/hold_sweep.log"; THR_NET=1500.0
 sys.path.insert(0,BD); import bench
 
 def ppk(req):

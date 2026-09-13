@@ -3,13 +3,24 @@
 held  : key -> link held -> rail off L s -> rail on -> keys at the given offsets after rail-on
 rested: controller already resting (no key) -> rail off L s -> rail on -> keys at the offsets"""
 import json, os, socket, subprocess, sys, time
+# Bench environment (override with environment variables; defaults are the 2026-09-13 bench):
+#   OPENKEYBOARD_QMK   qmk_firmware checkout with keyboards/handwired/opencontroller_bench
+#   OPENDONGLE_TOOL    the `opendongle` host tool binary
+#   MINICHLINK         minichlink binary (WCH-Link probe control)
+#   DONGLE_PROBE       WCH-Link serial powering/attached to the dongle (rail control)
+#   PPK2D_SOCK         ppk2d unix socket (PPK2 inline on the controller rail)
+#   HID_CAPTURE        firmware/bench/tools/hid_capture.py of this repo
+#   BENCH_PY           python with pyobjc-Quartz for the CGEventTap oracle
 S=os.path.dirname(os.path.abspath(__file__))
-Q="/Users/eric.molitor/Development/openkeyboard/qmk_firmware"; BD=Q+"/keyboards/handwired/opencontroller_bench"
+Q=os.environ.get("OPENKEYBOARD_QMK", os.path.expanduser("~/Development/openkeyboard/qmk_firmware")); BD=Q+"/keyboards/handwired/opencontroller_bench"
 E=Q+"/.build/handwired_opencontroller_bench_oracle.elf"
-T="/Users/eric.molitor/Development/openkeyboard/OpenController/firmware/bench/tools/hid_capture.py"
-VPY=S+"/vpy/bin/python"; D=os.path.expanduser("~/Development/openkeyboard/OpenDongle/tools/target/release/opendongle")
-MC=os.path.expanduser("~/Development/WCH/ch32fun/minichlink/minichlink"); DONGLE_PROBE="CEBD8F0653EF"
-SOCK=os.path.expanduser("~/.ppk2d.sock"); FLOOR_NOM=1.55; LOG=S+"/drought.log"
+REPO=os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))
+T=os.environ.get("HID_CAPTURE", os.path.join(REPO, "firmware", "bench", "tools", "hid_capture.py"))
+VPY=os.environ.get("BENCH_PY", os.path.join(os.path.dirname(os.path.abspath(__file__)), "vpy", "bin", "python"))
+D=os.environ.get("OPENDONGLE_TOOL", os.path.expanduser("~/Development/openkeyboard/OpenDongle/tools/target/release/opendongle"))
+SOCK=os.environ.get("PPK2D_SOCK", os.path.expanduser("~/.ppk2d.sock"))
+MC=os.environ.get("MINICHLINK", os.path.expanduser("~/Development/WCH/ch32fun/minichlink/minichlink")); DONGLE_PROBE=os.environ.get("DONGLE_PROBE", "CEBD8F0653EF")
+FLOOR_NOM=float(os.environ.get("BENCH_FLOOR_MA", "1.55")); LOG=S+"/drought.log"
 sys.path.insert(0,BD); import bench
 def ppk(req):
     s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM); s.connect(SOCK); s.sendall((json.dumps(req)+"\n").encode())

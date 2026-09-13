@@ -28,6 +28,10 @@ occurred. The script now reports strays explicitly. The workload's reconnect-key
 below (11 / 15 / 22) exclude key 0, which also starts from settled rest (the script now
 includes it: 12 / 16 / 23).
 
+The scripts take their bench paths from the environment (`OPENKEYBOARD_QMK`, `OPENDONGLE_TOOL`,
+`MINICHLINK`, `DONGLE_PROBE`, `KBD_PROBE`, `PPK2D_SOCK`, `HID_CAPTURE`, `BENCH_PY`,
+`BENCH_FLOOR_MA`); the defaults are this bench's.
+
 ## Charge per key from rest, first-key delivery, workload
 
 | hold | mC per key from rest (n=6) | hold burst | far/near delivery (24/12) | latency med/max (far, near) | workload, 60 keys: active / to-lock | reconnect keys (excl. key 0) |
