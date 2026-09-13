@@ -32,7 +32,10 @@ def dongle():
         out=subprocess.run([D,"--status"],capture_output=True,text=True,timeout=6).stdout.strip().splitlines(); out=out[-1] if out else ""
         return "C" if "connection=connected" in out else ("W" if "waiting" in out else "-")
     except Exception: return "-"
-def rail(on): subprocess.run([MC,"-k3" if on else "-kt","-C","linke","-l",DONGLE_PROBE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20)
+def rail(on):
+    """Dongle rail on/off through its WCH-Link; raises on failure so a key result is never
+    reported for an outage that did not happen."""
+    subprocess.run([MC,"-k3" if on else "-kt","-C","linke","-l",DONGLE_PROBE],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=20,check=True)
 def nucleo():
     try:
         out=subprocess.run(["python3",BD+"/bench.py","--elf",E,"status"],capture_output=True,text=True,timeout=30).stdout

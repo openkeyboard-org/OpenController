@@ -42,8 +42,9 @@ The scripts take their bench paths from the environment (`OPENKEYBOARD_QMK`, `OP
 
 Model: **charge per key from rest ~ 7.4 mA x T_idle + 2 mC**; the 2 mC is reconnect and
 rest entry, the rest is the CONNECTED hold. Steady resting is ~0.02-0.03 mA. Held keys
-deliver in ~8 ms, reconnect keys in 30-90 ms at every hold; post-rest lock is immediate
-(no churn) in 18/18 episodes. Not measured: a lossy link (all runs at -37 dBm).
+deliver in ~8 ms; reconnect keys typically in 30-90 ms at every hold, with observed maxima
+of 116 / 169 / 149 ms at 5 / 3 / 2 s; post-rest lock is immediate (no churn) in 18/18
+episodes. Not measured: a lossy link (all runs at -37 dBm).
 
 ## Dongle-outage ladder (`drought.py`, `drought2.py`)
 

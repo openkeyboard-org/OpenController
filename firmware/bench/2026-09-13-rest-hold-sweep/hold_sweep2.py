@@ -49,12 +49,15 @@ def diag_snapshot(tag):
         emit(f"  diag[{tag}]: "+(" ".join(f"{k}={v}" for k,v in keep.items()) if keep else out.strip().splitlines()[-1] if out.strip() else "no output"))
     except Exception as e: emit(f"  diag[{tag}]: failed {e!r}")
 def cls(d): return "S" if (d["mean_mA"]-FLOOR_NOM<0.3 and p50(d)<2.0) else "R"
+class NotSettled(Exception): pass
 def wait_settled(cap=150):
+    """Block until a 5 s window is settled (net < 0.3 mA, p50 < 2 mA). Raises NotSettled after
+    `cap` seconds: an episode must start from certified rest or it is not recorded."""
     t0=time.time()
     while True:
         d=stats_last(5)
         if cls(d)=="S": return d, time.time()-t0
-        if time.time()-t0>cap: emit(f"  WARN: not settled after {cap}s (net={d['mean_mA']-FLOOR_NOM:.2f} p50={p50(d):.2f})"); return d, time.time()-t0
+        if time.time()-t0>cap: raise NotSettled(f"not settled after {cap}s (net={d['mean_mA']-FLOOR_NOM:.2f} p50={p50(d):.2f})")
         time.sleep(5)
 class Tapper:
     def __init__(self):
@@ -126,7 +129,9 @@ def analyse(path,t0_unix,t_key,floor_uA,rest_rate_mA,tail_s):
 def phase_charge(label,H,n,tp):
     rows=[]
     for ep in range(1,n+1):
-        d,waited=wait_settled(); floor=p05(d)*1000.0; rest_rate=d["mean_mA"]-p05(d)
+        try: d,waited=wait_settled()
+        except NotSettled as e: emit(f"{label} C{ep}: SKIPPED, {e}"); continue
+        floor=p05(d)*1000.0; rest_rate=d["mean_mA"]-p05(d)
         mark(f"{label}_c{ep}"); tm,tw=tp.arm(); tail=H+13.0
         time.sleep(max(0.0,(tw+tail)-time.time())); out=f"{S}/hs2_{label}_c{ep}.csv"; r=ppk({"cmd":"raw","seconds":tail+1.5,"out":out})
         a=analyse(out,r["t0_unix"],tw,floor,rest_rate,tail)
@@ -169,6 +174,7 @@ def phase_work(label,H,seed,tp):
     time.sleep(1.5); t_w0=mark(f"{label}_w0"); base=time.time()+0.5; keys=[]; tk=base
     for k in range(60):
         tk=tk+(gaps[k] if k>0 else 0.0); time.sleep(max(0.0,tk-0.1-time.time())); tm,tw=tp.arm(100); keys.append((tm,tw))
+    time.sleep(0.6)                      # the last key fires at +100 ms and lands within ~100 ms: keep it inside the active window
     t_wend=mark(f"{label}_wend")
     consec=0; t_lock=None; t0=time.time()
     while time.time()-t0<150:
