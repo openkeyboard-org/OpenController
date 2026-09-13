@@ -63,7 +63,7 @@ period). A shorter grace trades a slower reconnect after a pause for less time a
 
 | # | Decision | Options / proposal |
 |---|---|---|
-| D1 | T_idle | **Decided: 5 s (production parity), configurable; may be tuned.** |
+| D1 | T_idle | **Decided 2026-09-13: 3 s** (`make KBD_REST_IDLE_MS=<ms>`, default 3000; production parity `=5000`). Hold sweep 2/3/5 s on the controller rail: 16.8 / 23.8 / 39.0 mC per key from rest (~7.4 mA x T_idle + 2 mC); first keys from rest 36/36 at each hold (108 overall); reconnect latency typically 30-90 ms at every hold (observed maxima 116 / 169 / 149 ms at 5 / 3 / 2 s); a dongle outage recovers through rest instead of supervision. Log: `firmware/bench/2026-09-13-rest-hold-sweep/`. |
 | D2 | T_probe | **Decided: 1010 ms**, jitter <= 15 ms (inside the dongle's 900-1100 window with the 45 ms phase lead). |
 | D3 | Probe dwell | **Decided: target <= 20 ms** promote-to-quiet, measured on the PPK2 raw trace. Production ~10 ms. |
 | D4 | MCU visibility | **Decided: transparent. VERIFIED 2026-09-12** against the real QMK driver run in the loop: `link_state` and `selected_target` hold across rest, both stages, and the driver puts nothing on the UART while it rests. See the D4 block below. |

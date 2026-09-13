@@ -1,0 +1,383 @@
+=== hold sweep h5: H=5.0s charge=6 far=24 near=12  dongle=W ppk=1.681mA
+h5 C1: floor=1.539mA win=14.0s mC=39.7 hold_burst=5.16s radio_on=5.25s bursts=23 peak=13.2mA lock@14s dongle=W
+h5 C2: floor=1.539mA win=14.0s mC=39.8 hold_burst=5.11s radio_on=5.29s bursts=23 peak=13.6mA lock@14s dongle=W
+h5 C3: floor=1.539mA win=14.0s mC=38.8 hold_burst=5.05s radio_on=5.13s bursts=22 peak=13.4mA lock@14s dongle=W
+h5 C4: floor=1.539mA win=14.0s mC=39.6 hold_burst=5.15s radio_on=5.23s bursts=22 peak=13.5mA lock@14s dongle=W
+h5 C5: floor=1.539mA win=14.0s mC=38.8 hold_burst=5.05s radio_on=5.13s bursts=22 peak=13.4mA lock@14s dongle=W
+h5 C6: floor=1.539mA win=14.0s mC=38.8 hold_burst=5.05s radio_on=5.13s bursts=22 peak=13.6mA lock@14s dongle=W
+h5 CHARGE: n=6 mC mean=39.3 min=38.8 max=39.8  hold_burst mean=5.10s  lock s: min=14 med=14 max=14 (locked 6/6)
+h5 D-far1: rest=8.0s -> DELIVERED lat=73ms
+h5 D-far2: rest=8.0s -> DELIVERED lat=53ms
+h5 D-far3: rest=8.0s -> DELIVERED lat=95ms
+h5 D-far4: rest=8.0s -> DELIVERED lat=89ms
+h5 D-far5: rest=8.0s -> DELIVERED lat=74ms
+h5 D-far6: rest=8.0s -> DELIVERED lat=31ms
+h5 D-far7: rest=8.0s -> DELIVERED lat=30ms
+h5 D-far8: rest=8.0s -> DELIVERED lat=91ms
+h5 D-far9: rest=8.0s -> DELIVERED lat=93ms
+h5 D-far10: rest=8.0s -> DELIVERED lat=50ms
+h5 D-far11: rest=8.0s -> DELIVERED lat=89ms
+h5 D-far12: rest=8.0s -> DELIVERED lat=31ms
+h5 D-far13: rest=8.0s -> DELIVERED lat=51ms
+h5 D-far14: rest=8.0s -> DELIVERED lat=50ms
+h5 D-far15: rest=8.0s -> DELIVERED lat=30ms
+h5 D-far16: rest=8.0s -> DELIVERED lat=29ms
+h5 D-far17: rest=8.0s -> DELIVERED lat=63ms
+h5 D-far18: rest=8.0s -> DELIVERED lat=32ms
+h5 D-far19: rest=8.0s -> DELIVERED lat=90ms
+h5 D-far20: rest=8.0s -> DELIVERED lat=110ms
+h5 D-far21: rest=8.0s -> DELIVERED lat=72ms
+h5 D-far22: rest=8.0s -> DELIVERED lat=42ms
+h5 D-far23: rest=8.0s -> DELIVERED lat=93ms
+h5 D-far24: rest=8.0s -> DELIVERED lat=32ms
+h5 DELIV-far: 24/24 delivered (down+up), down-only=0, lost=0  latency ms: med=58 p90=93 max=110 min=29
+h5 D-near1: rest=3.0s -> DELIVERED lat=72ms
+h5 D-near2: rest=3.0s -> DELIVERED lat=30ms
+h5 D-near3: rest=3.0s -> DELIVERED lat=90ms
+h5 D-near4: rest=3.0s -> DELIVERED lat=32ms
+h5 D-near5: rest=3.0s -> DELIVERED lat=92ms
+h5 D-near6: rest=3.0s -> DELIVERED lat=154ms
+h5 D-near7: rest=3.0s -> DELIVERED lat=54ms
+h5 D-near8: rest=3.0s -> DELIVERED lat=92ms
+h5 D-near9: rest=3.0s -> DELIVERED lat=50ms
+h5 D-near10: rest=3.0s -> DELIVERED lat=36ms
+h5 D-near11: rest=3.0s -> DELIVERED lat=51ms
+h5 D-near12: rest=3.0s -> DELIVERED lat=33ms
+h5 DELIV-near: 12/12 delivered (down+up), down-only=0, lost=0  latency ms: med=52 p90=92 max=154 min=30
+=== h5 done
+FLASH h5 ticks=default(8000) image_sha256=485305324fc04732 (flashed earlier)
+=== hold sweep v2 h5test: H=5.0s image=485305324fc04732 charge=1 far=2 near=1 work=0 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.558mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=780 wake_gpio=49 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=42 ll_hid_tx_down=42 ll_hid_tx_done_down=42 ll_hid_fifo_drop=0
+h5test C1: waited=0s floor=1.539/1.539mA rest_rate=70uA | recon=100ms hold=5.05s rest_entry=5.15s above_thr=5.17s bursts=33 peak=13.4mA | total=39.3mC cf=1.3 EXCESS=38.0mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5test CHARGE n=1: excess mC mean=38.0 min=38.0 max=38.0 sd=0.00 | hold mean=5.05s | recon ms med=100 max=100 | lock s: med=6 max=6 certified 1/1
+h5test D-far1: in_rest~5.67s -> OK lat=74ms
+h5test D-far2: in_rest~6.40s -> OK lat=28ms
+h5test DELIV-far: 2/2 exactly one ordered down/up; failures: none | events total=4 | latency med=51 p90=28 max=74 min=28 ms (n=2)
+h5test D-near1: in_rest~0.99s -> OK lat=30ms
+h5test DELIV-near: 1/1 exactly one ordered down/up; failures: none | events total=2 | latency med=30 p90=30 max=30 min=30 ms (n=1)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=901 wake_gpio=55 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=46 ll_hid_tx_down=46 ll_hid_tx_done_down=46 ll_hid_fifo_drop=0
+=== h5test done  dongle=waiting for reconnect rssi=-37 dBm
+=== hold sweep v2 h5: H=5.0s image=485305324fc04732 charge=6 far=24 near=12 work=1 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.557mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=916 wake_gpio=57 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=46 ll_hid_tx_down=46 ll_hid_tx_done_down=46 ll_hid_fifo_drop=0
+h5 C1: waited=0s floor=1.539/1.539mA rest_rate=70uA | recon=35ms hold=5.15s rest_entry=5.18s above_thr=5.27s bursts=33 peak=13.4mA | total=40.0mC cf=1.3 EXCESS=38.7mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 C2: waited=0s floor=1.539/1.539mA rest_rate=18uA | recon=60ms hold=5.05s rest_entry=5.11s above_thr=5.17s bursts=33 peak=13.3mA | total=39.2mC cf=0.3 EXCESS=38.9mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 C3: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=23ms hold=5.05s rest_entry=5.07s above_thr=5.18s bursts=34 peak=13.4mA | total=39.3mC cf=0.3 EXCESS=39.0mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 C4: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=30ms hold=5.15s rest_entry=5.18s above_thr=5.27s bursts=33 peak=13.5mA | total=40.0mC cf=0.3 EXCESS=39.6mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 C5: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=29ms hold=5.05s rest_entry=5.08s above_thr=5.17s bursts=33 peak=13.4mA | total=39.3mC cf=0.3 EXCESS=38.9mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 C6: waited=0s floor=1.539/1.539mA rest_rate=18uA | recon=25ms hold=5.05s rest_entry=5.07s above_thr=5.17s bursts=33 peak=13.4mA | total=39.2mC cf=0.3 EXCESS=38.9mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5 CHARGE n=6: excess mC mean=39.0 min=38.7 max=39.6 sd=0.29 | hold mean=5.08s | recon ms med=29 max=60 | lock s: med=6 max=6 certified 6/6
+h5 D-far1: in_rest~5.67s -> OK lat=74ms
+h5 D-far2: in_rest~6.40s -> OK lat=29ms
+h5 D-far3: in_rest~5.57s -> OK lat=29ms
+h5 D-far4: in_rest~6.14s -> OK lat=90ms
+h5 D-far5: in_rest~5.53s -> OK lat=91ms
+h5 D-far6: in_rest~5.69s -> OK lat=30ms
+h5 D-far7: in_rest~6.44s -> OK lat=70ms
+h5 D-far8: in_rest~5.65s -> OK lat=49ms
+h5 D-far9: in_rest~6.08s -> OK lat=69ms
+h5 D-far10: in_rest~5.90s -> OK lat=70ms
+h5 D-far11: in_rest~5.89s -> OK lat=70ms
+h5 D-far12: in_rest~5.93s -> OK lat=31ms
+h5 D-far13: in_rest~5.63s -> OK lat=50ms
+h5 D-far14: in_rest~6.27s -> OK lat=70ms
+h5 D-far15: in_rest~5.53s -> OK lat=70ms
+h5 D-far16: in_rest~5.67s -> OK lat=29ms
+h5 D-far17: in_rest~5.46s -> OK lat=49ms
+h5 D-far18: in_rest~5.71s -> OK lat=70ms
+h5 D-far19: in_rest~5.85s -> OK lat=29ms
+h5 D-far20: in_rest~6.34s -> OK lat=90ms
+h5 D-far21: in_rest~5.82s -> OK lat=70ms
+h5 D-far22: in_rest~5.55s -> OK lat=50ms
+h5 D-far23: in_rest~5.70s -> OK lat=89ms
+h5 D-far24: in_rest~6.43s -> OK lat=90ms
+h5 DELIV-far: 24/24 exactly one ordered down/up; failures: none | events total=48 | latency med=70 p90=90 max=91 min=29 ms (n=24)
+h5 D-near1: in_rest~0.97s -> OK lat=116ms
+h5 D-near2: in_rest~1.19s -> OK lat=30ms
+h5 D-near3: in_rest~1.09s -> OK lat=110ms
+h5 D-near4: in_rest~1.20s -> OK lat=111ms
+h5 D-near5: in_rest~1.08s -> OK lat=48ms
+h5 D-near6: in_rest~1.22s -> OK lat=50ms
+h5 D-near7: in_rest~1.14s -> OK lat=29ms
+h5 D-near8: in_rest~1.20s -> OK lat=69ms
+h5 D-near9: in_rest~1.30s -> OK lat=49ms
+h5 D-near10: in_rest~1.17s -> OK lat=9ms
+h5 D-near11: in_rest~1.00s -> OK lat=87ms
+h5 D-near12: in_rest~0.97s -> OK lat=49ms
+h5 DELIV-near: 12/12 exactly one ordered down/up; failures: none | events total=24 | latency med=50 p90=110 max=116 min=9 ms (n=12)
+h5 WORK seed=7: 60 keys over 148s (gaps: 30 short/18 med/11 long), reconnect keys at this H=11 | active mC=845 to-lock mC=885 over 168s (cf 24.4) lock 10s after last key | delivered 49/60 failures: k5:LOST(gap=0.3s,n=0) k7:STUCK(gap=0.5s,n=1) k8:ODD(gap=0.3s,n=1) k12:STUCK(gap=7.0s,n=1) k13:ODD(gap=0.2s,n=1) k17:STUCK(gap=1.2s,n=1) k18:ODD(gap=0.2s,n=1) k40:STUCK(gap=0.4s,n=1) k41:ODD(gap=0.2s,n=1) k50:STUCK(gap=6.1s,n=1) k51:ODD(gap=0.3s,n=1) | latency reconnect-keys med=50 p90=90 max=111 min=29 ms (n=9) held-keys med=8 p90=9 max=53 min=7 ms (n=40)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=1763 wake_gpio=115 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=142 ll_hid_tx_down=143 ll_hid_tx_done_down=143 ll_hid_fifo_drop=0
+=== h5 done  dongle=waiting for reconnect rssi=-35 dBm
+=== hold sweep v2 h5: H=5.0s image=485305324fc04732 charge=0 far=0 near=0 work=1 | dongle=waiting for reconnect rssi=-35 dBm ppk=1.558mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=1765 wake_gpio=116 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=142 ll_hid_tx_down=143 ll_hid_tx_done_down=143 ll_hid_fifo_drop=0
+h5 WORK seed=7: 60 keys over 152s (gaps: 24 short/18 med/11 long), reconnect keys at this H=11 | active mC=875 to-lock mC=915 over 172s (cf 12.3) lock 10s after last key | delivered 59/60 failures: k1:LOST(gap=0.4s,n=0) | latency reconnect-keys med=51 p90=90 max=91 min=30 ms (n=11) held-keys med=8 p90=9 max=10 min=7 ms (n=48)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=1897 wake_gpio=129 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=201 ll_hid_tx_down=202 ll_hid_tx_done_down=202 ll_hid_fifo_drop=0
+=== h5 done  dongle=waiting for reconnect rssi=-37 dBm
+FLASH h3 ticks=4800 image_sha256=6527c87fe7a75596 10:48:32
+=== hold sweep v2 h3: H=3.0s image=6527c87fe7a75596 charge=6 far=24 near=12 work=1 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.647mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=20 wake_gpio=1 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+h3 C1: waited=0s floor=1.539/1.539mA rest_rate=134uA | recon=67ms hold=3.06s rest_entry=3.13s above_thr=3.18s bursts=31 peak=13.6mA | total=24.3mC cf=2.1 EXCESS=22.1mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 C2: waited=0s floor=1.539/1.539mA rest_rate=18uA | recon=26ms hold=3.15s rest_entry=3.17s above_thr=3.27s bursts=33 peak=13.5mA | total=25.0mC cf=0.3 EXCESS=24.7mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 C3: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=30ms hold=3.05s rest_entry=3.08s above_thr=3.17s bursts=33 peak=13.3mA | total=24.2mC cf=0.3 EXCESS=23.9mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 C4: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=96ms hold=3.05s rest_entry=3.14s above_thr=3.17s bursts=33 peak=13.4mA | total=24.2mC cf=0.3 EXCESS=23.9mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 C5: waited=0s floor=1.539/1.539mA rest_rate=31uA | recon=67ms hold=3.15s rest_entry=3.21s above_thr=3.27s bursts=33 peak=13.5mA | total=25.0mC cf=0.5 EXCESS=24.5mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 C6: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=33ms hold=3.05s rest_entry=3.08s above_thr=3.17s bursts=33 peak=13.6mA | total=24.2mC cf=0.3 EXCESS=23.9mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-37 dBm
+h3 CHARGE n=6: excess mC mean=23.8 min=22.1 max=24.7 sd=0.82 | hold mean=3.08s | recon ms med=50 max=96 | lock s: med=4 max=4 certified 6/6
+h3 D-far1: in_rest~5.67s -> OK lat=78ms
+h3 D-far2: in_rest~6.40s -> OK lat=29ms
+h3 D-far3: in_rest~5.57s -> OK lat=30ms
+h3 D-far4: in_rest~6.14s -> OK lat=90ms
+h3 D-far5: in_rest~5.53s -> OK lat=90ms
+h3 D-far6: in_rest~5.69s -> OK lat=30ms
+h3 D-far7: in_rest~6.44s -> OK lat=69ms
+h3 D-far8: in_rest~5.65s -> OK lat=29ms
+h3 D-far9: in_rest~6.08s -> OK lat=69ms
+h3 D-far10: in_rest~5.90s -> OK lat=70ms
+h3 D-far11: in_rest~5.89s -> OK lat=70ms
+h3 D-far12: in_rest~5.93s -> OK lat=29ms
+h3 D-far13: in_rest~5.63s -> OK lat=69ms
+h3 D-far14: in_rest~6.27s -> OK lat=52ms
+h3 D-far15: in_rest~5.53s -> OK lat=70ms
+h3 D-far16: in_rest~5.67s -> OK lat=30ms
+h3 D-far17: in_rest~5.46s -> OK lat=50ms
+h3 D-far18: in_rest~5.71s -> OK lat=90ms
+h3 D-far19: in_rest~5.85s -> OK lat=50ms
+h3 D-far20: in_rest~6.34s -> OK lat=70ms
+h3 D-far21: in_rest~5.82s -> OK lat=50ms
+h3 D-far22: in_rest~5.55s -> OK lat=50ms
+h3 D-far23: in_rest~5.70s -> OK lat=90ms
+h3 D-far24: in_rest~6.43s -> OK lat=89ms
+h3 DELIV-far: 24/24 exactly one ordered down/up; failures: none | events total=48 | latency med=69 p90=90 max=90 min=29 ms (n=24)
+h3 D-near1: in_rest~0.97s -> OK lat=71ms
+h3 D-near2: in_rest~1.19s -> OK lat=70ms
+h3 D-near3: in_rest~1.09s -> OK lat=70ms
+h3 D-near4: in_rest~1.20s -> OK lat=48ms
+h3 D-near5: in_rest~1.08s -> OK lat=90ms
+h3 D-near6: in_rest~1.22s -> OK lat=49ms
+h3 D-near7: in_rest~1.14s -> OK lat=90ms
+h3 D-near8: in_rest~1.20s -> OK lat=169ms
+h3 D-near9: in_rest~1.30s -> OK lat=50ms
+h3 D-near10: in_rest~1.17s -> OK lat=70ms
+h3 D-near11: in_rest~1.00s -> OK lat=90ms
+h3 D-near12: in_rest~0.97s -> OK lat=51ms
+h3 DELIV-near: 12/12 exactly one ordered down/up; failures: none | events total=24 | latency med=70 p90=90 max=169 min=48 ms (n=12)
+h3 WORK seed=7: 60 keys over 152s (gaps: 24 short/18 med/11 long), reconnect keys at this H=15 | active mC=692 to-lock mC=716 over 167s (cf 17.7) lock 5s after last key | delivered 60/60 failures: none | latency reconnect-keys med=51 p90=90 max=91 min=29 ms (n=15) held-keys med=8 p90=9 max=75 min=7 ms (n=45)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=962 wake_gpio=67 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=103 ll_hid_tx_down=103 ll_hid_tx_done_down=103 ll_hid_fifo_drop=0
+=== h3 done  dongle=waiting for reconnect rssi=-37 dBm
+FLASH h2 ticks=3200 image_sha256=82fa35783944797f 10:59:56
+FLASH h2 ticks=3200 image_sha256=82fa35783944797f 11:01:29
+=== hold sweep v2 h2: H=2.0s image=82fa35783944797f charge=6 far=24 near=12 work=1 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.649mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=24 wake_gpio=2 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+h2 C1: waited=0s floor=1.539/1.539mA rest_rate=137uA | recon=96ms hold=2.16s rest_entry=2.26s above_thr=2.28s bursts=31 peak=13.7mA | total=17.5mC cf=2.0 EXCESS=15.5mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 C2: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=75ms hold=2.05s rest_entry=2.12s above_thr=2.17s bursts=33 peak=13.3mA | total=16.7mC cf=0.3 EXCESS=16.4mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 C3: waited=0s floor=1.539/1.539mA rest_rate=20uA | recon=95ms hold=2.15s rest_entry=2.24s above_thr=2.27s bursts=33 peak=13.4mA | total=17.5mC cf=0.3 EXCESS=17.2mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 C4: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=131ms hold=2.15s rest_entry=2.28s above_thr=2.27s bursts=33 peak=13.4mA | total=17.5mC cf=0.3 EXCESS=17.2mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 C5: waited=0s floor=1.539/1.539mA rest_rate=18uA | recon=23ms hold=2.15s rest_entry=2.17s above_thr=2.27s bursts=33 peak=13.3mA | total=17.4mC cf=0.3 EXCESS=17.1mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 C6: waited=0s floor=1.539/1.539mA rest_rate=18uA | recon=24ms hold=2.15s rest_entry=2.17s above_thr=2.27s bursts=33 peak=13.6mA | total=17.4mC cf=0.3 EXCESS=17.2mC | lock@3s (tail 15s) dongle=waiting for reconnect rssi=-37 dBm
+h2 CHARGE n=6: excess mC mean=16.8 min=15.5 max=17.2 sd=0.64 | hold mean=2.13s | recon ms med=85 max=131 | lock s: med=3 max=3 certified 6/6
+h2 D-far1: in_rest~5.67s -> OK lat=75ms
+h2 D-far2: in_rest~6.40s -> OK lat=90ms
+h2 D-far3: in_rest~5.57s -> OK lat=50ms
+h2 D-far4: in_rest~6.14s -> OK lat=91ms
+h2 D-far5: in_rest~5.53s -> OK lat=30ms
+h2 D-far6: in_rest~5.69s -> OK lat=90ms
+h2 D-far7: in_rest~6.44s -> OK lat=89ms
+h2 D-far8: in_rest~5.65s -> OK lat=53ms
+h2 D-far9: in_rest~6.08s -> OK lat=70ms
+h2 D-far10: in_rest~5.90s -> OK lat=71ms
+h2 D-far11: in_rest~5.89s -> OK lat=70ms
+h2 D-far12: in_rest~5.93s -> OK lat=30ms
+h2 D-far13: in_rest~5.63s -> OK lat=70ms
+h2 D-far14: in_rest~6.27s -> OK lat=49ms
+h2 D-far15: in_rest~5.53s -> OK lat=70ms
+h2 D-far16: in_rest~5.67s -> OK lat=30ms
+h2 D-far17: in_rest~5.46s -> OK lat=50ms
+h2 D-far18: in_rest~5.71s -> OK lat=49ms
+h2 D-far19: in_rest~5.85s -> OK lat=29ms
+h2 D-far20: in_rest~6.34s -> OK lat=70ms
+h2 D-far21: in_rest~5.82s -> OK lat=48ms
+h2 D-far22: in_rest~5.55s -> OK lat=50ms
+h2 D-far23: in_rest~5.70s -> OK lat=149ms
+h2 D-far24: in_rest~6.43s -> OK lat=70ms
+h2 DELIV-far: 24/24 exactly one ordered down/up; failures: none | events total=48 | latency med=70 p90=90 max=149 min=29 ms (n=24)
+h2 D-near1: in_rest~0.97s -> OK lat=50ms
+h2 D-near2: in_rest~1.19s -> OK lat=71ms
+h2 D-near3: in_rest~1.09s -> OK lat=70ms
+h2 D-near4: in_rest~1.20s -> OK lat=49ms
+h2 D-near5: in_rest~1.08s -> OK lat=90ms
+h2 D-near6: in_rest~1.22s -> OK lat=50ms
+h2 D-near7: in_rest~1.14s -> OK lat=29ms
+h2 D-near8: in_rest~1.20s -> OK lat=49ms
+h2 D-near9: in_rest~1.30s -> OK lat=50ms
+h2 D-near10: in_rest~1.17s -> OK lat=89ms
+h2 D-near11: in_rest~1.00s -> OK lat=31ms
+h2 D-near12: in_rest~0.97s -> OK lat=30ms
+h2 DELIV-near: 12/12 exactly one ordered down/up; failures: none | events total=24 | latency med=50 p90=71 max=90 min=29 ms (n=12)
+h2 WORK seed=7: 60 keys over 152s (gaps: 24 short/18 med/11 long), reconnect keys at this H=22 | active mC=547 to-lock mC=564 over 167s (cf 17.7) lock 5s after last key | delivered 60/60 failures: none | latency reconnect-keys med=49 p90=73 max=129 min=25 ms (n=22) held-keys med=8 p90=11 max=91 min=7 ms (n=38)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=1035 wake_gpio=73 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=103 ll_hid_tx_down=104 ll_hid_tx_done_down=104 ll_hid_fifo_drop=0
+=== h2 done  dongle=waiting for reconnect rssi=-37 dBm
+FLASH h5b ticks=default(8000) image_sha256=485305324fc04732 11:12:19
+=== hold sweep v2 h5b: H=5.0s image=485305324fc04732 charge=6 far=0 near=0 work=1 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.615mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=25 wake_gpio=1 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+h5b C1: waited=0s floor=1.539/1.539mA rest_rate=151uA | recon=29ms hold=5.17s rest_entry=5.19s above_thr=5.29s bursts=31 peak=13.4mA | total=40.1mC cf=2.7 EXCESS=37.4mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b C2: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=24ms hold=5.15s rest_entry=5.17s above_thr=5.27s bursts=33 peak=13.4mA | total=40.0mC cf=0.3 EXCESS=39.7mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b C3: waited=0s floor=1.539/1.539mA rest_rate=20uA | recon=39ms hold=5.05s rest_entry=5.09s above_thr=5.20s bursts=39 peak=13.3mA | total=39.5mC cf=0.4 EXCESS=39.2mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b C4: waited=0s floor=1.539/1.539mA rest_rate=20uA | recon=24ms hold=5.15s rest_entry=5.17s above_thr=5.28s bursts=34 peak=13.6mA | total=40.1mC cf=0.4 EXCESS=39.8mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b C5: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=57ms hold=5.15s rest_entry=5.20s above_thr=5.30s bursts=39 peak=13.5mA | total=40.2mC cf=0.3 EXCESS=39.9mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b C6: waited=0s floor=1.539/1.539mA rest_rate=19uA | recon=23ms hold=5.15s rest_entry=5.17s above_thr=5.27s bursts=33 peak=13.5mA | total=40.0mC cf=0.4 EXCESS=39.7mC | lock@6s (tail 18s) dongle=waiting for reconnect rssi=-37 dBm
+h5b CHARGE n=6: excess mC mean=39.3 min=37.4 max=39.9 sd=0.88 | hold mean=5.13s | recon ms med=27 max=57 | lock s: med=6 max=6 certified 6/6
+h5b WORK seed=7: 60 keys over 152s (gaps: 24 short/18 med/11 long), reconnect keys at this H=11 | active mC=873 to-lock mC=913 over 172s (cf 3.4) lock 10s after last key | delivered 60/60 failures: none | latency reconnect-keys med=51 p90=91 max=91 min=29 ms (n=11) held-keys med=8 p90=10 max=75 min=6 ms (n=49)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=409 wake_gpio=27 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=67 ll_hid_tx_down=67 ll_hid_tx_done_down=67 ll_hid_fifo_drop=0
+=== h5b done  dongle=waiting for reconnect rssi=-37 dBm
+FLASH h3d ticks=4800 image_sha256=6527c87fe7a75596 11:41:49
+FLASH h5r ticks=default(8000) image_sha256=485305324fc04732 11:54:37
+=== hold sweep v2 h5v: H=5.0s image=n/a charge=0 far=6 near=6 work=0 | dongle=waiting for reconnect rssi=-37 dBm ppk=1.611mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=478 wake_gpio=45 ll_drop=8 boot_reset=1 fault_marker=231 ll_hid_rx_down=13 ll_hid_tx_down=13 ll_hid_tx_done_down=13 ll_hid_fifo_drop=0
+h5v D-far1: in_rest~5.67s -> OK lat=77ms
+h5v D-far2: in_rest~6.40s -> OK lat=30ms
+h5v D-far3: in_rest~5.57s -> OK lat=30ms
+h5v D-far4: in_rest~6.14s -> OK lat=91ms
+h5v D-far5: in_rest~5.53s -> OK lat=91ms
+h5v D-far6: in_rest~5.69s -> OK lat=30ms
+h5v DELIV-far: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=54 p90=91 max=91 min=30 ms (n=6)
+h5v D-near1: in_rest~1.34s -> OK lat=52ms
+h5v D-near2: in_rest~1.02s -> OK lat=57ms
+h5v D-near3: in_rest~1.20s -> OK lat=50ms
+h5v D-near4: in_rest~1.12s -> OK lat=30ms
+h5v D-near5: in_rest~1.12s -> OK lat=50ms
+h5v D-near6: in_rest~1.14s -> OK lat=30ms
+h5v DELIV-near: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=50 p90=52 max=57 min=30 ms (n=6)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=650 wake_gpio=59 ll_drop=8 boot_reset=1 fault_marker=231 ll_hid_rx_down=25 ll_hid_tx_down=25 ll_hid_tx_done_down=25 ll_hid_fifo_drop=0
+=== h5v done  dongle=waiting for reconnect rssi=-37 dBm
+=== hold sweep v2 pc1: H=5.0s image=n/a charge=0 far=6 near=6 work=0 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.614mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=2371 wake_gpio=116 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=46 ll_hid_tx_down=46 ll_hid_tx_done_down=46 ll_hid_fifo_drop=0
+pc1 D-far1: in_rest~5.67s -> LOST
+pc1 D-far2: in_rest~6.40s -> LOST
+pc1 D-far3: in_rest~5.57s -> LOST
+pc1 D-far4: in_rest~6.14s -> LOST
+pc1 D-far5: in_rest~5.53s -> LOST
+pc1 D-far6: in_rest~5.69s -> LOST
+pc1 DELIV-far: 0/6 exactly one ordered down/up; failures: far1:LOST(n=0) far2:LOST(n=0) far3:LOST(n=0) far4:LOST(n=0) far5:LOST(n=0) far6:LOST(n=0) | events total=0 | latency none
+pc1 D-near1: in_rest~1.34s -> LOST
+pc1 D-near2: in_rest~1.02s -> LOST
+pc1 D-near3: in_rest~1.20s -> LOST
+pc1 D-near4: in_rest~1.12s -> LOST
+pc1 D-near5: in_rest~1.12s -> LOST
+pc1 D-near6: in_rest~1.14s -> LOST
+pc1 DELIV-near: 0/6 exactly one ordered down/up; failures: near1:LOST(n=0) near2:LOST(n=0) near3:LOST(n=0) near4:LOST(n=0) near5:LOST(n=0) near6:LOST(n=0) | events total=0 | latency none
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=2533 wake_gpio=129 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=58 ll_hid_tx_down=58 ll_hid_tx_done_down=58 ll_hid_fifo_drop=0
+=== pc1 done  dongle=waiting for reconnect rssi=-36 dBm
+=== hold sweep v2 pc2: H=5.0s image=n/a charge=0 far=6 near=6 work=0 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.682mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=2586 wake_gpio=133 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=59 ll_hid_tx_down=60 ll_hid_tx_done_down=60 ll_hid_fifo_drop=0
+pc2 D-far1: in_rest~5.67s -> OK lat=80ms
+pc2 D-far2: in_rest~6.40s -> OK lat=30ms
+pc2 D-far3: in_rest~5.57s -> OK lat=31ms
+pc2 D-far4: in_rest~6.14s -> OK lat=91ms
+pc2 D-far5: in_rest~5.53s -> OK lat=30ms
+pc2 D-far6: in_rest~5.69s -> OK lat=90ms
+pc2 DELIV-far: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=55 p90=90 max=91 min=30 ms (n=6)
+pc2 D-near1: in_rest~1.34s -> OK lat=75ms
+pc2 D-near2: in_rest~1.02s -> OK lat=70ms
+pc2 D-near3: in_rest~1.20s -> OK lat=72ms
+pc2 D-near4: in_rest~1.12s -> OK lat=63ms
+pc2 D-near5: in_rest~1.12s -> OK lat=60ms
+pc2 D-near6: in_rest~1.14s -> OK lat=31ms
+pc2 DELIV-near: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=67 p90=72 max=75 min=31 ms (n=6)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=2746 wake_gpio=145 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=71 ll_hid_tx_down=84 ll_hid_tx_done_down=84 ll_hid_fifo_drop=0
+=== pc2 done  dongle=waiting for reconnect rssi=-36 dBm
+=== hold sweep v2 r1_cmain_dfix: H=5.0s image=n/a charge=0 far=12 near=6 work=0 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.633mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=2804 wake_gpio=149 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=72 ll_hid_tx_down=85 ll_hid_tx_done_down=85 ll_hid_fifo_drop=0
+r1_cmain_dfix D-far1: in_rest~5.67s -> OK lat=114ms
+r1_cmain_dfix D-far2: in_rest~6.40s -> OK lat=29ms
+r1_cmain_dfix D-far3: in_rest~5.57s -> OK lat=30ms
+r1_cmain_dfix D-far4: in_rest~6.14s -> OK lat=87ms
+r1_cmain_dfix D-far5: in_rest~5.53s -> OK lat=38ms
+r1_cmain_dfix D-far6: in_rest~5.69s -> OK lat=109ms
+r1_cmain_dfix D-far7: in_rest~6.44s -> OK lat=30ms
+r1_cmain_dfix D-far8: in_rest~5.65s -> OK lat=50ms
+r1_cmain_dfix D-far9: in_rest~6.08s -> OK lat=67ms
+r1_cmain_dfix D-far10: in_rest~5.90s -> OK lat=69ms
+r1_cmain_dfix D-far11: in_rest~5.89s -> OK lat=69ms
+r1_cmain_dfix D-far12: in_rest~5.93s -> OK lat=28ms
+r1_cmain_dfix DELIV-far: 12/12 exactly one ordered down/up; failures: none | events total=24 | latency med=59 p90=87 max=114 min=28 ms (n=12)
+r1_cmain_dfix D-near1: in_rest~1.02s -> OK lat=49ms
+r1_cmain_dfix D-near2: in_rest~1.27s -> OK lat=70ms
+r1_cmain_dfix D-near3: in_rest~0.98s -> OK lat=30ms
+r1_cmain_dfix D-near4: in_rest~1.03s -> OK lat=51ms
+r1_cmain_dfix D-near5: in_rest~0.95s -> OK lat=50ms
+r1_cmain_dfix D-near6: in_rest~1.05s -> OK lat=51ms
+r1_cmain_dfix DELIV-near: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=50 p90=51 max=70 min=30 ms (n=6)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=3041 wake_gpio=167 ll_drop=11 boot_reset=1 fault_marker=231 ll_hid_rx_down=90 ll_hid_tx_down=103 ll_hid_tx_done_down=103 ll_hid_fifo_drop=0
+=== r1_cmain_dfix done  dongle=waiting for reconnect rssi=-36 dBm
+FLASH kfix ticks=default(8000) image_sha256=13c23230a2e723a4 13:49:19
+=== hold sweep v2 r2_cfix_dfix: H=5.0s image=n/a charge=0 far=24 near=12 work=1 | dongle=waiting for reconnect rssi=-35 dBm ppk=2.443mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=1 wake_gpio=1 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=0 ll_hid_tx_done_down=0 ll_hid_fifo_drop=0
+r2_cfix_dfix D-far1: in_rest~5.67s -> LOST
+r2_cfix_dfix D-far2: in_rest~6.40s -> LOST
+r2_cfix_dfix D-far3: in_rest~5.57s -> LOST
+r2_cfix_dfix D-far4: in_rest~6.14s -> LOST
+r2_cfix_dfix D-far5: in_rest~5.53s -> LOST
+r2_cfix_dfix D-far6: in_rest~5.69s -> LOST
+r2_cfix_dfix D-far7: in_rest~6.44s -> LOST
+r2_cfix_dfix D-far8: in_rest~5.65s -> LOST
+r2_cfix_dfix D-far9: in_rest~6.08s -> LOST
+r2_cfix_dfix D-far10: in_rest~5.90s -> LOST
+r2_cfix_dfix D-far11: in_rest~5.89s -> LOST
+r2_cfix_dfix D-far12: in_rest~5.93s -> LOST
+r2_cfix_dfix D-far13: in_rest~5.63s -> LOST
+r2_cfix_dfix D-far14: in_rest~6.27s -> LOST
+r2_cfix_dfix D-far15: in_rest~5.53s -> LOST
+r2_cfix_dfix D-far16: in_rest~5.67s -> LOST
+r2_cfix_dfix D-far17: in_rest~5.46s -> LOST
+r2_cfix_dfix D-far18: in_rest~5.71s -> LOST
+r2_cfix_dfix D-far19: in_rest~5.85s -> LOST
+r2_cfix_dfix D-far20: in_rest~6.34s -> LOST
+r2_cfix_dfix D-far21: in_rest~5.82s -> LOST
+r2_cfix_dfix D-far22: in_rest~5.55s -> LOST
+r2_cfix_dfix D-far23: in_rest~5.70s -> LOST
+r2_cfix_dfix D-far24: in_rest~6.43s -> LOST
+r2_cfix_dfix DELIV-far: 0/24 exactly one ordered down/up; failures: far1:LOST(n=0) far2:LOST(n=0) far3:LOST(n=0) far4:LOST(n=0) far5:LOST(n=0) far6:LOST(n=0) far7:LOST(n=0) far8:LOST(n=0) far9:LOST(n=0) far10:LOST(n=0) far11:LOST(n=0) far12:LOST(n=0) far13:LOST(n=0) far14:LOST(n=0) far15:LOST(n=0) far16:LOST(n=0) far17:LOST(n=0) far18:LOST(n=0) far19:LOST(n=0) far20:LOST(n=0) far21:LOST(n=0) far22:LOST(n=0) far23:LOST(n=0) far24:LOST(n=0) | events total=0 | latency none
+FLASH kfix2 ticks=default(8000) image_sha256=98f85827751f4d58 13:56:33
+=== hold sweep v2 k2s: H=5.0s image=n/a charge=0 far=6 near=3 work=0 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.764mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=35 wake_gpio=1 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+k2s D-far1: in_rest~5.67s -> OK lat=74ms
+k2s D-far2: in_rest~6.40s -> OK lat=31ms
+k2s D-far3: in_rest~5.57s -> OK lat=31ms
+k2s D-far4: in_rest~6.14s -> OK lat=89ms
+k2s D-far5: in_rest~5.53s -> OK lat=89ms
+k2s D-far6: in_rest~5.69s -> OK lat=30ms
+k2s DELIV-far: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=53 p90=89 max=89 min=30 ms (n=6)
+k2s D-near1: in_rest~1.34s -> OK lat=53ms
+k2s D-near2: in_rest~1.02s -> OK lat=70ms
+k2s D-near3: in_rest~1.20s -> OK lat=69ms
+k2s DELIV-near: 3/3 exactly one ordered down/up; failures: none | events total=6 | latency med=69 p90=69 max=70 min=53 ms (n=3)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=187 wake_gpio=12 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=10 ll_hid_tx_down=12 ll_hid_tx_done_down=12 ll_hid_fifo_drop=0
+=== k2s done  dongle=waiting for reconnect rssi=-36 dBm
+FLASH cmain ticks=default(8000) image_sha256=485305324fc04732 13:59:41
+=== hold sweep v2 r3_cmain_dfix: H=5.0s image=n/a charge=0 far=0 near=0 work=1 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.780mA
+  diag[start]: rf_state=3 ll_boot=0x95E30486 sleep_entered=38 wake_gpio=1 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+r3_cmain_dfix WORK seed=7: 60 keys over 152s (gaps: 24 short/18 med/11 long), reconnect keys at this H=11 | active mC=883 to-lock mC=924 over 172s (cf 29.4) lock 10s after last key | delivered 60/60 failures: none | latency reconnect-keys med=69 p90=89 max=110 min=29 ms (n=11) held-keys med=8 p90=10 max=77 min=7 ms (n=49)
+  diag[end]: rf_state=0 ll_boot=0x95E30486 sleep_entered=174 wake_gpio=16 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=61 ll_hid_tx_down=61 ll_hid_tx_done_down=61 ll_hid_fifo_drop=0
+=== r3_cmain_dfix done  dongle=waiting for reconnect rssi=-37 dBm
+FLASH r3s ticks=default(8000) image_sha256=6527c87fe7a75596 14:21:22
+FLASH r3s ticks=default(8000) image_sha256=6527c87fe7a75596 14:22:48
+=== hold sweep v2 v3s: H=3.0s image=n/a charge=2 far=6 near=6 work=0 | dongle=waiting for reconnect rssi=-36 dBm ppk=1.715mA
+  diag[start]: rf_state=0 ll_boot=0x95E30486 sleep_entered=42 wake_gpio=2 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=1 ll_hid_tx_down=1 ll_hid_tx_done_down=1 ll_hid_fifo_drop=0
+v3s C1: waited=0s floor=1.634/1.634mA rest_rate=159uA | recon=77ms hold=3.15s rest_entry=3.22s above_thr=3.27s bursts=33 peak=13.7mA | total=25.2mC cf=2.5 EXCESS=22.6mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-36 dBm
+v3s C2: waited=0s floor=1.634/1.634mA rest_rate=18uA | recon=55ms hold=3.05s rest_entry=3.10s above_thr=3.20s bursts=39 peak=13.8mA | total=24.6mC cf=0.3 EXCESS=24.4mC | lock@4s (tail 16s) dongle=waiting for reconnect rssi=-36 dBm
+v3s CHARGE n=2: excess mC mean=23.5 min=22.6 max=24.4 sd=0.87 | hold mean=3.10s | recon ms med=66 max=77 | lock s: med=4 max=4 certified 2/2
+v3s D-far1: in_rest~5.67s -> OK lat=78ms
+v3s D-far2: in_rest~6.40s -> OK lat=29ms
+v3s D-far3: in_rest~5.57s -> OK lat=29ms
+v3s D-far4: in_rest~6.14s -> OK lat=91ms
+v3s D-far5: in_rest~5.53s -> OK lat=90ms
+v3s D-far6: in_rest~5.69s -> OK lat=29ms
+v3s DELIV-far: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=54 p90=90 max=91 min=29 ms (n=6)
+v3s D-near1: in_rest~1.34s -> OK lat=52ms
+v3s D-near2: in_rest~1.02s -> OK lat=69ms
+v3s D-near3: in_rest~1.20s -> OK lat=70ms
+v3s D-near4: in_rest~1.12s -> OK lat=57ms
+v3s D-near5: in_rest~1.12s -> OK lat=30ms
+v3s D-near6: in_rest~1.14s -> OK lat=44ms
+v3s DELIV-near: 6/6 exactly one ordered down/up; failures: none | events total=12 | latency med=55 p90=69 max=70 min=30 ms (n=6)
+  diag[end]: rf_state=3 ll_boot=0x95E30486 sleep_entered=298 wake_gpio=18 ll_drop=0 boot_reset=1 fault_marker=231 ll_hid_rx_down=15 ll_hid_tx_down=15 ll_hid_tx_done_down=15 ll_hid_fifo_drop=0
+=== v3s done  dongle=waiting for reconnect rssi=-36 dBm

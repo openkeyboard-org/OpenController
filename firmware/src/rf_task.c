@@ -146,13 +146,16 @@
  * again. The dongle's detector locks onto that cadence and windows/halts around
  * it. After KBD_REST_STAGE2_TICKS stop probing until a key. A host report while
  * resting probes at once and keeps the session. Ticks are TMOS units (625 us).
- * Values are production parity (5 s / 1.010 s / 30 min), owner-decided
- * 2026-09-11, tunable. */
+ * T_probe / T_deep are production parity (1.010 s / 30 min), owner-decided
+ * 2026-09-11. T_idle is 3 s by default, owner-decided 2026-09-13 after the hold
+ * sweep (firmware/bench/2026-09-13-rest-hold-sweep: 24 mC per key from rest vs
+ * 39 at 5 s, delivery and latency unchanged); the Makefile's KBD_REST_IDLE_MS
+ * knob passes it as KBD_REST_IDLE_TICKS (production parity: 5000 ms). */
 #ifndef KBD_REST
 #define KBD_REST 1
 #endif
 #ifndef KBD_REST_IDLE_TICKS
-#define KBD_REST_IDLE_TICKS          8000u    /* 5 s: production's first inactivity stage */
+#define KBD_REST_IDLE_TICKS          4800u    /* 3 s; the Makefile passes KBD_REST_IDLE_MS x 8/5 */
 #endif
 #ifndef KBD_REST_PROBE_TICKS
 #define KBD_REST_PROBE_TICKS         1616u    /* 1010 ms: inside the dongle's 900-1100 ms cadence window */
