@@ -23,11 +23,15 @@
 #define DIAG_FAULT_MTVAL    (*(volatile uint32_t *)0x20005810u)
 
 #if RF_DIAG_COUNTERS && KBD_UART_DIAG_DUMP
-/* Counters owned by rf_task.c (external linkage, .diag_safe*). */
+/* Counters owned by rf_task.c (external linkage). The originals live in
+ * .diag_safe* and survive a reset; the ll_hid_* report-delivery counters below
+ * are plain .bss and are therefore zeroed by any reboot. */
 extern volatile uint32_t ll_boot_count, rf_pair_bcast_count, rf_valid_rx_count;
 extern volatile uint32_t entered_connected_count, rf_config_count, pwr_pair_rx_off_count;
 extern volatile uint32_t ll_drop_count;
 extern volatile uint8_t  rf_last_config_status, rf_last_rx_status, rf_last_tx_status;
+extern volatile uint32_t ll_hid_rx, ll_hid_tx, ll_hid_rx_down, ll_hid_tx_down, ll_hid_tx_done_down;
+extern volatile uint32_t ll_hid_fifo_drop;
 #if KBD_IDLE_WFI
 extern volatile uint32_t pwr_wfi_count;          /* main.c */
 #endif
@@ -70,6 +74,12 @@ void DiagDump_Send(void)
         s.rf_last_rx_status = rf_last_rx_status;
         s.rf_last_tx_status = rf_last_tx_status;
         s.ll_drop_count = ll_drop_count;
+        s.ll_hid_rx = ll_hid_rx;
+        s.ll_hid_tx = ll_hid_tx;
+        s.ll_hid_rx_down = ll_hid_rx_down;
+        s.ll_hid_tx_down = ll_hid_tx_down;
+        s.ll_hid_tx_done_down = ll_hid_tx_done_down;
+        s.ll_hid_fifo_drop = ll_hid_fifo_drop;
         s.boot_reset_status = DIAG_RESET_STATUS;
         s.fault_marker = DIAG_FAULT_MARKER;
         s.fault_mepc = DIAG_FAULT_MEPC;
@@ -110,6 +120,8 @@ void DiagDump_Zero(void)
     rf_pair_bcast_count = 0; rf_valid_rx_count = 0; entered_connected_count = 0;
     rf_config_count = 0; pwr_pair_rx_off_count = 0; ll_drop_count = 0;
     rf_last_config_status = 0; rf_last_rx_status = 0; rf_last_tx_status = 0;
+    ll_hid_rx = 0; ll_hid_tx = 0; ll_hid_rx_down = 0; ll_hid_tx_down = 0; ll_hid_tx_done_down = 0;
+    ll_hid_fifo_drop = 0;
 #if KBD_IDLE_WFI
     pwr_wfi_count = 0;
 #endif
