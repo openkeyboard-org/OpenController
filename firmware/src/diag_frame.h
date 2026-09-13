@@ -9,7 +9,7 @@
  *   A6 72 18   host: zero the dumped counters (ll_boot_count kept)
  *
  * Payload v3, little-endian, fixed order (DIAG_PAYLOAD_LEN bytes). A strict v2
- * reader must be updated: the length grew 65 -> 85 and the version byte is now 3;
+ * reader must be updated: the length grew 65 -> 89 and the version byte is now 3;
  * all pre-existing field offsets are unchanged.
  * Layout:
  *   u8  version(=3)  u8 rf_state

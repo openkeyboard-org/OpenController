@@ -292,8 +292,9 @@ CFLAGS += $(EXTRA_CFLAGS)
 # image with `make RF_DIAG_COUNTERS=0` to compile out the counters, their
 # always-on read-modify-writes (incl. the RX-ISR hot path), and their SRAM.
 # Passed to both .c and .S (AS is gcc).
-# Resting policy (RESTING_POLICY.md): silent link drop after 5 s without a host
-# report, 1.010 s probes, no probes after 30 min. 0 compiles the policy out.
+# Resting policy (RESTING_POLICY.md): silent link drop after KBD_REST_IDLE_MS
+# without a host report, 1.010 s probes, no probes after 30 min. 0 compiles the
+# policy out.
 KBD_REST ?= 1
 ifneq ($(words $(strip $(KBD_REST))),1)
 $(error KBD_REST must be a single value, got '$(KBD_REST)')
@@ -302,6 +303,36 @@ ifeq ($(filter 0 1,$(strip $(KBD_REST))),)
 $(error KBD_REST must be 0 or 1, got '$(KBD_REST)')
 endif
 CFLAGS += -DKBD_REST=$(KBD_REST)
+# T_idle (RESTING_POLICY.md D1): milliseconds without a host report before the
+# link is dropped. Default 3000 after the 2026-09-13 hold sweep
+# (firmware/bench/2026-09-13-rest-hold-sweep): 24 mC per key from rest vs 39 at
+# 5 s, first-key delivery and latency unchanged, and a dongle outage recovers
+# through rest instead of supervision. Production parity is
+# `make KBD_REST_IDLE_MS=5000`. Converted to TMOS 625 us ticks (x 8/5) HERE so
+# the C default and the knob cannot drift; an EXTRA_CFLAGS -D of the tick macro
+# would win the CFLAGS redefinition silently, so it is rejected like the others.
+KBD_REST_IDLE_MS ?= 3000
+ifneq ($(words $(strip $(KBD_REST_IDLE_MS))),1)
+$(error KBD_REST_IDLE_MS must be a single value, got '$(KBD_REST_IDLE_MS)')
+endif
+# Digits only, decided by make itself: nothing reaches a shell until it is
+# known to be a plain number (a quote in the value would otherwise escape).
+ifneq ($(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(strip $(KBD_REST_IDLE_MS)))))))))))),)
+$(error KBD_REST_IDLE_MS must be a whole number of milliseconds, got '$(KBD_REST_IDLE_MS)')
+endif
+ifeq ($(shell [ $(strip $(KBD_REST_IDLE_MS)) -ge 500 ] && [ $(strip $(KBD_REST_IDLE_MS)) -le 60000 ] && echo ok),)
+$(error KBD_REST_IDLE_MS must be 500..60000, got '$(KBD_REST_IDLE_MS)')
+endif
+# Neither macro may arrive by another road: a -D in EXTRA_CFLAGS would win
+# silently, and a command-line tick count would skip the range check.
+ifneq ($(findstring KBD_REST_IDLE,$(EXTRA_CFLAGS)),)
+$(error KBD_REST_IDLE_MS / KBD_REST_IDLE_TICKS must not go through EXTRA_CFLAGS; use `make KBD_REST_IDLE_MS=<ms>`)
+endif
+ifneq ($(origin KBD_REST_IDLE_TICKS),undefined)
+$(error KBD_REST_IDLE_TICKS is derived; set KBD_REST_IDLE_MS=<ms> instead)
+endif
+KBD_REST_IDLE_TICKS := $(shell expr $(strip $(KBD_REST_IDLE_MS)) \* 8 / 5)
+CFLAGS += -DKBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)u
 
 RF_DIAG_COUNTERS ?= 1
 CFLAGS += -DRF_DIAG_COUNTERS=$(RF_DIAG_COUNTERS)
@@ -488,6 +519,9 @@ print-board-config:
 	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
 	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
 	    'KBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)' \
+	    'KBD_REST=$(KBD_REST)' \
+	    'KBD_REST_IDLE_MS=$(KBD_REST_IDLE_MS)' \
+	    'KBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)' \
 	    'BUILD=$(BUILD)' \
 	    'BUNDLE_BIN=$(BUNDLE_BIN)' \
 	    'FACTORY_BIN=$(FACTORY_BIN)'
@@ -695,8 +729,10 @@ flash-factory: factory
 #	keeps the bond deliberately via ALLOW_BONDED_FLASH=1 (compared against
 #	exactly "1" so a scripted =0 fails safe). Clear it over UART (A6 52
 #	unpair) if needed - never write CH592 DataFlash over SWD.
+#	BSD od pads the bytes with two spaces, GNU od with one: match either, or
+#	the guard never fires on macOS (it did not, 2026-09-13).
 	"$(MINICHLINK)" -C linke -r "$(BUILD)/.flash-bond.bin" 0x74000 4 $(PROBE_ARG)
-	@if head -c 4 "$(BUILD)/.flash-bond.bin" | od -An -tx1 | grep -qi "4b 42 44 32"; then \
+	@if head -c 4 "$(BUILD)/.flash-bond.bin" | od -An -tx1 | grep -qiE "4b +42 +44 +32"; then \
 	  if [ "$(strip $(ALLOW_BONDED_FLASH))" = "1" ]; then \
 	    echo "WARNING: KBD2 bond present at 0x74000 (-E will not clear DataFlash); continuing (ALLOW_BONDED_FLASH=1)" >&2; \
 	  else \
