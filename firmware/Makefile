@@ -504,7 +504,8 @@ KBD_PROBE ?=
 PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
 .PHONY: all clean size size-check info gdbserver debug factory flash-factory \
-        bundle update check-deps check-openboot-toolchain check-factory-slot \
+        bundle update update-qmk check-bundle-family check-deps \
+        check-openboot-toolchain check-factory-slot \
         openboot-image openboot-test print-board-config FORCE
 
 all: $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size size-check
@@ -775,16 +776,11 @@ bundle:
 	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
 	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
-# Bench OBP update over UART1 on the selected board profile's pins. Opening
-# the port resets the target into OpenBoot's 10 s idle window; the CLI's
-# HELLO then holds it (fail-stay). Both bundle members are family-checked (ODG2
-# family 0xB2 at image offset 0x25) before anything talks to the device:
-# OpenBoot's COMMIT attests only length+CRC, so this is the only guard
-# against cross-flashing a dongle CH592 image on a shared bench.
-OB_PORT ?=
-update: bundle
-	@test -n "$(strip $(OB_PORT))" || { \
-	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
+# Family check shared by `update` and `update-qmk`. Both bundle members are
+# family-checked (ODG2 family 0xB2 at image offset 0x25) before anything talks
+# to the device: OpenBoot's COMMIT attests only length+CRC, so this is the only
+# guard against cross-flashing a dongle CH592 image on a shared bench.
+check-bundle-family: bundle
 	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \
 	  magic=$$(od -An -c -j $$(( 0x20 )) -N4 "$$f" | tr -d ' '); \
 	  test "$$magic" = "ODG2" || { \
@@ -795,6 +791,14 @@ update: bundle
 	    echo "ERROR: $$f has ODG2 family 0x$$fam, expected 0xb2 (OpenController keyboard)" >&2; \
 	    exit 1; }; \
 	done
+
+# Bench OBP update over UART1 on the selected board profile's pins. Opening
+# the port resets the target into OpenBoot's 10 s idle window; the CLI's
+# HELLO then holds it (fail-stay).
+OB_PORT ?=
+update: check-bundle-family
+	@test -n "$(strip $(OB_PORT))" || { \
+	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
 #	Ask the running application to enter the bootloader (A6 81 = stock OTA
 #	mode), then ride out the ~2 s of post-reset UART turbulence before the
 #	first HELLO - the CLI's fast retries all land inside it otherwise
@@ -811,6 +815,33 @@ update: bundle
 #	("boot after: yes"), so the device is already running the new image
 #	when this returns - a trailing boot would HELLO an application.
 	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" flash "$(BUNDLE_BIN)" --force
+
+# OBP update through the keyboard's QMK HID tunnel: no serial bridge, no
+# disassembly. Same bundle and same family guard as `update`; the A6 81 and the
+# post-reset settle move into the transport, which anchors on the elapsed time
+# the keyboard reports and probes HELLO across the window instead of sleeping a
+# fixed 6 s. The keyboard runs no OBP client - it forwards bytes, and the module
+# still reports transport = UART. It does go off air until this finishes.
+QMK_VID ?=
+QMK_PID ?=
+QMK_SERIAL ?=
+update-qmk: check-bundle-family
+	@test -n "$(strip $(QMK_VID))" -a -n "$(strip $(QMK_PID))" || { \
+	  echo "set QMK_VID and QMK_PID to the KEYBOARD's USB identity" >&2; \
+	  echo "  e.g. make $@ QMK_VID=0x4D4B QMK_PID=0x0002" >&2; exit 1; }
+#	The tunnel is newer than some pinned OpenBoot revisions. Ask the CLI's
+#	own argument parser whether it accepts 'qmk' (an older CLI rejects it as
+#	an unknown enum value) and say so plainly, rather than relying on the
+#	wording of its help text.
+	@"$(OPENBOOT_CLI)" --transport qmk --help >/dev/null 2>&1 || { \
+	  echo "ERROR: the vendored openboot CLI has no qmk transport." >&2; \
+	  echo "  Bump OPENBOOT_REVISION / the third_party/openboot submodule to a" >&2; \
+	  echo "  revision that carries tools/src/transport/qmk.rs." >&2; exit 1; }
+#	No separate `boot` step, for the same reason as `update` above.
+	"$(OPENBOOT_CLI)" --transport qmk \
+	    --vid "$(QMK_VID)" --pid "$(QMK_PID)" \
+	    $(if $(strip $(QMK_SERIAL)),--serial "$(QMK_SERIAL)") \
+	    flash "$(BUNDLE_BIN)" --force
 
 # Probe the keyboard-side CH592F.
 # minichlink selects the probe with `-l <serial>`, which MUST be the last arg.

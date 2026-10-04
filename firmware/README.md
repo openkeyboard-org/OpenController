@@ -107,11 +107,31 @@ flows, and recovery/revert procedures.
 ```bash
 make flash-factory KBD_PROBE=<serial>   # whole-chip factory install via SWD
 make update OB_PORT=/dev/serial/by-id/<probe-cdc>   # A/B update over UART
+make update-qmk QMK_VID=0x4D4B QMK_PID=0x0002       # A/B update through the keyboard
 ```
 
 `make update` follows the selected board profile's UART pins: the default
 board uses PB12/PB13; for the MK65MX profile pass
 `BOARD=mk65mx-wireless-ch592` and connect the serial bridge to PA8/PA9.
+
+`make update-qmk` needs no serial bridge and no disassembly. It builds,
+bundles and family-checks (`0xB2`) exactly like `make update`, then runs
+`openboot --transport qmk … flash <bundle> --force` through the keyboard's
+QMK HID tunnel, with `QMK_VID`/`QMK_PID` (and optionally `QMK_SERIAL`) naming
+the keyboard. The keyboard only forwards bytes: the OBP client stays on the
+PC and the module still reports `transport = UART`. Where `make update`
+sends `A6 81` itself and then sleeps a fixed 6 s, the transport asks the
+keyboard to queue the bootloader entry behind any frame in flight (so never
+inject raw `A6 81 27` into the tunnel), asks it how long ago the module
+acknowledged, and probes HELLO across the post-reset window, typically
+connecting in about 2.3 s. 2.4 GHz and Bluetooth stop for the duration; USB
+typing keeps working.
+
+The tunnel needs a keyboard image that carries the OpenBoot bridge; a
+keyboard flashed before the bridge, or one whose bridge is broken, still
+updates over the serial bridge above. The vendored `openboot` CLI also needs
+the qmk transport (OpenBoot `38dae42` or later); `update-qmk` checks and
+stops with an error rather than letting the CLI reject the transport name.
 
 Flashing uses [minichlink](https://github.com/cnlohr/ch32fun) (from
 `PATH`, or `make MINICHLINK=/path/to/minichlink`) with a WCH-LinkE probe.
