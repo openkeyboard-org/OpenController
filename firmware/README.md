@@ -93,6 +93,26 @@ reported by `print-board-config`; passing it through `EXTRA_CFLAGS` is
 rejected at parse time because that path would silently diverge from the
 reported configuration.
 
+Measured on an MK65MX Wireless rev B02 keyboard (2026-10-04) with
+`288decb`, before the module sleep and link rest work: whole-board current
+at the USB input, with the LED matrix in the same state for every reading.
+The board is USB powered in both rows; the keyboard's routing only decides
+whether key reports go over USB or the 2.4 GHz link.
+
+| Keyboard routed to | LDO | DC-DC |
+|---|---|---|
+| USB | 26.7 mA | 24.3 mA |
+| 2.4 GHz | 31.2 mA | 26.8 mA |
+
+The radio's share (2.4 GHz minus USB) fell from 4.5 to 2.5 mA, in line with
+the datasheet's receive current of 7.5 mA on the LDO and 3.5 mA on DC-DC.
+Received signal strength at an OpenDongle, in DC-DC, LDO and DC-DC runs of
+138 samples each with nothing moved, had medians of -71, -68 and -69 dBm. So
+DC-DC reads about 2 dB weaker, which is inside each run's 4-5 dB spread and
+far above the -95 dBm sensitivity. Pairing, typing, waking the link with a
+keystroke, and OpenBoot updates through the QMK tunnel all worked on the
+DC-DC build.
+
 The size check enforces the 216 KiB slot capacity (see BOOT.md).
 
 ## Boot chain and flashing
