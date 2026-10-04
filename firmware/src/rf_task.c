@@ -360,8 +360,8 @@ static volatile uint8_t  bond_save_pending;
  * (tmos_proces_system_time). We keep list mutation in main-loop context only as a
  * correctness/ISR-safety measure. (NB: the v1.4.2 "TMOS HardFault" this originally
  * chased turned out to be a debugger-perturbation artifact, not an operational
- * fault -- see docs/TMOS_REVIEW.md -- but deferring ISR list mutation is good practice
- * regardless and is retained.) */
+ * fault, but deferring ISR list mutation is good practice regardless and is
+ * retained.) */
 static volatile uint8_t  supervision_kick;
 #if KBD_REST
 static uint8_t rest_stage;                    /* 0 not resting, 1 probing, 2 no probes until a key */
@@ -653,9 +653,9 @@ __attribute__((always_inline)) static inline void rf_irq_restore(uint32_t s)
  * app-list-mutation could race the main-loop walk (tmos_proces_system_time).
  * Disabling interrupts globally around each app list mutation closes that window.
  * (NB: the v1.4.2 "TMOS HardFault" this was aimed at proved to be a
- * debugger-perturbation artifact rather than an operational fault -- see
- * docs/TMOS_REVIEW.md -- and `bb_cb_in_cs_count` measured 0 BB-in-CS hits in a soak; the
- * wrap is cheap defense-in-depth and is retained. v1.00's spinlock did not need
+ * debugger-perturbation artifact rather than an operational fault, and
+ * `bb_cb_in_cs_count` measured 0 BB-in-CS hits in a soak; the wrap is cheap
+ * defense-in-depth and is retained. v1.00's spinlock did not need
  * it; harmless there.) */
 static void rf_start_task_atomic(uint16_t evt, uint32_t ticks)
 {

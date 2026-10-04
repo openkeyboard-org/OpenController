@@ -7,7 +7,7 @@
 # The application runs under OpenBoot (third_party/openboot): bootloader at
 # [0, 0x2000), two A/B application slots, per-slot boot records. Each build
 # targets ONE slot (SLOT=A|B); releases ship both builds as one .obb bundle.
-# See BOOT.md for the flash map and update flows.
+# See README.md (Boot chain and flashing) for the update flows.
 #
 # TOOLCHAIN — a WCH fork of GCC is REQUIRED (see below); two are supported:
 #
@@ -40,7 +40,7 @@
 # power-cycle (2.2 s). Probe-mediated keyboard resets showed a recovery
 # failure IDENTICALLY under GCC15 and a same-source GCC12 control — that is
 # the known minichlink bench artifact (see README.md), not a toolchain
-# effect; physical warm resets recover (999/1000 soak, BOOT.md).
+# effect; physical warm resets recover (999/1000 soak, README.md).
 
 # Grouped targets (&:) need GNU Make >= 4.3; older make silently races the
 # factory rule instead of failing.
@@ -73,8 +73,7 @@ SDK_SRC_DIR := $(SDK)
 #
 # NOTE: earlier bench notes thought v1.4.2 required app-side
 # PFIC_EnableIRQ(BLEB/BLEL), but that was a debugger-reset artifact. The app
-# now relies on the library's normal BLEB fast-vector setup; see
-# docs/TMOS_REVIEW.md.
+# now relies on the library's normal BLEB fast-vector setup.
 OPENWCH_CH592_ROOT = $(OPENBOOT)/third_party/openwch/ch592
 OPENWCH_CH592_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 BLE_LIB_DIR ?= $(OPENWCH_CH592_ROOT)/EVT/EXAM/BLE/LIB
@@ -393,7 +392,7 @@ INCLUDES += -I $(OPENBOOT)/firmware/app
 
 # Source files - our application
 # This is the keyboard-side wireless module: no USB device. Firmware updates
-# go through OpenBoot (A6 81 -> openboot_request_update; see BOOT.md).
+# go through OpenBoot (A6 81 -> openboot_request_update; see README.md).
 APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
@@ -449,7 +448,7 @@ SCHED_SRC := $(BLE_LIB_DIR)/ble_task_scheduler.S
 # while RF callbacks fired, and removing it kept full pairing + connected HID
 # delivery. Matches the SDK LWNS example, which ships no app BB handler.
 # (NOTE: no app-side PFIC_EnableIRQ(BLEB/BLEL) calls are required in main.c; the
-# earlier contrary note was a debugger-reset artifact. See docs/TMOS_REVIEW.md.)
+# earlier contrary note was a debugger-reset artifact.)
 # Strong NMI_Handler / HardFault_Handler overrides. Vendor startup ships
 # weak handlers that infinite-loop with zero diagnostic state. Ours
 # capture mepc/mcause/mtval to fixed SRAM (0x20005804..0x20005810) so
