@@ -18,7 +18,8 @@
  *
  * RAM LENGTH is 0x67F0, not 26K: OpenBoot's boot-request mailbox occupies
  * the top 16 bytes of SRAM (0x200067F0), written by openboot_request_update()
- * and consumed by the bootloader after the soft reset. See firmware/BOOT.md.
+ * and consumed by the bootloader after the soft reset. See "RAM boot request"
+ * in third_party/openboot/firmware/app/README.md.
  */
 
 INCLUDE memory.ld

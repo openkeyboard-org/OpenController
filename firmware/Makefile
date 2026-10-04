@@ -7,7 +7,7 @@
 # The application runs under OpenBoot (third_party/openboot): bootloader at
 # [0, 0x2000), two A/B application slots, per-slot boot records. Each build
 # targets ONE slot (SLOT=A|B); releases ship both builds as one .obb bundle.
-# See BOOT.md for the flash map and update flows.
+# See README.md (Boot chain and flashing) for the update flows.
 #
 # TOOLCHAIN — a WCH fork of GCC is REQUIRED (see below); two are supported:
 #
@@ -40,7 +40,7 @@
 # power-cycle (2.2 s). Probe-mediated keyboard resets showed a recovery
 # failure IDENTICALLY under GCC15 and a same-source GCC12 control — that is
 # the known minichlink bench artifact (see README.md), not a toolchain
-# effect; physical warm resets recover (999/1000 soak, BOOT.md).
+# effect; physical warm resets recover (999/1000 soak, README.md).
 
 # Grouped targets (&:) need GNU Make >= 4.3; older make silently races the
 # factory rule instead of failing.
@@ -73,8 +73,7 @@ SDK_SRC_DIR := $(SDK)
 #
 # NOTE: earlier bench notes thought v1.4.2 required app-side
 # PFIC_EnableIRQ(BLEB/BLEL), but that was a debugger-reset artifact. The app
-# now relies on the library's normal BLEB fast-vector setup; see
-# docs/TMOS_REVIEW.md.
+# now relies on the library's normal BLEB fast-vector setup.
 OPENWCH_CH592_ROOT = $(OPENBOOT)/third_party/openwch/ch592
 OPENWCH_CH592_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
 BLE_LIB_DIR ?= $(OPENWCH_CH592_ROOT)/EVT/EXAM/BLE/LIB
@@ -182,13 +181,13 @@ OPENBOOT := $(abspath ../third_party/openboot)
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := 235486da03980a86e9254f8851b043bbf9456ac4
+OPENBOOT_REVISION := d89d4d67b5e80b212ec0466a57042a55f19687b7
 # The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
-# the app defaults to GCC15. Upstream measured erratic GCC15 bootloader
-# behavior (see check-openboot-toolchain), so this defaults to the validated
-# GCC12 install independently of MRS_TOOLCHAIN, and the hard gate below keeps
-# enforcing GCC12 on every path that builds the bootloader (upstream's own
-# compiler check is advisory).
+# the app defaults to GCC15. GCC12 is the bootloader compiler OpenBoot
+# documents as validated on silicon (see check-openboot-toolchain for the
+# GCC15 history), so this defaults to the GCC12 install independently of
+# MRS_TOOLCHAIN, and the hard gate below keeps enforcing GCC12 on every path
+# that builds the bootloader (upstream's own compiler check is advisory).
 OPENBOOT_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin
 OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
 
@@ -393,7 +392,7 @@ INCLUDES += -I $(OPENBOOT)/firmware/app
 
 # Source files - our application
 # This is the keyboard-side wireless module: no USB device. Firmware updates
-# go through OpenBoot (A6 81 -> openboot_request_update; see BOOT.md).
+# go through OpenBoot (A6 81 -> openboot_request_update; see README.md).
 APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
@@ -449,7 +448,7 @@ SCHED_SRC := $(BLE_LIB_DIR)/ble_task_scheduler.S
 # while RF callbacks fired, and removing it kept full pairing + connected HID
 # delivery. Matches the SDK LWNS example, which ships no app BB handler.
 # (NOTE: no app-side PFIC_EnableIRQ(BLEB/BLEL) calls are required in main.c; the
-# earlier contrary note was a debugger-reset artifact. See docs/TMOS_REVIEW.md.)
+# earlier contrary note was a debugger-reset artifact.)
 # Strong NMI_Handler / HardFault_Handler overrides. Vendor startup ships
 # weak handlers that infinite-loop with zero diagnostic state. Ours
 # capture mepc/mcause/mtval to fixed SRAM (0x20005804..0x20005810) so
@@ -624,10 +623,13 @@ check-deps:
 	  done
 
 # OpenBoot's own compiler gate is ADVISORY: a mismatch warns and continues.
-# GCC15 is bench-unvalidated for the bootloader (upstream measured erratic
-# idle auto-boot at 1.5-4.8 s against a configured 10 s, and 4/32 failed
-# software-reset returns on CH572). Keep a HARD gate on the paths that build
-# the bootloader. Override only to reproduce that investigation:
+# Upstream once measured erratic GCC15 bootloader behavior on CH572 (idle
+# auto-boot at 1.5-4.8 s against a configured 10 s, 4/32 failed
+# software-reset returns). OpenBoot 6f98580 re-validated GCC15 on CH572 and
+# CH570 and now accepts it, but its README still names GCC12 as the compiler
+# validated on silicon, and every CH592 factory image built here has carried
+# a GCC12 bootloader. Keep a HARD gate on the paths that build the
+# bootloader. Override only to try another compiler deliberately:
 #   make ... OPENBOOT_ALLOW_UNVALIDATED_GCC=1
 check-openboot-toolchain:
 	@if [ "$(OPENBOOT_ALLOW_UNVALIDATED_GCC)" = "1" ]; then \
