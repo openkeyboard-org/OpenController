@@ -182,13 +182,13 @@ OPENBOOT := $(abspath ../third_party/openboot)
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := 235486da03980a86e9254f8851b043bbf9456ac4
+OPENBOOT_REVISION := d89d4d67b5e80b212ec0466a57042a55f19687b7
 # The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
-# the app defaults to GCC15. Upstream measured erratic GCC15 bootloader
-# behavior (see check-openboot-toolchain), so this defaults to the validated
-# GCC12 install independently of MRS_TOOLCHAIN, and the hard gate below keeps
-# enforcing GCC12 on every path that builds the bootloader (upstream's own
-# compiler check is advisory).
+# the app defaults to GCC15. GCC12 is the bootloader compiler OpenBoot
+# documents as validated on silicon (see check-openboot-toolchain for the
+# GCC15 history), so this defaults to the GCC12 install independently of
+# MRS_TOOLCHAIN, and the hard gate below keeps enforcing GCC12 on every path
+# that builds the bootloader (upstream's own compiler check is advisory).
 OPENBOOT_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin
 OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
 
@@ -623,10 +623,13 @@ check-deps:
 	  done
 
 # OpenBoot's own compiler gate is ADVISORY: a mismatch warns and continues.
-# GCC15 is bench-unvalidated for the bootloader (upstream measured erratic
-# idle auto-boot at 1.5-4.8 s against a configured 10 s, and 4/32 failed
-# software-reset returns on CH572). Keep a HARD gate on the paths that build
-# the bootloader. Override only to reproduce that investigation:
+# Upstream once measured erratic GCC15 bootloader behavior on CH572 (idle
+# auto-boot at 1.5-4.8 s against a configured 10 s, 4/32 failed
+# software-reset returns). OpenBoot 6f98580 re-validated GCC15 on CH572 and
+# CH570 and now accepts it, but its README still names GCC12 as the compiler
+# validated on silicon, and every CH592 factory image built here has carried
+# a GCC12 bootloader. Keep a HARD gate on the paths that build the
+# bootloader. Override only to try another compiler deliberately:
 #   make ... OPENBOOT_ALLOW_UNVALIDATED_GCC=1
 check-openboot-toolchain:
 	@if [ "$(OPENBOOT_ALLOW_UNVALIDATED_GCC)" = "1" ]; then \
