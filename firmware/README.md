@@ -20,7 +20,7 @@ battery reporting are follow-up work.
 > keyboard never rejoins) plus a TMOS misaligned-load fault under halt/read.
 > This is a measurement artifact, not a firmware defect: a 1000-cycle
 > randomized warm-reset soak with a clean USB-HID oracle recovered 999/1000
-> (~2.3 s reconnect). See `BOOT.md` (Known limits) for the full history.
+> (~2.3 s reconnect).
 
 ## Toolchain (a WCH fork of GCC is a hard requirement)
 
@@ -93,16 +93,23 @@ reported by `print-board-config`; passing it through `EXTRA_CFLAGS` is
 rejected at parse time because that path would silently diverge from the
 reported configuration.
 
-The size check enforces the 216 KiB slot capacity (see BOOT.md).
+The size check enforces the 216 KiB slot capacity: OpenBoot's 220 KiB slot
+less the 4 KiB it reserves at the top for the slot's boot record.
+`openboot_geometry.py` reads both from the OpenBoot submodule, so the
+application and its linker script follow the bootloader's own geometry.
 
 ## Boot chain and flashing
 
 The application runs under the [OpenBoot](https://github.com/openkeyboard-org/OpenBoot)
 A/B bootloader: OpenBoot owns flash `0x0000..0x1FFF`, the app links at a
 slot base (`0x2000` / `0x39000`), and updates travel over the module's own
-UART via the OBP protocol. **`firmware/BOOT.md` is the authoritative
-reference** — flash/RAM maps, `A6 81` bootloader entry, update and factory
-flows, and recovery/revert procedures.
+UART via the OBP protocol. The keyboard's `A6 81` command makes the
+application call `openboot_request_update()`, which leaves a request word at
+the top of RAM and resets into the bootloader. The bootloader itself is
+documented in the submodule: `third_party/openboot/docs/AB-UPDATE.md` (slot
+layout and boot records), `docs/PROTOCOL.md` (OBP),
+`firmware/app/README.md` (the application side, including the RAM request
+and factory install) and `tools/README.md` (the `openboot` CLI).
 
 ```bash
 make flash-factory KBD_PROBE=<serial>   # whole-chip factory install via SWD
