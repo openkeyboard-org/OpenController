@@ -157,8 +157,9 @@ typing keeps working.
 The tunnel needs a keyboard image that carries the OpenBoot bridge; a
 keyboard flashed before the bridge, or one whose bridge is broken, still
 updates over the serial bridge above. The vendored `openboot` CLI also needs
-the qmk transport (OpenBoot `38dae42` or later); `update-qmk` checks and
-stops with an error rather than letting the CLI reject the transport name.
+the qmk transport (OpenBoot `38dae42` or later), which the pinned revision
+carries. If the pin is ever moved back past it, `update-qmk` checks and stops
+with an error rather than letting the CLI reject the transport name.
 
 Flashing uses [minichlink](https://github.com/cnlohr/ch32fun) (from
 `PATH`, or `make MINICHLINK=/path/to/minichlink`) with a WCH-LinkE probe.
