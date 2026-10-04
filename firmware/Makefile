@@ -776,12 +776,10 @@ bundle:
 	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
 	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
-# Bench OBP update over UART1 on the selected board profile's pins. Opening
-# the port resets the target into OpenBoot's 10 s idle window; the CLI's
-# HELLO then holds it (fail-stay). Both bundle members are family-checked (ODG2
-# family 0xB2 at image offset 0x25) before anything talks to the device:
-# OpenBoot's COMMIT attests only length+CRC, so this is the only guard
-# against cross-flashing a dongle CH592 image on a shared bench.
+# Family check shared by `update` and `update-qmk`. Both bundle members are
+# family-checked (ODG2 family 0xB2 at image offset 0x25) before anything talks
+# to the device: OpenBoot's COMMIT attests only length+CRC, so this is the only
+# guard against cross-flashing a dongle CH592 image on a shared bench.
 check-bundle-family: bundle
 	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \
 	  magic=$$(od -An -c -j $$(( 0x20 )) -N4 "$$f" | tr -d ' '); \
@@ -794,6 +792,9 @@ check-bundle-family: bundle
 	    exit 1; }; \
 	done
 
+# Bench OBP update over UART1 on the selected board profile's pins. Opening
+# the port resets the target into OpenBoot's 10 s idle window; the CLI's
+# HELLO then holds it (fail-stay).
 OB_PORT ?=
 update: check-bundle-family
 	@test -n "$(strip $(OB_PORT))" || { \
@@ -828,9 +829,11 @@ update-qmk: check-bundle-family
 	@test -n "$(strip $(QMK_VID))" -a -n "$(strip $(QMK_PID))" || { \
 	  echo "set QMK_VID and QMK_PID to the KEYBOARD's USB identity" >&2; \
 	  echo "  e.g. make $@ QMK_VID=0x4D4B QMK_PID=0x0002" >&2; exit 1; }
-#	The tunnel is newer than some pinned OpenBoot revisions; say so plainly
-#	rather than letting the CLI reject 'qmk' as an unknown enum value.
-	@"$(OPENBOOT_CLI)" --help 2>&1 | grep -q -- '--transport qmk' || { \
+#	The tunnel is newer than some pinned OpenBoot revisions. Ask the CLI's
+#	own argument parser whether it accepts 'qmk' (an older CLI rejects it as
+#	an unknown enum value) and say so plainly, rather than relying on the
+#	wording of its help text.
+	@"$(OPENBOOT_CLI)" --transport qmk --help >/dev/null 2>&1 || { \
 	  echo "ERROR: the vendored openboot CLI has no qmk transport." >&2; \
 	  echo "  Bump OPENBOOT_REVISION / the third_party/openboot submodule to a" >&2; \
 	  echo "  revision that carries tools/src/transport/qmk.rs." >&2; exit 1; }
