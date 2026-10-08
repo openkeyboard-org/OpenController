@@ -17,3 +17,7 @@ KBD_DCDC_ENABLE := 1
 # protocol rung arms it; the knob gates HAL_SLEEP and the app-owned sleep
 # module. Board-owned like KBD_DCDC_ENABLE.
 KBD_DEEP_SLEEP := 1
+
+# Host wake (CHWAKE): PB13 is this board's TXD1 under the remap, and the bench
+# host has no wake line.
+KBD_HOST_WAKE := 0

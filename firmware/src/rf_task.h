@@ -37,4 +37,9 @@ uint8_t RF_RestProbing(void);
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);
 
+/* The LED state handed to the host was abandoned unacknowledged (host wake):
+ * forget it, so the receiver's next LED byte is passed on again. Main-loop
+ * context; the connected ISR only reads the value. */
+void RF_LedResync(void);
+
 #endif

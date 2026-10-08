@@ -81,6 +81,7 @@ producing a wrong image.
 | `KBD_UART1_REMAP` | 1 | 0 | 1 = UART1 on PB12/PB13, 0 = silicon-default PA8/PA9 |
 | `KBD_FACTORY_MAC` | 0 | 1 | 1 = 2.4 GHz identity from the CH592 factory ROM |
 | `KBD_DCDC_ENABLE` | 1 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
+| `KBD_HOST_WAKE` | 0 | 1 | 1 = raise CHWAKE (PB13) before every `5A`/`5B`/`5C` frame; needs PB13 free, so never with `KBD_UART1_REMAP=1` |
 
 `KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
 populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
@@ -92,6 +93,37 @@ Both current profiles enable it (bench-measured 2026-09-02: 5.03 mA vs
 reported by `print-board-config`; passing it through `EXTRA_CFLAGS` is
 rejected at parse time because that path would silently diverge from the
 reported configuration.
+
+`KBD_HOST_WAKE` is for a keyboard host that deep-sleeps and cannot receive
+while it does: the MK65MX's STM32U0 in STOP 2, which wakes on CHWAKE at its
+PA1. The module drives PB13 low from boot. CHWAKE covers every `5A` (LED
+state), `5B` (status) and `5C` (battery) frame. To send one, the module
+raises PB13, waits `KBD_HOST_WAKE_GUARD_US` (1000), sends, and holds the line
+until the host's `61 0D 0A` ACK. With no ACK it resends every
+`KBD_HOST_WAKE_ACK_TIMEOUT_US` (20000), up to `KBD_HOST_WAKE_ATTEMPTS` (3)
+sends, then gives the frame up. Frames queued behind it follow at once with
+the line still high, so a burst pays the guard only once. After a resend they
+wait instead, with the line still high, until two ACK timeouts after the last
+copy went out: ACKs carry no sequence number, so a late one could otherwise
+retire the wrong frame. Bare ACKs and the `5D` diagnostic dump are not
+covered: they answer a host that is awake and waiting. The host asks for
+host wake with `A6 58`; a host-wake build answers `5B 38`, and other builds
+only ACK. Every wait is a main-loop state, never a busy wait
+(`src/host_wake.h` covers the queue and the LED slot). The idle WFE and
+module sleep both wait for host wake to finish.
+The three timing macros can be tuned through `EXTRA_CFLAGS`; the knob itself
+is board-owned like the others (A/B with `make KBD_HOST_WAKE=0|1`). The MR5
+bench sleep (`KBD_SLEEP_BENCH_HOOK=1`) blocks for seconds, so it requires
+`KBD_HOST_WAKE=0`.
+
+On every board profile, the application's bounded waits run on RTC32K
+through `src/rtc_clock.c`, not on SysTick. These are host wake, the UART TX
+FIFO wait, and the drains before OpenBoot entry and explicit sleep. On an
+MK65MX rev B02 (2026-10-05), SysTick read all zero over SWD in the running
+application, which held CHWAKE high in the first host-wake build. The cause
+is not established, and both profiles build with `KBD_DEEP_SLEEP=1`, so the
+change applies to `opencontroller-ch592` too. RTC rounding makes the 150 µs
+FIFO wait last up to about 190 µs.
 
 Measured on an MK65MX Wireless rev B02 keyboard (2026-10-04) with
 `288decb`, before the module sleep and link rest work: whole-board current

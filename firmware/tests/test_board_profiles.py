@@ -21,11 +21,11 @@ def board_config(board: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
 
-@pytest.mark.parametrize("board,remap,factory_mac,dcdc,deep_sleep,openboot_board", [
-    ("opencontroller-ch592", "1", "0", "1", "1", "opencontroller-ch592"),
-    ("mk65mx-wireless-ch592", "0", "1", "1", "1", "mk65mx-wireless-ch592"),
+@pytest.mark.parametrize("board,remap,factory_mac,dcdc,deep_sleep,host_wake,openboot_board", [
+    ("opencontroller-ch592", "1", "0", "1", "1", "0", "opencontroller-ch592"),
+    ("mk65mx-wireless-ch592", "0", "1", "1", "1", "1", "mk65mx-wireless-ch592"),
 ])
-def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, openboot_board):
+def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, host_wake, openboot_board):
     cfg = board_config(board)
     assert cfg["BOARD"] == board
     assert cfg["OPENBOOT_BOARD"] == openboot_board
@@ -33,6 +33,7 @@ def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, openboot_boa
     assert cfg["KBD_FACTORY_MAC"] == factory_mac
     assert cfg["KBD_DCDC_ENABLE"] == dcdc
     assert cfg["KBD_DEEP_SLEEP"] == deep_sleep
+    assert cfg["KBD_HOST_WAKE"] == host_wake
     assert board in cfg["BUILD"]
     assert board in cfg["BUNDLE_BIN"]
     assert board in cfg["FACTORY_BIN"]
@@ -83,6 +84,54 @@ def test_deep_sleep_must_be_an_exact_boolean(bad):
 
     assert result.returncode != 0
     assert "KBD_DEEP_SLEEP" in result.stderr
+
+
+@pytest.mark.parametrize("bad", ["2", "yes", "0 1", ""])
+def test_host_wake_must_be_an_exact_boolean(bad):
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "BOARD=mk65mx-wireless-ch592", f"KBD_HOST_WAKE={bad}",
+         "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "KBD_HOST_WAKE" in result.stderr
+
+
+def test_host_wake_refuses_the_uart1_remap():
+    """CHWAKE is PB13, which the remap uses as TXD1: driving it would fight
+    the UART."""
+    result = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "BOARD=opencontroller-ch592", "KBD_HOST_WAKE=1", "print-board-config"],
+        capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "PB13" in result.stderr
+
+
+@pytest.mark.parametrize("extra", [
+    "-DKBD_HOST_WAKE=0", "-DKBD_HOST_WAKE", "-D KBD_HOST_WAKE=0",
+    "-D KBD_HOST_WAKE", "-UKBD_HOST_WAKE", "-U KBD_HOST_WAKE",
+])
+def test_host_wake_rejected_in_extra_cflags_in_every_spelling(extra):
+    rejected = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "BOARD=mk65mx-wireless-ch592", f"EXTRA_CFLAGS={extra}",
+         "print-board-config"],
+        capture_output=True, text=True)
+    assert rejected.returncode != 0
+    assert "KBD_HOST_WAKE" in rejected.stderr
+
+
+def test_host_wake_timing_stays_tunable_in_extra_cflags():
+
+    tuned = subprocess.run(
+        ["make", "--no-print-directory", "-s", "-C", str(FW),
+         "BOARD=mk65mx-wireless-ch592", "EXTRA_CFLAGS=-DKBD_HOST_WAKE_GUARD_US=500",
+         "print-board-config"],
+        capture_output=True, text=True)
+    assert tuned.returncode == 0, tuned.stderr
 
 
 @pytest.mark.parametrize("macro", ["KBD_DEEP_SLEEP", "HAL_SLEEP"])

@@ -4,6 +4,7 @@
 #include "CONFIG.h"
 #include "HAL.h"
 #include "keyboard_uart.h"
+#include "rtc_clock.h"
 
 #define KBD_UART_MAX_FRAME  24
 
@@ -24,6 +25,18 @@
 #endif
 #ifndef KBD_UART_DIAG_COUNTERS
 #define KBD_UART_DIAG_COUNTERS RF_DIAG_COUNTERS
+#endif
+
+#if KBD_HOST_WAKE
+#if KBD_UART1_REMAP
+#error "KBD_HOST_WAKE drives PB13, which the UART1 remap uses as TXD1"
+#endif
+#include "host_wake.h"
+/* PB13: TXD1 under the UART1 remap, the CHWAKE line on the MK65MX. */
+#define KBD_CHWAKE_PIN bTXD1_
+static host_wake_t host_wake;
+static uint8_t chwake_level;
+
 #endif
 
 static keyboard_uart_frame_cb_t frame_cb;
@@ -85,12 +98,18 @@ static uint8_t checksum(const uint8_t *buf, uint8_t len)
 
 static uint8_t uart_send_byte(uint8_t b)
 {
-    uint32_t start = SYS_GetSysTickCnt();
-    uint32_t limit = (GetSysClock() / 1000000u) * KBD_UART_TX_WAIT_US;
+    /* Timed on RTC32K (rtc_clock.h): SysTick was found stopped in the running
+     * application, which left this bound nominal. RTC rounding makes it 150 us
+     * to about 190 us. The clock is only read once the FIFO is full, so the
+     * common case costs nothing. */
+    if (R8_UART1_TFC == UART_FIFO_SIZE) {
+        uint32_t start = RtcClock_Now();
 
-    while (R8_UART1_TFC == UART_FIFO_SIZE) {
-        if ((uint32_t)(SYS_GetSysTickCnt() - start) >= limit) {
-            return 0;   /* host not draining -> abort, don't freeze the loop */
+        while (R8_UART1_TFC == UART_FIFO_SIZE) {
+            if ((uint32_t)(RtcClock_Now() - start)
+                    >= RTC_CLOCK_TICKS_US(KBD_UART_TX_WAIT_US)) {
+                return 0;   /* host not draining -> abort, don't freeze the loop */
+            }
         }
     }
     R8_UART1_THR = b;
@@ -117,13 +136,23 @@ void KeyboardUart_Init(void)
     GPIOB_ModeCfg(bRXD1_, GPIO_ModeIN_PU);
 #else
     /* MK65MX uses UART1's default PA8/PA9 mapping.  PB13 is CHWAKE on that
-     * board -- driven push-pull by the keyboard host, so it must stay a
-     * FLOATING input: a pull-up against a driven-low line burns ~50 uA
-     * continuously (CH592 IUP), and the application must never drive it.
-     * PB12 is genuinely unconnected there and keeps the input-pull-up park
-     * from main(); floating it leaves a CMOS input mid-rail burning
-     * crossbar current. */
+     * board, pulled down at the host (STM32 PA1).  A KBD_HOST_WAKE build
+     * drives it push-pull from here on, low until a frame is queued, so a
+     * reset module never leaves it unexplained; any other build leaves it a
+     * FLOATING input, since a pull-up against the host's pull-down would
+     * burn current for nothing.  PB12 is genuinely unconnected there and
+     * keeps the input-pull-up park from main(); floating it leaves a CMOS
+     * input mid-rail burning crossbar current. */
+#if KBD_HOST_WAKE
+    GPIOB_ResetBits(KBD_CHWAKE_PIN);
+    GPIOB_ModeCfg(KBD_CHWAKE_PIN, GPIO_ModeOut_PP_5mA);
+    chwake_level = 0;
+    HostWake_Init(&host_wake, RTC_CLOCK_TICKS_US(KBD_HOST_WAKE_GUARD_US),
+                  RTC_CLOCK_TICKS_US(KBD_HOST_WAKE_ACK_TIMEOUT_US),
+                  KBD_HOST_WAKE_ATTEMPTS);
+#else
     GPIOB_ModeCfg(bTXD1_, GPIO_ModeIN_Floating);
+#endif
     GPIOA_SetBits(bTXD1);
     GPIOA_ModeCfg(bTXD1, GPIO_ModeOut_PP_5mA);
     GPIOA_ModeCfg(bRXD1, GPIO_ModeIN_PU);
@@ -162,19 +191,78 @@ void KeyboardUart_SendAck(void)
     uart_send_byte(0x0A);
 }
 
+/* Every frame the module originates goes through here. With host wake it is
+ * queued behind CHWAKE and sent by KeyboardUart_Service(). */
+static void send_host_frame(uint8_t cmd, uint8_t val)
+{
+#if KBD_HOST_WAKE
+    HostWake_Enqueue(&host_wake, cmd, val);   /* full: dropped and counted */
+#else
+    uart_send_frame(cmd, val);
+#endif
+}
+
 void KeyboardUart_SendStatus(uint8_t sub)
 {
-    uart_send_frame(0x5B, sub);
+    send_host_frame(0x5B, sub);
 }
 
 void KeyboardUart_SendBattery(uint8_t percent)
 {
-    uart_send_frame(0x5C, percent);
+    send_host_frame(0x5C, percent);
 }
 
 void KeyboardUart_SendLed(uint8_t led_mask)
 {
+#if KBD_HOST_WAKE
+    /* Only the newest LED state matters, and rf_task.c records it as sent the
+     * moment it is handed over: it goes into a slot that cannot overflow. */
+    HostWake_SetLatest(&host_wake, 0x5A, led_mask);
+#else
     uart_send_frame(0x5A, led_mask);
+#endif
+}
+
+void KeyboardUart_Service(void)
+{
+#if KBD_HOST_WAKE
+    host_wake_step_t step = HostWake_Step(&host_wake, RtcClock_Now());
+
+    if (step.line != chwake_level) {
+        if (step.line) {
+            GPIOB_SetBits(KBD_CHWAKE_PIN);
+        } else {
+            GPIOB_ResetBits(KBD_CHWAKE_PIN);
+        }
+        chwake_level = step.line;
+    }
+    if (step.send) {
+        /* Bounded like every send: a host that is not draining loses this
+         * copy, which the missing ACK then retries. */
+        uart_send_frame(step.cmd, step.val);
+    }
+#endif
+}
+
+uint8_t KeyboardUart_TakeLedLost(void)
+{
+#if KBD_HOST_WAKE
+    uint8_t lost = host_wake.latest_lost;
+
+    host_wake.latest_lost = 0;
+    return lost;
+#else
+    return 0;
+#endif
+}
+
+uint8_t KeyboardUart_HostWakeIdle(void)
+{
+#if KBD_HOST_WAKE
+    return HostWake_Idle(&host_wake);
+#else
+    return 1;
+#endif
 }
 
 uint8_t KeyboardUart_SendRaw(const uint8_t *buf, uint8_t len)
@@ -256,6 +344,9 @@ static void dispatch_frame(void)
         }
     } else {
         /* Host ACK to one of our 0x5A/0x5B/0x5C frames. */
+#if KBD_HOST_WAKE
+        HostWake_OnAck(&host_wake);
+#endif
     }
 }
 
@@ -426,7 +517,15 @@ uint8_t KeyboardUart_TakeRxActivity(void)
 }
 #endif
 
-uint8_t KeyboardUart_TxIdle(void)
+uint8_t KeyboardUart_FifoIdle(void)
 {
     return (R8_UART1_TFC == 0) && (R8_UART1_LSR & RB_LSR_TX_ALL_EMP);
+}
+
+uint8_t KeyboardUart_TxIdle(void)
+{
+    /* Host-wake frames still queued or awaiting their ACK count as TX not
+     * idle, so every path that drains TX before sleeping or entering the
+     * bootloader also waits for them (or gives up on its own bound). */
+    return KeyboardUart_FifoIdle() && KeyboardUart_HostWakeIdle();
 }

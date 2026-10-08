@@ -134,7 +134,7 @@ def test_unrecognised_a6_sub_is_inert(lib, st, sub):
     assert st.sleep_pending == 1
 
 
-@pytest.mark.parametrize("sub", [0x53, 0x70])
+@pytest.mark.parametrize("sub", [0x53, 0x58, 0x70])  # battery, host-wake query, version
 def test_query_commands_do_not_cancel_sleep(lib, st, sub):
     # Battery/version queries are not "changed my mind" -- the sleep proceeds.
     feed(lib, st, A6, SUB_UNLOCK)
@@ -222,7 +222,7 @@ def test_pairing_and_unpair_clear_autosleep(lib, st, sub):
     assert st.unlocked == 1                        # unlock itself survives
 
 
-@pytest.mark.parametrize("sub", [0x11, 0x30, 0x31, 0x32, 0x33, 0x53, 0x70, 0xFF])
+@pytest.mark.parametrize("sub", [0x11, 0x30, 0x31, 0x32, 0x33, 0x53, 0x58, 0x70, 0xFF])
 def test_transport_and_queries_preserve_autosleep(lib, st, sub):
     feed(lib, st, A6, SUB_UNLOCK)
     feed(lib, st, A6, SUB_AUTO)
