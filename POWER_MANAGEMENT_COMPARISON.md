@@ -184,9 +184,9 @@ All command bytes below omit the additive checksum in the table. For example, `A
 | `A6 56` | Clear persistent BLE later-stage auto-sleep enable. | Negotiate/reset sleep protocol v1; reply `5B 37 92`; clear reducer pending sleep and disable auto-sleep. |
 | `A6 57` | Set persistent 2.4 GHz later-stage auto-sleep enable. | Enable autonomous deep sleep after negotiation. |
 | `A6 58` | Clear persistent 2.4 GHz later-stage auto-sleep enable. | Host-wake capability query, an OpenController extension: a `KBD_HOST_WAKE` build replies `5B 38`, other builds only ACK. Inert to the sleep protocol; does not disable auto-sleep. |
-| `A6 11` | Observed: replies `5B 34` (three times). | Select USB: disconnect RF, reply `5B 34`, `5B 36`. |
+| `A6 11` | Observed: replies `5B 34` (three times). | Select USB: disconnect RF, reply `5B 34`, `5B 36`. Reports queued for 2.4 GHz are dropped 500 ms later unless an `A6 30` comes first (a forced reconnect keeps them). |
 | `A6 30` | Observed: replies `5B 34` then `5B 36` with no bond, or `5B 32` then `5B 23` after a bonded reconnect, each three times; the reconnect itself completed within the second. | Select 2.4 GHz: reply `5B 34`, then `5B 35` (bonded) or `5B 36`. |
-| `A6 51` | Observed: after `A6 30`, replies `5B 31` (three times) and starts pairing; a camping OpenDongle connected within the same second. | Pair the selected transport after the identity check: `5B 31`, `5B 23`. |
+| `A6 51` | Observed: after `A6 30`, replies `5B 31` (three times) and starts pairing; a camping OpenDongle connected within the same second. | Pair the selected transport after the identity check: `5B 31`, `5B 23`. Ignored while connected, replying `5B 32`: a fresh pair needs `A6 52` or a disconnect first. |
 | `A6 63` | Observed: generic `61 0D 0A` acknowledgement, no action. | Factory 2.4 GHz pair: disconnect, clear bond, enter pairing. An OpenController extension. |
 
 Production repeats each status frame three times where OpenController sends it once (Observed); a host that counts status frames rather than reading the latest will see the difference. Production's command dispatcher is **`0x8346`**. For `0x54`, the comparisons at `0x83CE`–`0x83EE` fall through to the return at `0x8430`: this is affirmative control-flow evidence of no dedicated action, rather than merely an unsuccessful symbol search.

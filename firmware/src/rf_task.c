@@ -78,6 +78,15 @@
 #define RF_EVT_REST_PROBE         0x0800   /* resting policy: probe cadence */
 #define RF_EVT_REST_PROBE_TIMEOUT 0x1000   /* resting policy: probe not caught / not polled in time */
 #define RF_EVT_REST_STAGE2        0x2000   /* resting policy: stop probing */
+#define RF_EVT_DISCARD_HID        0x4000   /* the host left 2.4 GHz: drop what it queued (0x8000 is TMOS's) */
+
+/* A SELECT_USB that a SELECT_2G4 follows within this long is a forced
+ * reconnect, not a switch to USB: QMK sends the pair back to back to get a
+ * fresh CONNECTED, and the reports queued for 2.4 GHz are still wanted. TMOS
+ * ticks of 0.625 ms. */
+#ifndef KBD_RESELECT_KEEP_TICKS
+#define KBD_RESELECT_KEEP_TICKS   800u     /* 500 ms */
+#endif
 
 #define RF_DEFAULT_ACCESS_ADDR    0x71764126u
 #define RF_CRC_INIT               0x555555u
@@ -317,6 +326,14 @@ static inline uint8_t hid_key_held(void)
     return (uint8_t)(hid_last_queued_valid
                      && (hid_last_queued[0]|hid_last_queued[1]|hid_last_queued[2]|hid_last_queued[3]
                         |hid_last_queued[4]|hid_last_queued[5]|hid_last_queued[6]|hid_last_queued[7]));
+}
+
+/* Drop every queued report. IDLE only: the radio is shut then, so the RX ISR
+ * that retires the head can't run. */
+static void rf_discard_hid_queue(void)
+{
+    hid_fifo_head = hid_fifo_tail;
+    hid_head_sent = 0;
 }
 static uint8_t tx_payload[10];
 static uint8_t tx_ctrl;
@@ -1035,9 +1052,16 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                 }
             }
 
-            if (len == 3 && rxBuf[3] == 0xA1 && rxBuf[4] != last_led_sent) {
+            /* Always keep the newest relay: comparing a new one with the last
+             * byte SENT instead would drop a change back to that byte while an
+             * earlier change still waits for the handler, which would then
+             * send the earlier, stale byte. The handler skips a byte the host
+             * already has. */
+            if (len == 3 && rxBuf[3] == 0xA1) {
                 pending_led = rxBuf[4];
-                rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+                if (pending_led != last_led_sent) {
+                    rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+                }
             }
 
             /* Re-arm the supervision timer in the main loop (RF_ConnectedTick),
@@ -1271,9 +1295,25 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_NOTIFY_LED) {
-        KeyboardUart_SendLed(pending_led);
-        last_led_sent = pending_led;
+        /* One read, so the byte recorded as sent is the byte sent. The RX ISR
+         * compares a new relay with last_led_sent, so one stored before the
+         * record below may not have posted this event: look again. */
+        uint8_t led = pending_led;
+        if (led != last_led_sent) {
+            KeyboardUart_SendLed(led);
+            last_led_sent = led;
+            if (pending_led != led) {
+                rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+            }
+        }
         return events ^ RF_EVT_NOTIFY_LED;
+    }
+
+    if (events & RF_EVT_DISCARD_HID) {
+        if (rf_state == RF_STATE_IDLE) {
+            rf_discard_hid_queue();
+        }
+        return events ^ RF_EVT_DISCARD_HID;
     }
 
     if (events & RF_EVT_SAVE_BOND) {
@@ -1564,8 +1604,11 @@ static void rf_enter_connected(void)
 #endif
     KeyboardUart_SendStatus(0x32);
     KeyboardUart_SendStatus(0x23);
-    KeyboardUart_SendLed(0x00);
-    last_led_sent = 0x00;
+    /* The host's LED state is the dongle's to tell: it relays it on connect.
+     * Forward that relay whatever its value, and leave the host's LEDs alone
+     * until it comes. A 5A 00 here showed Caps Lock off until then, and for
+     * good behind a dongle that never re-sent it on a reconnect. */
+    last_led_sent = 0xFF;
 #if KBD_REST
     rest_arm_idle();
 #endif
@@ -1931,8 +1974,20 @@ static void rest_promote_to_normal(void)
 }
 #endif /* KBD_REST */
 
+/* The host left 2.4 GHz (SELECT_USB, or a BT select). What it queued for the
+ * link and never got out must not type itself out when 2.4 GHz next connects,
+ * long after the host moved on. Unless a SELECT_2G4 follows within
+ * KBD_RESELECT_KEEP_TICKS (RF_Select2G4 cancels this): that was a forced
+ * reconnect, and the reports are still wanted. Call after RF_Disconnect(). */
+void RF_DropQueueUnlessReselected(void)
+{
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);
+    rf_start_task_atomic(RF_EVT_DISCARD_HID, KBD_RESELECT_KEEP_TICKS);
+}
+
 uint8_t RF_Select2G4(void)
 {
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);   /* a forced reconnect keeps the queue */
     if (!keyboard_mac_valid) {
         return 0;
     }
@@ -1981,7 +2036,7 @@ uint8_t RF_Select2G4(void)
     return has_bond;
 }
 
-void RF_EnterPairing(void)
+uint8_t RF_EnterPairing(void)
 {
     /* A6 51 ("pair current transport") must NOT tear down a healthy link. A host
      * that reconnects with A6 30 + A6 51, or sends a stray/late A6 51 after a
@@ -1989,9 +2044,10 @@ void RF_EnterPairing(void)
      * default-AA pairing (rf_access_addr -> RF_DEFAULT_ACCESS_ADDR) while the
      * dongle keeps polling the session AA -> a silent phantom (the natural-drop
      * reconnect failure). Forcing a fresh pair while connected requires an
-     * explicit unpair (A6 52) or disconnect first. */
+     * explicit unpair (A6 52) or disconnect first. Returns 0 when it ignored
+     * the request, so the caller answers with the live link, not PAIRING. */
     if (!keyboard_mac_valid || rf_state == RF_STATE_CONNECTED) {
-        return;                       /* request ignored: leave the rest timers alone */
+        return 0;                     /* request ignored: leave the rest timers alone */
     }
 #if KBD_REST
     rest_cancel();
@@ -2017,6 +2073,7 @@ void RF_EnterPairing(void)
     rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
     rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     rf_start_task_atomic(RF_EVT_PAIR_TIMEOUT, RF_PAIR_WINDOW_TICKS);
+    return 1;
 }
 
 void RF_Disconnect(void)
@@ -2067,6 +2124,12 @@ void RF_ClearBond(void)
     rf_clear_bond_ram();
     bond_save_pending = 0;
     rf_clear_bond_flash();
+    /* Without the bond nothing queued can go anywhere; a new pairing must not
+     * type it out on its new host. Both callers disconnect first. */
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);
+    if (rf_state == RF_STATE_IDLE) {
+        rf_discard_hid_queue();
+    }
 }
 
 uint8_t RF_HasBond(void)
