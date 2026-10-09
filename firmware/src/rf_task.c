@@ -2017,7 +2017,7 @@ uint8_t RF_Select2G4(void)
     return has_bond;
 }
 
-void RF_EnterPairing(void)
+uint8_t RF_EnterPairing(void)
 {
     /* A6 51 ("pair current transport") must NOT tear down a healthy link. A host
      * that reconnects with A6 30 + A6 51, or sends a stray/late A6 51 after a
@@ -2025,9 +2025,10 @@ void RF_EnterPairing(void)
      * default-AA pairing (rf_access_addr -> RF_DEFAULT_ACCESS_ADDR) while the
      * dongle keeps polling the session AA -> a silent phantom (the natural-drop
      * reconnect failure). Forcing a fresh pair while connected requires an
-     * explicit unpair (A6 52) or disconnect first. */
+     * explicit unpair (A6 52) or disconnect first. Returns 0 when it ignored
+     * the request, so the caller answers with the live link, not PAIRING. */
     if (!keyboard_mac_valid || rf_state == RF_STATE_CONNECTED) {
-        return;                       /* request ignored: leave the rest timers alone */
+        return 0;                     /* request ignored: leave the rest timers alone */
     }
 #if KBD_REST
     rest_cancel();
@@ -2053,6 +2054,7 @@ void RF_EnterPairing(void)
     rf_stop_task_atomic(RF_EVT_PAIR_RX_OFF);
     rf_set_event_atomic(RF_EVT_PAIR_BCAST);
     rf_start_task_atomic(RF_EVT_PAIR_TIMEOUT, RF_PAIR_WINDOW_TICKS);
+    return 1;
 }
 
 void RF_Disconnect(void)

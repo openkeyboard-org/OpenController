@@ -180,9 +180,14 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                 KeyboardUart_SendStatus(0x36);
                 break;
             }
-            RF_EnterPairing();
-            KeyboardUart_SendStatus(0x31);
-            KeyboardUart_SendStatus(0x23);
+            if (RF_EnterPairing()) {
+                KeyboardUart_SendStatus(0x31);
+                KeyboardUart_SendStatus(0x23);
+            } else {
+                /* Ignored because the link is up: say so. A PAIRING reply
+                 * would have the host stop sending reports on a live link. */
+                KeyboardUart_SendStatus(0x32);
+            }
         }
         break;
 

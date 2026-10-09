@@ -15,7 +15,9 @@
 void RF_TaskInit(void);
 
 uint8_t RF_Select2G4(void);
-void RF_EnterPairing(void);
+/* 0 when the request was ignored because the link is up (or there is no
+ * identity): the host should hear the live link, not PAIRING. */
+uint8_t RF_EnterPairing(void);
 void RF_Disconnect(void);
 /* After RF_Disconnect() for a transport other than 2.4 GHz: drop the queued
  * reports unless a SELECT_2G4 follows within KBD_RESELECT_KEEP_TICKS. */
