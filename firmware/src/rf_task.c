@@ -2187,6 +2187,11 @@ uint8_t RF_RestProbing(void)
 }
 #endif
 
+void RF_LedResync(void)
+{
+    last_led_sent = 0xFF;   /* not a real LED byte: the next report re-notifies */
+}
+
 uint8_t RF_GetState(void)
 {
     return rf_state;

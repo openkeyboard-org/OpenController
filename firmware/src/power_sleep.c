@@ -63,6 +63,12 @@
 #ifndef KBD_SLEEP_BENCH_HOOK
 #define KBD_SLEEP_BENCH_HOOK 0
 #endif
+/* The MR5 bench sleep is a blocking diagnostic: it cannot service host-wake
+ * transactions (their ACKs need the main loop) and would hold CHWAKE through
+ * its 5 s sleep. Build it with `make KBD_HOST_WAKE=0`. */
+#if KBD_SLEEP_BENCH_HOOK && defined(KBD_HOST_WAKE) && KBD_HOST_WAKE
+#error "KBD_SLEEP_BENCH_HOOK does not support KBD_HOST_WAKE; build with KBD_HOST_WAKE=0"
+#endif
 #ifndef RF_DIAG_COUNTERS
 #define RF_DIAG_COUNTERS 1
 #endif

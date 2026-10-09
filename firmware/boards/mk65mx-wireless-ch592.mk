@@ -18,3 +18,9 @@ KBD_DCDC_ENABLE := 1
 
 # Deep-sleep plumbing (power ladder MR5): see opencontroller-ch592.mk.
 KBD_DEEP_SLEEP := 1
+
+# Host wake: the module raises CHWAKE (PB13 -> STM32 PA1) before every frame
+# it sends, so the STM32 can sleep in STOP 2 without losing them, and answers
+# the host's A6 58 query with 5B 38. Driven from boot. Needs PB13 free, so
+# never with KBD_UART1_REMAP=1.
+KBD_HOST_WAKE := 1

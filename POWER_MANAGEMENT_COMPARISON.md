@@ -183,7 +183,7 @@ All command bytes below omit the additive checksum in the table. For example, `A
 | `A6 55` | Set persistent BLE later-stage auto-sleep enable. | Reserved, ACK-only. |
 | `A6 56` | Clear persistent BLE later-stage auto-sleep enable. | Negotiate/reset sleep protocol v1; reply `5B 37 92`; clear reducer pending sleep and disable auto-sleep. |
 | `A6 57` | Set persistent 2.4 GHz later-stage auto-sleep enable. | Enable autonomous deep sleep after negotiation. |
-| `A6 58` | Clear persistent 2.4 GHz later-stage auto-sleep enable. | Unrecognized/inert apart from ACK/activity handling; does not disable auto-sleep. |
+| `A6 58` | Clear persistent 2.4 GHz later-stage auto-sleep enable. | Host-wake capability query, an OpenController extension: a `KBD_HOST_WAKE` build replies `5B 38`, other builds only ACK. Inert to the sleep protocol; does not disable auto-sleep. |
 | `A6 11` | Observed: replies `5B 34` (three times). | Select USB: disconnect RF, reply `5B 34`, `5B 36`. |
 | `A6 30` | Observed: replies `5B 34` then `5B 36` with no bond, or `5B 32` then `5B 23` after a bonded reconnect, each three times; the reconnect itself completed within the second. | Select 2.4 GHz: reply `5B 34`, then `5B 35` (bonded) or `5B 36`. |
 | `A6 51` | Observed: after `A6 30`, replies `5B 31` (three times) and starts pairing; a camping OpenDongle connected within the same second. | Pair the selected transport after the identity check: `5B 31`, `5B 23`. |
@@ -203,7 +203,7 @@ The implementation, rather than older comments describing earlier development st
 
 Both [board profiles](firmware/boards/) enable `KBD_DCDC_ENABLE=1` and `KBD_DEEP_SLEEP=1`. The [Makefile](firmware/Makefile) supplies `HAL_SLEEP=TRUE` and substitutes the application-owned [power_sleep.c](firmware/src/power_sleep.c) for SDK `HAL/SLEEP.c`. `KBD_IDLE_WFI` defaults to 1 in [keyboard_uart.h](firmware/src/keyboard_uart.h). The watchdog and RF diagnostic counters are also enabled by default.
 
-[main.c](firmware/src/main.c) enables the board-supported DC-DC converter before selecting 60 MHz. It parks unused pins, preserving the MK65MX PB13 host-driven CHWAKE input. It sets sleep clock-gating bits for TMR1/2, UART0/2/3, SPI0, PWM, USB, I2C, and LCD; TMR0, TMR3, UART1, and BLE remain available as required.
+[main.c](firmware/src/main.c) enables the board-supported DC-DC converter before selecting 60 MHz. It parks unused pins but leaves out the MK65MX's PB13 CHWAKE line, which a `KBD_HOST_WAKE` build drives from `KeyboardUart_Init()`. It sets sleep clock-gating bits for TMR1/2, UART0/2/3, SPI0, PWM, USB, I2C, and LCD; TMR0, TMR3, UART1, and BLE remain available as required.
 
 When RF is `IDLE`, UART parsing is quiet, and no update or explicit sleep needs servicing, the main loop enters **shallow WFE**. It runs the final checks with interrupts masked, uses SEVONPEND and a prior event-latch drain, powers down flash until the next fetch, and leaves `SLEEPDEEP` clear. UART RX interrupts wake it promptly. A TMR3 heartbeat every **200 ms** permits watchdog feeding during long inactivity. Neither pairing nor connected operation takes this application-level shallow wait.
 
@@ -213,7 +213,7 @@ This already improves the idle case that production's application main loop othe
 
 [sleep_protocol.c](firmware/src/sleep_protocol.c) resets negotiation and auto-sleep at boot. Deep-sleep capability being compiled in is therefore **not the same as deep sleep being enabled at runtime**.
 
-For explicit sleep, the host negotiates with `A6 56 FC`, waits for `5B 37 92`, and sends `A6 54 FA`. `Power_Service` waits for TX FIFO and shift-register completion, with an approximately 20 ms timeout, flushes a pending bond save, disconnects RF, and arms `PowerSleep_RequestExplicit`. The next acceptable TMOS idle callback performs the sleep. RTC housekeeping wakes leave the explicit request armed; a GPIO host wake clears it. A GPIO wake alone leaves RF stopped: the host must select/reconnect the transport, normally with `A6 30`.
+For explicit sleep, the host negotiates with `A6 56 FC`, waits for `5B 37 92`, and sends `A6 54 FA`. `Power_Service` waits for TX FIFO and shift-register completion, with an approximately 20 ms timeout timed on RTC32K. In a `KBD_HOST_WAKE` build (the MK65MX profile) it also waits for every host-wake frame to be ACKed or abandoned, so the bound grows to about 830 ms. If the drain finishes in time, it flushes a pending bond save, disconnects RF, and arms `PowerSleep_RequestExplicit`; if not, it drops the request and stays awake. The next acceptable TMOS idle callback performs the sleep. RTC housekeeping wakes leave the explicit request armed; a GPIO host wake clears it. A GPIO wake alone leaves RF stopped: the host must select/reconnect the transport, normally with `A6 30`.
 
 After negotiation, `A6 57 FD` enables autonomous sleep. It permits deep sleep in `RF_STATE_IDLE` or in a bonded-search slice after RX has closed. Connected operation, fresh pairing, active RX, UART work, and pending OpenBoot entry veto sleep. The **100 ms holdoff** is restarted by accepted frames, consumed raw UART-byte activity, and GPIO wakes. The holdoff is a minimum eligibility delay; main-loop/heartbeat scheduling can extend actual time awake.
 
@@ -265,7 +265,7 @@ Connected hopping is polled by `RF_ConnectedTick` from RTC time, commonly on a *
 
 Use production's low-level RX configuration as a starting point for a **held BREAK or dedicated held wake request**, followed by a defined release/settling/ready sequence. A repeated expendable preamble with retry is another option. Account for line-status errors, parser cleanup, repeated level interrupts, and when the ISR disables/rearms the wake source. Simply replacing the edge enum is insufficient.
 
-The MK65MX profile documents an already connected host-driven PB13 CHWAKE line, currently left floating by OpenController. A dedicated wake input may avoid sacrificing a UART byte, but its board routing, polarity, and host behavior must be verified; production's PB12 behavior is not evidence about that board-specific wire.
+On the MK65MX, PB13 is CHWAKE, which runs to the STM32's PA1. It turned out to be a wake line for the host, not for the module: the MK65MX profile builds with `KBD_HOST_WAKE=1`, which drives it so the STM32 can sleep in STOP 2 (see the firmware README). The module still wakes on its RX line, with a sacrificed preamble byte.
 
 **Benefit:** access to existing deep-sleep savings without a policy rewrite, and reliable first-command delivery. Validate random wake phase, held-low duration, repeated bursts, RTC/GPIO coincidence, and bootloader entry from sleep before shortening any wake gap.
 

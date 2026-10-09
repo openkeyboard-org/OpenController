@@ -12,6 +12,7 @@
 #include "CONFIG.h"
 #include "HAL.h"
 #include "keyboard_uart.h"
+#include "rtc_clock.h"
 #ifndef KBD_UART_DIAG_DUMP
 #define KBD_UART_DIAG_DUMP RF_DIAG_COUNTERS
 #endif
@@ -222,6 +223,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         KeyboardUart_SendStatus(0x23);
         break;
 
+    case 0x58: /* host-wake capability query (OpenController extension). Only
+                * a KBD_HOST_WAKE build answers, with 5B 38; the host treats a
+                * bare ACK as "no host wake" and never sleeps behind it. Inert
+                * to the sleep protocol, like every unrecognised A6 sub. */
+#if KBD_HOST_WAKE
+        KeyboardUart_SendStatus(0x38);
+#endif
+        break;
+
     case 0x70: /* version: stock firmwareB often ACKs only */
         break;
 
@@ -256,8 +266,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
  *             lose the bond; RF_Disconnect() clears the pending flag), then
  *             RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
  *   DRAIN   — wait for the frame's 61 0D 0A ACK to physically leave the
- *             UART (bounded ~20 ms wall clock: a host not draining must
- *             not block the update);
+ *             UART (bounded ~20 ms on RTC32K, see rtc_clock.h: a host not
+ *             draining must not block the update). Host-wake frames still
+ *             queued are not waited for: nothing may stand between the
+ *             host and an update, and the reset drops CHWAKE anyway;
  * then mask global IRQs (CSR 0x800, same idiom as rf_task's critical
  * sections — nothing may re-arm the radio past this point) and enter the
  * bootloader via openboot_request_update() (writes OB_BOOTREQ_MAGIC to the
@@ -274,13 +286,13 @@ static void OpenBoot_Service(void)
         }
         RF_FlushBondSave();
         RF_Disconnect();
-        svc_start = SYS_GetSysTickCnt();
+        svc_start = RtcClock_Now();
         svc_state = 1;
         return;
     default:
-        if (!KeyboardUart_TxIdle()
-                && (uint32_t)(SYS_GetSysTickCnt() - svc_start)
-                       < (GetSysClock() / 50u)) {   /* ~20 ms */
+        if (!KeyboardUart_FifoIdle()
+                && (uint32_t)(RtcClock_Now() - svc_start)
+                       < RTC_CLOCK_TICKS_US(20000u)) {
             return;
         }
         __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
@@ -310,7 +322,7 @@ static void Power_Service(void)
             sleep_proto.sleep_pending = 0;
             return;
         }
-        svc_start = SYS_GetSysTickCnt();
+        svc_start = RtcClock_Now();
         svc_state = 1;
         return;
     default:
@@ -321,9 +333,13 @@ static void Power_Service(void)
             svc_state = 0;
             return;
         }
+        /* TX includes host-wake frames: the module must not sleep with one
+         * unanswered, so the bound allows the whole backlog to finish (each
+         * frame is itself bounded) on top of the ~20 ms FIFO drain. This is a
+         * main-loop state, not a busy wait. */
         if (!KeyboardUart_TxIdle()) {
-            if ((uint32_t)(SYS_GetSysTickCnt() - svc_start)
-                    < (GetSysClock() / 50u)) {   /* ~20 ms */
+            if ((uint32_t)(RtcClock_Now() - svc_start)
+                    < RTC_CLOCK_TICKS_US(20000u + KBD_HOST_WAKE_BACKLOG_MAX_US)) {
                 return;                          /* keep draining */
             }
             sleep_proto.sleep_pending = 0;       /* host not draining: abort */
@@ -469,6 +485,10 @@ void Main_Circulation(void)
         LOOP_STAGE(1); TMOS_SystemProcess();
         LOOP_STAGE(2); RF_ConnectedTick();
         LOOP_STAGE(3); KeyboardUart_Poll();
+        KeyboardUart_Service();
+        if (KeyboardUart_TakeLedLost()) {
+            RF_LedResync();
+        }
         LOOP_STAGE(4); OpenBoot_Service();
 #if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
         PowerSleep_BenchService();
@@ -493,6 +513,7 @@ void Main_Circulation(void)
 #endif
         if ((RF_GetState() == RF_STATE_IDLE || RF_GetState() == RF_STATE_RESTING)
                 && !openboot_entry_pending
+                && KeyboardUart_HostWakeIdle()  /* guard and ACK waits are polled */
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
                 && !sleep_proto.sleep_pending   /* let Power_Service run */
                 && !PowerSleep_SleepPending()   /* idleCB owes a deep sleep */
@@ -559,9 +580,10 @@ int main(void)
      * floating CMOS input can sit mid-rail and burn crossbar current
      * continuously. KeyboardUart_Init re-claims the UART pins immediately
      * below. PB13 is excluded from the park: on the MK65MX profile it is
-     * CHWAKE, driven push-pull by the keyboard host, and must never be
-     * biased even transiently (review finding); on the remap profile it is
-     * this firmware's own TX pin and is driven high a few lines down. */
+     * CHWAKE, pulled down at the keyboard host and driven by this module
+     * only in a KBD_HOST_WAKE build, so it must never be biased even
+     * transiently (review finding); on the remap profile it is this
+     * firmware's own TX pin and is driven high a few lines down. */
     GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
     GPIOB_ModeCfg(GPIO_Pin_All & ~bTXD1_, GPIO_ModeIN_PU);
 

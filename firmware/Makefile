@@ -173,6 +173,23 @@ endif
 ifneq ($(findstring HAL_SLEEP,$(EXTRA_CFLAGS)),)
 $(error HAL_SLEEP must not go through EXTRA_CFLAGS; it is derived from KBD_DEEP_SLEEP)
 endif
+ifneq ($(words $(strip $(KBD_HOST_WAKE))),1)
+$(error BOARD '$(BOARD)' must set KBD_HOST_WAKE to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_HOST_WAKE))),)
+$(error BOARD '$(BOARD)' has invalid KBD_HOST_WAKE='$(KBD_HOST_WAKE)')
+endif
+# Host wake drives CHWAKE on PB13, which the UART1 remap uses as TXD1.
+ifeq ($(strip $(KBD_HOST_WAKE))$(strip $(KBD_UART1_REMAP)),11)
+$(error BOARD '$(BOARD)': KBD_HOST_WAKE drives PB13, which KBD_UART1_REMAP=1 uses as TXD1)
+endif
+# Same silent-divergence hazard as the knobs above; A/B goes through
+# `make KBD_HOST_WAKE=0|1`. Every spelling that defines or undefines the macro
+# is refused (-DX, -DX=v, -D X, -D X=v, -UX, -U X); the timing macros
+# (KBD_HOST_WAKE_GUARD_US, ...) stay EXTRA_CFLAGS-tunable.
+ifneq ($(filter -DKBD_HOST_WAKE -DKBD_HOST_WAKE=% -UKBD_HOST_WAKE KBD_HOST_WAKE KBD_HOST_WAKE=%,$(EXTRA_CFLAGS)),)
+$(error KBD_HOST_WAKE must not go through EXTRA_CFLAGS; use `make KBD_HOST_WAKE=0|1` or the board profile)
+endif
 
 # ---------------------------------------------------------------------------
 # OpenBoot integration
@@ -275,6 +292,7 @@ CFLAGS += -DKBD_UART1_REMAP=$(KBD_UART1_REMAP)
 CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
 CFLAGS += -DKBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)
 CFLAGS += -DKBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)
+CFLAGS += -DKBD_HOST_WAKE=$(KBD_HOST_WAKE)
 ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
 # HAL_SLEEP=TRUE un-stubs the SDK sleep plumbing (MCU.c wires the TMOS
 # idleCB); the SDK's SLEEP.c is swapped for the app-owned power_sleep.c
@@ -396,6 +414,7 @@ INCLUDES += -I $(OPENBOOT)/firmware/app
 APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
+APP_SRC += src/rtc_clock.c
 APP_SRC += src/kbd_image_id.c
 ifeq ($(strip $(KBD_UART_DIAG_DUMP)),1)
 APP_SRC += src/diag_frame.c
@@ -404,6 +423,9 @@ endif
 ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
 APP_SRC += src/power_sleep.c
 APP_SRC += src/sleep_protocol.c
+endif
+ifeq ($(strip $(KBD_HOST_WAKE)),1)
+APP_SRC += src/host_wake.c
 endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 
@@ -519,6 +541,7 @@ print-board-config:
 	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
 	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
 	    'KBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)' \
+	    'KBD_HOST_WAKE=$(KBD_HOST_WAKE)' \
 	    'KBD_REST=$(KBD_REST)' \
 	    'KBD_REST_IDLE_MS=$(KBD_REST_IDLE_MS)' \
 	    'KBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)' \
