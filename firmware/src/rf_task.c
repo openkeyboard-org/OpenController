@@ -1052,9 +1052,16 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                 }
             }
 
-            if (len == 3 && rxBuf[3] == 0xA1 && rxBuf[4] != last_led_sent) {
+            /* Always keep the newest relay: comparing a new one with the last
+             * byte SENT instead would drop a change back to that byte while an
+             * earlier change still waits for the handler, which would then
+             * send the earlier, stale byte. The handler skips a byte the host
+             * already has. */
+            if (len == 3 && rxBuf[3] == 0xA1) {
                 pending_led = rxBuf[4];
-                rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+                if (pending_led != last_led_sent) {
+                    rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+                }
             }
 
             /* Re-arm the supervision timer in the main loop (RF_ConnectedTick),
@@ -1288,8 +1295,17 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_NOTIFY_LED) {
-        KeyboardUart_SendLed(pending_led);
-        last_led_sent = pending_led;
+        /* One read, so the byte recorded as sent is the byte sent. The RX ISR
+         * compares a new relay with last_led_sent, so one stored before the
+         * record below may not have posted this event: look again. */
+        uint8_t led = pending_led;
+        if (led != last_led_sent) {
+            KeyboardUart_SendLed(led);
+            last_led_sent = led;
+            if (pending_led != led) {
+                rf_set_event_atomic(RF_EVT_NOTIFY_LED);
+            }
+        }
         return events ^ RF_EVT_NOTIFY_LED;
     }
 
@@ -1588,8 +1604,11 @@ static void rf_enter_connected(void)
 #endif
     KeyboardUart_SendStatus(0x32);
     KeyboardUart_SendStatus(0x23);
-    KeyboardUart_SendLed(0x00);
-    last_led_sent = 0x00;
+    /* The host's LED state is the dongle's to tell: it relays it on connect.
+     * Forward that relay whatever its value, and leave the host's LEDs alone
+     * until it comes. A 5A 00 here showed Caps Lock off until then, and for
+     * good behind a dongle that never re-sent it on a reconnect. */
+    last_led_sent = 0xFF;
 #if KBD_REST
     rest_arm_idle();
 #endif
