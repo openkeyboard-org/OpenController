@@ -78,6 +78,15 @@
 #define RF_EVT_REST_PROBE         0x0800   /* resting policy: probe cadence */
 #define RF_EVT_REST_PROBE_TIMEOUT 0x1000   /* resting policy: probe not caught / not polled in time */
 #define RF_EVT_REST_STAGE2        0x2000   /* resting policy: stop probing */
+#define RF_EVT_DISCARD_HID        0x4000   /* the host left 2.4 GHz: drop what it queued (0x8000 is TMOS's) */
+
+/* A SELECT_USB that a SELECT_2G4 follows within this long is a forced
+ * reconnect, not a switch to USB: QMK sends the pair back to back to get a
+ * fresh CONNECTED, and the reports queued for 2.4 GHz are still wanted. TMOS
+ * ticks of 0.625 ms. */
+#ifndef KBD_RESELECT_KEEP_TICKS
+#define KBD_RESELECT_KEEP_TICKS   800u     /* 500 ms */
+#endif
 
 #define RF_DEFAULT_ACCESS_ADDR    0x71764126u
 #define RF_CRC_INIT               0x555555u
@@ -317,6 +326,14 @@ static inline uint8_t hid_key_held(void)
     return (uint8_t)(hid_last_queued_valid
                      && (hid_last_queued[0]|hid_last_queued[1]|hid_last_queued[2]|hid_last_queued[3]
                         |hid_last_queued[4]|hid_last_queued[5]|hid_last_queued[6]|hid_last_queued[7]));
+}
+
+/* Drop every queued report. IDLE only: the radio is shut then, so the RX ISR
+ * that retires the head can't run. */
+static void rf_discard_hid_queue(void)
+{
+    hid_fifo_head = hid_fifo_tail;
+    hid_head_sent = 0;
 }
 static uint8_t tx_payload[10];
 static uint8_t tx_ctrl;
@@ -1276,6 +1293,13 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         return events ^ RF_EVT_NOTIFY_LED;
     }
 
+    if (events & RF_EVT_DISCARD_HID) {
+        if (rf_state == RF_STATE_IDLE) {
+            rf_discard_hid_queue();
+        }
+        return events ^ RF_EVT_DISCARD_HID;
+    }
+
     if (events & RF_EVT_SAVE_BOND) {
         rf_save_bond_to_flash();
         return events ^ RF_EVT_SAVE_BOND;
@@ -1931,8 +1955,20 @@ static void rest_promote_to_normal(void)
 }
 #endif /* KBD_REST */
 
+/* The host left 2.4 GHz (SELECT_USB, or a BT select). What it queued for the
+ * link and never got out must not type itself out when 2.4 GHz next connects,
+ * long after the host moved on. Unless a SELECT_2G4 follows within
+ * KBD_RESELECT_KEEP_TICKS (RF_Select2G4 cancels this): that was a forced
+ * reconnect, and the reports are still wanted. Call after RF_Disconnect(). */
+void RF_DropQueueUnlessReselected(void)
+{
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);
+    rf_start_task_atomic(RF_EVT_DISCARD_HID, KBD_RESELECT_KEEP_TICKS);
+}
+
 uint8_t RF_Select2G4(void)
 {
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);   /* a forced reconnect keeps the queue */
     if (!keyboard_mac_valid) {
         return 0;
     }
@@ -2067,6 +2103,12 @@ void RF_ClearBond(void)
     rf_clear_bond_ram();
     bond_save_pending = 0;
     rf_clear_bond_flash();
+    /* Without the bond nothing queued can go anywhere; a new pairing must not
+     * type it out on its new host. Both callers disconnect first. */
+    rf_stop_task_atomic(RF_EVT_DISCARD_HID);
+    if (rf_state == RF_STATE_IDLE) {
+        rf_discard_hid_queue();
+    }
 }
 
 uint8_t RF_HasBond(void)

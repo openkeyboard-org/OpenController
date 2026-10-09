@@ -17,6 +17,9 @@ void RF_TaskInit(void);
 uint8_t RF_Select2G4(void);
 void RF_EnterPairing(void);
 void RF_Disconnect(void);
+/* After RF_Disconnect() for a transport other than 2.4 GHz: drop the queued
+ * reports unless a SELECT_2G4 follows within KBD_RESELECT_KEEP_TICKS. */
+void RF_DropQueueUnlessReselected(void);
 void RF_FlushBondSave(void);
 void RF_ClearBond(void);
 uint8_t RF_HasBond(void);

@@ -149,6 +149,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x11: /* select USB */
         transport_is_2g4 = 0;
         RF_Disconnect();
+        RF_DropQueueUnlessReselected();
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x36);
         break;
@@ -167,6 +168,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x33: /* select BT3 */
         transport_is_2g4 = 0;
         RF_Disconnect();
+        RF_DropQueueUnlessReselected();
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x36);
         KeyboardUart_SendStatus(0x23);
