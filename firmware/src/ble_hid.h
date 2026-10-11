@@ -61,6 +61,11 @@ void BleHid_Quiesce(void);
 /* Nonzero when nothing is connected or advertising. */
 uint8_t BleHid_Quiet(void);
 
+/* Nonzero when the module may sleep between radio events (KBD_BLE_SLEEP):
+ * nothing queued, no pair, unpair or switch under way, and the rest
+ * hold-off after the last keyboard report has passed. */
+uint8_t BleHid_CanSleep(void);
+
 /* The LED state sent to the keyboard host was abandoned unacknowledged
  * (host wake): offer it again. */
 void BleHid_LedResync(void);

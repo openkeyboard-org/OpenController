@@ -64,6 +64,12 @@ extern bleConfig_t ble;
 #define CONN_TIMEOUT        400
 #define CONN_PARAM_DELAY_MS 5000u
 
+/* With KBD_BLE_SLEEP the module may sleep between radio events, but not
+ * within this long of the last keyboard report: the host leads a frame
+ * with a wake byte only after its own rest window (QMK's
+ * OCP_MODULE_REST_IDLE_MS, 3000 ms less a 500 ms margin). */
+#define BLE_REST_HOLD_US    3000000u
+
 /* Reports wait here for the link; ones not delivered within this long are
  * dropped (the next report carries the keyboard's state again). */
 #define QUEUE_LEN           8u
@@ -109,6 +115,7 @@ static queued_report_t queue[QUEUE_LEN];
 static uint8_t  queue_head;
 static uint8_t  queue_count;
 static uint32_t queue_since;
+static uint32_t last_keyboard_report_at;
 
 static uint8_t name[GAP_DEVICE_NAME_LEN + 1];
 static uint8_t name_len;
@@ -736,6 +743,7 @@ static void queue_push(uint8_t id, const uint8_t *data, uint8_t len)
 
 void BleHid_QueueReport(const uint8_t report[8])
 {
+    last_keyboard_report_at = RtcClock_Now();
     queue_push(HID_RPT_ID_KEY_IN, report, HID_KBD_REPORT_LEN);
 }
 
@@ -819,4 +827,13 @@ void BleHid_SetBattery(uint8_t percent)
     if (percent <= 100u) {
         (void)Batt_SetLevel(percent);
     }
+}
+
+uint8_t BleHid_CanSleep(void)
+{
+    if (queue_count != 0 || quiescing || pending_pair || pending_unpair) {
+        return 0;
+    }
+    return (uint32_t)(RtcClock_Now() - last_keyboard_report_at)
+           >= RTC_CLOCK_TICKS_US(BLE_REST_HOLD_US);
 }

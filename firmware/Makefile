@@ -318,6 +318,17 @@ CFLAGS += -DKBD_BLE_LESC=$(KBD_BLE_LESC)
 ifeq ($(strip $(KBD_BLE_LESC)),1)
 CFLAGS += -DBLE_BUFF_MAX_LEN=70
 endif
+# Sleep between BLE radio events (power_sleep.c), off by default until it
+# has been measured on the bench: `make KBD_BLE_SLEEP=1`. Needs the
+# deep-sleep plumbing of KBD_DEEP_SLEEP.
+KBD_BLE_SLEEP ?= 0
+ifeq ($(filter 0 1,$(strip $(KBD_BLE_SLEEP))),)
+$(error KBD_BLE_SLEEP must be 0 or 1, got '$(KBD_BLE_SLEEP)')
+endif
+ifeq ($(strip $(KBD_BLE_SLEEP))$(strip $(KBD_DEEP_SLEEP)),10)
+$(error KBD_BLE_SLEEP=1 needs KBD_DEEP_SLEEP=1)
+endif
+CFLAGS += -DKBD_BLE_SLEEP=$(KBD_BLE_SLEEP)
 # One peripheral link and no central: the CONFIG.h default reserves three
 # central links the module never uses. One SNV block per profile; the app
 # points the library at the booted profile's block (transport_mode.h).
