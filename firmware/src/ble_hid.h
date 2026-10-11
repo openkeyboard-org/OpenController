@@ -39,6 +39,12 @@ void BleHid_Unpair(void);
 /* A1: one boot keyboard report, delivered in order once the link is up. */
 void BleHid_QueueReport(const uint8_t report[8]);
 
+/* A3: a consumer (media) usage, 0 for none; A4: the vendor system bitmap
+ * (bit 0 Power Down, 1 Sleep, 2 Wake Up). Queued in order with the
+ * keyboard reports. */
+void BleHid_QueueConsumer(uint16_t usage);
+void BleHid_QueueSystem(uint8_t bits);
+
 /* A9: device name; a '$' becomes the profile number (1-3). The caller
  * also stores it (TransportMode_StoreName) for later boots. */
 void BleHid_SetName(const uint8_t *name, uint8_t len);

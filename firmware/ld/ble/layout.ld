@@ -15,7 +15,10 @@
  * WCH's CH59x_pwr.c puts all four of its sleep routines in RAM, and only
  * LowPower_Sleep is used. The Makefile builds that file with __HIGH_CODE
  * empty, so each routine gets its own section, the unused ones are
- * collected as garbage, and LowPower_Sleep is pulled in here by name. */
+ * collected as garbage, and LowPower_Sleep is pulled in here by name.
+ *
+ * The BLE-only variables go below the stack; see .bss_ble in
+ * ld/ch592f.ld. */
 
     .highcode :
     {
@@ -55,3 +58,4 @@
     _highcode_ram_end = ADDR(.highcode_2g4)
                         + MAX(SIZEOF(.highcode_2g4), SIZEOF(.highcode_ble));
     _text_start = LOADADDR(.highcode_ble) + SIZEOF(.highcode_ble);
+

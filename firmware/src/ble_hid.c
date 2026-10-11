@@ -98,7 +98,14 @@ static adv_kind_t adv_slow;                /* reconnect has dropped to slow */
 static uint8_t public_addr[B_ADDR_LEN];
 static uint8_t last_led;
 
-static uint8_t  queue[QUEUE_LEN][HID_KBD_REPORT_LEN];
+/* Keyboard, consumer and system reports, in the order the host sent them. */
+typedef struct {
+    uint8_t id;    /* HID_RPT_ID_* */
+    uint8_t len;
+    uint8_t data[HID_KBD_REPORT_LEN];
+} queued_report_t;
+
+static queued_report_t queue[QUEUE_LEN];
 static uint8_t  queue_head;
 static uint8_t  queue_count;
 static uint32_t queue_since;
@@ -682,28 +689,71 @@ void BleHid_Unpair(void)
     KeyboardUart_SendStatus(ST_DISCONNECTED);
 }
 
-void BleHid_QueueReport(const uint8_t report[8])
+/* Every report carries the full state of its kind, so when the queue is
+ * full the oldest report that a newer one of the same kind supersedes can
+ * go: the host still ends in every kind's final state, and a media key
+ * can't be left held. With three kinds in eight slots there always is one. */
+static void queue_drop_superseded(void)
 {
-    uint8_t slot;
+    for (uint8_t i = 0; i < queue_count; i++) {
+        uint8_t slot = (uint8_t)((queue_head + i) % QUEUE_LEN);
+
+        for (uint8_t j = (uint8_t)(i + 1u); j < queue_count; j++) {
+            if (queue[(queue_head + j) % QUEUE_LEN].id == queue[slot].id) {
+                for (uint8_t k = i; k + 1u < queue_count; k++) {
+                    queue[(queue_head + k) % QUEUE_LEN] = queue[(queue_head + k + 1u) % QUEUE_LEN];
+                }
+                queue_count--;
+                BLE_DIAG(ble_diag.reports_dropped++);
+                return;
+            }
+        }
+    }
+}
+
+static void queue_push(uint8_t id, const uint8_t *data, uint8_t len)
+{
+    queued_report_t *entry;
 
     if (queue_count == 0) {
         queue_since = RtcClock_Now();
     }
     if (queue_count == QUEUE_LEN) {
-        /* Full: the newest entry gives way, so the last report queued
-         * always carries the keyboard's current state. */
-        slot = (uint8_t)((queue_head + QUEUE_LEN - 1u) % QUEUE_LEN);
-    } else {
-        slot = (uint8_t)((queue_head + queue_count) % QUEUE_LEN);
-        queue_count++;
+        queue_drop_superseded();
     }
-    tmos_memcpy(queue[slot], report, HID_KBD_REPORT_LEN);
+    entry = &queue[(queue_head + queue_count) % QUEUE_LEN];
+    queue_count++;
+    entry->id = id;
+    entry->len = len;
+    tmos_memcpy(entry->data, data, len);
 
     /* A key on a bonded profile that isn't advertising (after an A6 11,
      * say) is the cue to reconnect, as on the 2.4 GHz link. */
     if (!HidDev_Connected() && selected) {
         adv_apply();
     }
+}
+
+void BleHid_QueueReport(const uint8_t report[8])
+{
+    queue_push(HID_RPT_ID_KEY_IN, report, HID_KBD_REPORT_LEN);
+}
+
+void BleHid_QueueConsumer(uint16_t usage)
+{
+    uint8_t data[2] = {LO_UINT16(usage), HI_UINT16(usage)};
+
+    queue_push(HID_RPT_ID_CONSUMER_IN, data, sizeof(data));
+}
+
+void BleHid_QueueSystem(uint8_t bits)
+{
+    /* The vendor frame's bitmap (Power Down, Sleep, Wake Up) as the one
+     * usage the report carries. */
+    uint16_t usage = (bits & 0x01u) ? 0x81u : (bits & 0x02u) ? 0x82u : (bits & 0x04u) ? 0x83u : 0u;
+    uint8_t  data[2] = {LO_UINT16(usage), HI_UINT16(usage)};
+
+    queue_push(HID_RPT_ID_SYSTEM_IN, data, sizeof(data));
 }
 
 void BleHid_Service(void)
@@ -716,6 +766,8 @@ void BleHid_Service(void)
     ble_diag.generation = generation;
 #endif
     while (queue_count) {
+        queued_report_t *entry = &queue[queue_head];
+
         if (!HidDev_ReportReady(HID_RPT_ID_KEY_IN, HID_REPORT_TYPE_INPUT)) {
             if ((uint32_t)(RtcClock_Now() - queue_since) > RTC_CLOCK_TICKS_US(QUEUE_MAX_AGE_US)) {
                 BLE_DIAG(ble_diag.reports_dropped += queue_count);
@@ -723,14 +775,19 @@ void BleHid_Service(void)
             }
             return;
         }
-        if (HidDev_Report(HID_RPT_ID_KEY_IN, HID_REPORT_TYPE_INPUT,
-                          HID_KBD_REPORT_LEN, queue[queue_head]) != SUCCESS) {
+        if (!HidDev_ReportReady(entry->id, HID_REPORT_TYPE_INPUT)) {
+            /* The link is up but the host hasn't subscribed to this kind
+             * (or is in boot protocol): it must not hold up the keys. */
+            BLE_DIAG(ble_diag.reports_dropped++);
+        } else if (HidDev_Report(entry->id, HID_REPORT_TYPE_INPUT,
+                                 entry->len, entry->data) != SUCCESS) {
             return;   /* no buffer this event: try again next pass */
+        } else {
+            BLE_DIAG(ble_diag.reports_sent++);
         }
         queue_head = (uint8_t)((queue_head + 1u) % QUEUE_LEN);
         queue_count--;
         queue_since = RtcClock_Now();
-        BLE_DIAG(ble_diag.reports_sent++);
     }
 }
 

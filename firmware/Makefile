@@ -428,7 +428,7 @@ endif
 # Linker flags. -L $(BUILD) resolves ld/ch592f.ld's `INCLUDE memory.ld`
 # against the per-slot generated MEMORY block.
 LDFLAGS := $(ARCH) -T ld/ch592f.ld -L $(BUILD)
-# The RAM-code layout differs with the BLE mode (ld/ble/highcode.ld).
+# The RAM layout differs with the BLE mode (ld/ble/layout.ld).
 LD_VARIANT := $(if $(filter 1,$(strip $(KBD_BLE))),ble,2g4)
 LDFLAGS += -L ld/$(LD_VARIANT)
 LDFLAGS += -nostartfiles
@@ -529,7 +529,7 @@ SCHED_SRC += src/fault_handler.S
 LIBS := $(BLE_LIB_DIR)/LIBCH59xBLE.a
 LIBS += $(SDK_SRC_DIR)/StdPeriphDriver/libISP592.a
 
-# A BLE build places WCH's sleep routines one by one (ld/ble/highcode.ld):
+# A BLE build places WCH's sleep routines one by one (ld/ble/layout.ld):
 # with __HIGH_CODE empty they land in per-function sections, so the three
 # the firmware never calls are dropped instead of taking RAM.
 ifeq ($(strip $(KBD_BLE)),1)
@@ -637,7 +637,7 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld ld/$(LD_VARIANT)/highcode.ld $(MEMORY_LD)
+$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld ld/$(LD_VARIANT)/layout.ld $(MEMORY_LD)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
 
 $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf

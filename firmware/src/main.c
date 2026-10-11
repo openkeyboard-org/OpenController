@@ -135,12 +135,13 @@ static sleep_proto_t sleep_proto;
 #endif
 
 #if KBD_BLE
-/* RAM code only one mode runs shares a window (ld/ble/highcode.ld); this
+/* RAM code only one mode runs shares a window (ld/ble/layout.ld); this
  * copies the booted mode's image into it. Must run before either stack
  * starts, and nothing in the window may run before it. */
 extern uint32_t __load_start_highcode_2g4[], __load_stop_highcode_2g4[];
 extern uint32_t __load_start_highcode_ble[], __load_stop_highcode_ble[];
 extern uint32_t _highcode_overlay_vma[];
+extern uint32_t _bss_ble_start[], _bss_ble_end[];
 
 static void highcode_overlay_load(uint8_t ble)
 {
@@ -238,6 +239,18 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         /* Battery level (OpenController extension, sent only after 5B 39). */
         if (ble_mode) {
             BleHid_SetBattery(sub);
+        }
+        return;
+    }
+    if (cmd == 0xA3 || cmd == 0xA4) {
+        /* Consumer and system reports: BLE carries them; the 2.4 GHz link
+         * to OpenDongle doesn't, so they are only ACKed there. */
+        if (ble_mode) {
+            if (cmd == 0xA3) {
+                BleHid_QueueConsumer((uint16_t)(payload[0] | ((uint16_t)payload[1] << 8)));
+            } else {
+                BleHid_QueueSystem(sub);
+            }
         }
         return;
     }
@@ -783,6 +796,11 @@ int main(void)
 {
     BOOT_PHASE(0xA0);
 #if KBD_BLE
+    /* The BLE-only variables live outside .bss (ld/ble/layout.ld), so the
+     * startup code doesn't clear them. */
+    for (uint32_t *p = _bss_ble_start; p < _bss_ble_end; p++) {
+        *p = 0;
+    }
     BleDiag_Paint();
 #endif
 #if KBD_DCDC_ENABLE

@@ -59,14 +59,16 @@ SECTIONS
         PROVIDE(_highcode_lma = .);
     } >FLASH AT>FLASH
 
-    /* RAM-resident code. ld/2g4/highcode.ld (a build without the BLE mode)
-     * holds it as one section; ld/ble/highcode.ld adds an overlay for the
-     * code only one mode runs. Either defines _highcode_ram_end (first RAM
-     * byte after the code) and _text_start (first flash byte after its
-     * load image). Picked by -L in the Makefile. */
-    INCLUDE highcode.ld
+    /* RAM-resident code, and in a BLE build the RAM laid out per mode.
+     * ld/2g4/layout.ld (a build without the BLE mode) holds the code as one
+     * section; ld/ble/layout.ld adds an overlay for the code only one mode
+     * runs and puts the BLE-only variables below the stack. Either defines
+     * _highcode_ram_end (first RAM byte after the code) and _text_start
+     * (first flash byte after its load image). Picked by -L in the
+     * Makefile. */
+    INCLUDE layout.ld
 
-    /* No AT>FLASH: an overlay's load images (ld/ble/highcode.ld) don't
+    /* No AT>FLASH: an overlay's load images (ld/ble/layout.ld) don't
      * advance the FLASH region, so .text is placed by address and loads
      * where it runs. */
     .text _text_start :
@@ -170,9 +172,18 @@ SECTIONS
     {
         . = ALIGN(4);
         PROVIDE( _sbss = .);
-        *(.sbss*)
+        /* Minus the BLE-only objects of .bss_ble below. */
+        EXCLUDE_FILE(*ble_hid.o *hiddev.o *hidkbdservice.o *battservice.o *devinfoservice.o
+                     *LIBCH59xBLE.a:gapbondmgr.o *LIBCH59xBLE.a:gattservapp.o
+                     *LIBCH59xBLE.a:gap_peripheral.o *LIBCH59xBLE.a:gap.o
+                     *LIBCH59xBLE.a:gapgattserver.o *LIBCH59xBLE.a:gatt.o
+                     *LIBCH59xBLE.a:att.o) *(.sbss*)
         *(.gnu.linkonce.sb.*)
-        *(.bss*)
+        EXCLUDE_FILE(*ble_hid.o *hiddev.o *hidkbdservice.o *battservice.o *devinfoservice.o
+                     *LIBCH59xBLE.a:gapbondmgr.o *LIBCH59xBLE.a:gattservapp.o
+                     *LIBCH59xBLE.a:gap_peripheral.o *LIBCH59xBLE.a:gap.o
+                     *LIBCH59xBLE.a:gapgattserver.o *LIBCH59xBLE.a:gatt.o
+                     *LIBCH59xBLE.a:att.o) *(.bss*)
         *(.gnu.linkonce.b.*)
         *(COMMON*)
         . = ALIGN(4);
@@ -237,6 +248,35 @@ SECTIONS
     ASSERT(ADDR(.diag_ble) >= _diag_safe_end,
            ".diag_ble overlaps the diag window")
 
+    /* The BLE-only zero-initialised variables: this firmware's BLE objects
+     * and the BLE library's GAP, GATT and bond-manager objects, none of
+     * which a build without the BLE mode links (there this section is
+     * empty). They sit in the free RAM between the diag block and the stack
+     * to keep room below the diag window. NOLOAD, so the startup code
+     * doesn't clear them: main() does, before anything else runs. */
+    .bss_ble 0x20005A40 (NOLOAD) :
+    {
+        . = ALIGN(4);
+        PROVIDE(_bss_ble_start = .);
+        *ble_hid.o(.bss .bss.* .sbss .sbss.*)
+        *hiddev.o(.bss .bss.* .sbss .sbss.*)
+        *hidkbdservice.o(.bss .bss.* .sbss .sbss.*)
+        *battservice.o(.bss .bss.* .sbss .sbss.*)
+        *devinfoservice.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gapbondmgr.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gattservapp.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gap_peripheral.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gap.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gapgattserver.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gatt.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:att.o(.bss .bss.* .sbss .sbss.*)
+        . = ALIGN(4);
+        PROVIDE(_bss_ble_end = .);
+    } >RAM
+
+    ASSERT(ADDR(.diag_ble) + SIZEOF(.diag_ble) <= ADDR(.bss_ble),
+           ".diag_ble overlaps .bss_ble")
+
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
         PROVIDE( _heap_end = . );
@@ -249,6 +289,8 @@ SECTIONS
     ASSERT(_diag_safe_end <= _susrstack, ".diag_safe overflows into the stack region")
     ASSERT(ADDR(.diag_ble) + SIZEOF(.diag_ble) <= _susrstack,
            ".diag_ble overflows into the stack region")
+    ASSERT(ADDR(.bss_ble) + SIZEOF(.bss_ble) <= _susrstack,
+           ".bss_ble overflows into the stack region")
     ASSERT(_eusrstack == OC_BOOTREQ_ADDR,
            "stack top must sit just below the OpenBoot boot-request word (memory.ld)")
     ASSERT(ORIGIN(FLASH) == OC_SLOT_A_BASE || ORIGIN(FLASH) == OC_SLOT_B_BASE,

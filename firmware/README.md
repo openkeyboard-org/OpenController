@@ -126,10 +126,15 @@ the link state. Each profile has its own bond block (0x77C00, 0x77D00,
 0x77E00), static address and IRK. The BLE glue is `src/ble_hid.c`, on
 service code adapted from WCH's `HID_Keyboard` example (`src/ble/`, see
 `NOTICE`). The host asks for the mode with `A6 59`; a `KBD_BLE` build
-answers `5B 39`. To fit RAM, the 2.4 GHz-only RAM code and the BLE
-library's connection objects share one window, which `main()` fills at
-boot for the mode that runs (`ld/ble/highcode.ld`). A `KBD_BLE=0` build
-is byte-identical to one without the feature. The design, its status and
+answers `5B 39`, and then the host may send the name (`A9`, kept in the
+record), the battery level (`A7`) and consumer and system reports (`A3`,
+`A4`), which a BLE boot carries beside the keyboard report. To fit RAM,
+the 2.4 GHz-only RAM code and the BLE library's connection objects share
+one window, which `main()` fills at boot for the mode that runs
+(`ld/ble/layout.ld`), and the BLE-only variables live below the stack
+(`.bss_ble`, cleared by `main()`). With `RF_DIAG_COUNTERS` a 40-byte
+diagnostics block sits at 0x20005A00 (`src/ble_diag.h`). A `KBD_BLE=0`
+build is byte-identical to one without the feature. The design, its status and
 the bench test plan are in `BLUETOOTH.md` in the MK65MX QMK tree.
 
 On every board profile, the application's bounded waits run on RTC32K

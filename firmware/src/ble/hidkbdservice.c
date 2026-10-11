@@ -13,8 +13,10 @@
 /* Modified for OpenController (Copyright 2026 Eric Molitor (EMulator),
  * Apache-2.0): the key array covers usages 0-255, as QMK's own keyboard
  * descriptor does (the example stopped at 101, so a host would drop F13-F24
- * and the international keys), and the example's feature report, which the
- * report map never declared, is gone. */
+ * and the international keys); the example's feature report, which the
+ * report map never declared, is gone; and consumer (media) and system
+ * control input reports join the keyboard, with report IDs as in QMK's
+ * own USB descriptor. */
 
 /*********************************************************************
  * INCLUDES
@@ -95,6 +97,7 @@ static const uint8_t hidReportMap[] = {
     0x05, 0x01, // Usage Pg (Generic Desktop)
     0x09, 0x06, // Usage (Keyboard)
     0xA1, 0x01, // Collection: (Application)
+    0x85, HID_RPT_ID_KEY_IN, // Report ID
                 //
     0x05, 0x07, // Usage Pg (Key Codes)
     0x19, 0xE0, // Usage Min (224)
@@ -135,7 +138,35 @@ static const uint8_t hidReportMap[] = {
     0x2A, 0xFF, 0x00, // Usage Max (255)
     0x81, 0x00, // Input: (Data, Array)
                 //
-    0xC0        // End Collection
+    0xC0,       // End Collection
+
+    // Consumer control: one 16-bit usage, as QMK sends it
+    0x05, 0x0C,       // Usage Pg (Consumer)
+    0x09, 0x01,       // Usage (Consumer Control)
+    0xA1, 0x01,       // Collection: (Application)
+    0x85, HID_RPT_ID_CONSUMER_IN, // Report ID
+    0x19, 0x01,       // Usage Min (1)
+    0x2A, 0xA0, 0x02, // Usage Max (0x02A0)
+    0x15, 0x01,       // Log Min (1)
+    0x26, 0xA0, 0x02, // Log Max (0x02A0)
+    0x95, 0x01,       // Report Count (1)
+    0x75, 0x10,       // Report Size (16)
+    0x81, 0x00,       // Input: (Data, Array, Absolute)
+    0xC0,             // End Collection
+
+    // System control: Power Down, Sleep, Wake Up (the A4 frame's bits)
+    0x05, 0x01,       // Usage Pg (Generic Desktop)
+    0x09, 0x80,       // Usage (System Control)
+    0xA1, 0x01,       // Collection: (Application)
+    0x85, HID_RPT_ID_SYSTEM_IN, // Report ID
+    0x19, 0x81,       // Usage Min (0x81)
+    0x29, 0x83,       // Usage Max (0x83)
+    0x15, 0x81,       // Log Min (0x81)
+    0x25, 0x83,       // Log Max (0x83)
+    0x95, 0x01,       // Report Count (1)
+    0x75, 0x10,       // Report Size (16)
+    0x81, 0x00,       // Input: (Data, Array, Absolute)
+    0xC0              // End Collection
 };
 
 // HID report map length
@@ -188,6 +219,19 @@ static uint8_t hidReportLedOut;
 // HID Report Reference characteristic descriptor, LED output
 static uint8_t hidReportRefLedOut[HID_REPORT_REF_LEN] =
     {HID_RPT_ID_LED_OUT, HID_REPORT_TYPE_OUTPUT};
+
+// HID Report characteristics, consumer and system control input
+static uint8_t       hidReportConsumerInProps = GATT_PROP_READ | GATT_PROP_NOTIFY;
+static uint8_t       hidReportConsumerIn;
+static gattCharCfg_t hidReportConsumerInClientCharCfg[GATT_MAX_NUM_CONN];
+static uint8_t       hidReportRefConsumerIn[HID_REPORT_REF_LEN] =
+    {HID_RPT_ID_CONSUMER_IN, HID_REPORT_TYPE_INPUT};
+
+static uint8_t       hidReportSystemInProps = GATT_PROP_READ | GATT_PROP_NOTIFY;
+static uint8_t       hidReportSystemIn;
+static gattCharCfg_t hidReportSystemInClientCharCfg[GATT_MAX_NUM_CONN];
+static uint8_t       hidReportRefSystemIn[HID_REPORT_REF_LEN] =
+    {HID_RPT_ID_SYSTEM_IN, HID_REPORT_TYPE_INPUT};
 
 // HID Boot Keyboard Input Report
 static uint8_t       hidReportBootKeyInProps = GATT_PROP_READ | GATT_PROP_NOTIFY;
@@ -332,6 +376,50 @@ static gattAttribute_t hidAttrTbl[] = {
         0,
         hidReportRefLedOut},
 
+    // HID Report characteristic, consumer input
+    {
+        {ATT_BT_UUID_SIZE, characterUUID},
+        GATT_PERMIT_READ,
+        0,
+        &hidReportConsumerInProps},
+    {
+        {ATT_BT_UUID_SIZE, hidReportUUID},
+        GATT_PERMIT_ENCRYPT_READ,
+        0,
+        &hidReportConsumerIn},
+    {
+        {ATT_BT_UUID_SIZE, clientCharCfgUUID},
+        GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_WRITE,
+        0,
+        (uint8_t *)&hidReportConsumerInClientCharCfg},
+    {
+        {ATT_BT_UUID_SIZE, reportRefUUID},
+        GATT_PERMIT_READ,
+        0,
+        hidReportRefConsumerIn},
+
+    // HID Report characteristic, system control input
+    {
+        {ATT_BT_UUID_SIZE, characterUUID},
+        GATT_PERMIT_READ,
+        0,
+        &hidReportSystemInProps},
+    {
+        {ATT_BT_UUID_SIZE, hidReportUUID},
+        GATT_PERMIT_ENCRYPT_READ,
+        0,
+        &hidReportSystemIn},
+    {
+        {ATT_BT_UUID_SIZE, clientCharCfgUUID},
+        GATT_PERMIT_READ | GATT_PERMIT_ENCRYPT_WRITE,
+        0,
+        (uint8_t *)&hidReportSystemInClientCharCfg},
+    {
+        {ATT_BT_UUID_SIZE, reportRefUUID},
+        GATT_PERMIT_READ,
+        0,
+        hidReportRefSystemIn},
+
     // HID Boot Keyboard Input Report declaration
     {
         {ATT_BT_UUID_SIZE, characterUUID},
@@ -389,6 +477,14 @@ enum
     HID_REPORT_LED_OUT_DECL_IDX, // HID Report characteristic, LED output declaration
     HID_REPORT_LED_OUT_IDX,      // HID Report characteristic, LED output
     HID_REPORT_REF_LED_OUT_IDX,  // HID Report Reference characteristic descriptor, LED output
+    HID_REPORT_CONSUMER_IN_DECL_IDX,
+    HID_REPORT_CONSUMER_IN_IDX,
+    HID_REPORT_CONSUMER_IN_CCCD_IDX,
+    HID_REPORT_REF_CONSUMER_IN_IDX,
+    HID_REPORT_SYSTEM_IN_DECL_IDX,
+    HID_REPORT_SYSTEM_IN_IDX,
+    HID_REPORT_SYSTEM_IN_CCCD_IDX,
+    HID_REPORT_REF_SYSTEM_IN_IDX,
     HID_BOOT_KEY_IN_DECL_IDX,    // HID Boot Keyboard Input Report declaration
     HID_BOOT_KEY_IN_IDX,         // HID Boot Keyboard Input Report
     HID_BOOT_KEY_IN_CCCD_IDX,    // HID Boot Keyboard Input Report characteristic client characteristic configuration
@@ -429,6 +525,8 @@ bStatus_t Hid_AddService(void)
 
     // Initialize Client Characteristic Configuration attributes
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, hidReportKeyInClientCharCfg);
+    GATTServApp_InitCharCfg(INVALID_CONNHANDLE, hidReportConsumerInClientCharCfg);
+    GATTServApp_InitCharCfg(INVALID_CONNHANDLE, hidReportSystemInClientCharCfg);
     GATTServApp_InitCharCfg(INVALID_CONNHANDLE, hidReportBootKeyInClientCharCfg);
 
     // Register GATT attribute list and CBs with GATT Server App
@@ -473,6 +571,19 @@ bStatus_t Hid_AddService(void)
 
     // Battery level input report
     Batt_GetParameter(BATT_PARAM_BATT_LEVEL_IN_REPORT, &(hidRptMap[4]));
+
+    // Consumer and system control input reports
+    hidRptMap[5].id = hidReportRefConsumerIn[0];
+    hidRptMap[5].type = hidReportRefConsumerIn[1];
+    hidRptMap[5].handle = hidAttrTbl[HID_REPORT_CONSUMER_IN_IDX].handle;
+    hidRptMap[5].cccdHandle = hidAttrTbl[HID_REPORT_CONSUMER_IN_CCCD_IDX].handle;
+    hidRptMap[5].mode = HID_PROTOCOL_MODE_REPORT;
+
+    hidRptMap[6].id = hidReportRefSystemIn[0];
+    hidRptMap[6].type = hidReportRefSystemIn[1];
+    hidRptMap[6].handle = hidAttrTbl[HID_REPORT_SYSTEM_IN_IDX].handle;
+    hidRptMap[6].cccdHandle = hidAttrTbl[HID_REPORT_SYSTEM_IN_CCCD_IDX].handle;
+    hidRptMap[6].mode = HID_PROTOCOL_MODE_REPORT;
 
     // Setup report ID map
     HidDev_RegisterReports(HID_NUM_REPORTS, hidRptMap);
