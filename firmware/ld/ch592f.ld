@@ -226,6 +226,17 @@ SECTIONS
            || _diag_safe_legacy_end == _diag_safe_start,
            "legacy .diag_safe counters moved - bench absolute addresses broken")
 
+    /* BLE build diagnostics (src/ble_diag.h), pinned in the free RAM between
+     * the diag window and the stack so a single SWD read finds them. Empty
+     * in a build without the BLE mode. */
+    .diag_ble 0x20005A00 (NOLOAD) :
+    {
+        KEEP(*(.diag_ble))
+    } >RAM
+
+    ASSERT(ADDR(.diag_ble) >= _diag_safe_end,
+           ".diag_ble overlaps the diag window")
+
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
         PROVIDE( _heap_end = . );
@@ -236,6 +247,8 @@ SECTIONS
     } >RAM
 
     ASSERT(_diag_safe_end <= _susrstack, ".diag_safe overflows into the stack region")
+    ASSERT(ADDR(.diag_ble) + SIZEOF(.diag_ble) <= _susrstack,
+           ".diag_ble overflows into the stack region")
     ASSERT(_eusrstack == OC_BOOTREQ_ADDR,
            "stack top must sit just below the OpenBoot boot-request word (memory.ld)")
     ASSERT(ORIGIN(FLASH) == OC_SLOT_A_BASE || ORIGIN(FLASH) == OC_SLOT_B_BASE,

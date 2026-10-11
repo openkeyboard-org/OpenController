@@ -11,6 +11,7 @@
 #include "CONFIG.h"
 #include "HAL.h"
 #include "battservice.h"
+#include "ble_diag.h"
 #include "ble_hid.h"
 #include "hiddev.h"
 #include "hidkbdservice.h"
@@ -123,6 +124,7 @@ static void hid_pair_state_cb(uint16_t conn, uint8_t state, uint8_t status);
 static uint8_t hid_report_cb(uint8_t id, uint8_t type, uint16_t uuid,
                              uint8_t oper, uint16_t *len, uint8_t *data);
 static void hid_evt_cb(uint8_t evt);
+static void hid_param_cb(uint16_t conn, uint16_t interval, uint16_t latency, uint16_t timeout);
 
 static hidDevCB_t hid_cbs = {
     hid_report_cb,
@@ -130,8 +132,12 @@ static hidDevCB_t hid_cbs = {
     NULL,
     hid_state_cb,
     hid_pair_state_cb,
-    NULL,
+    hid_param_cb,
 };
+
+#if RF_DIAG_COUNTERS
+static uint32_t pair_started_at;
+#endif
 
 static uint8_t bonded(void)
 {
@@ -352,6 +358,10 @@ static void hid_state_cb(gapRole_States_t new_state, gapRoleEvent_t *event)
     /* Whatever state the role moves to from a connection, the link is
      * gone. */
     if (link_up && new_state != GAPROLE_CONNECTED) {
+        BLE_DIAG(ble_diag.disconnects++);
+        if (event->gap.opcode == GAP_LINK_TERMINATED_EVENT) {
+            BLE_DIAG(ble_diag.last_disconnect_reason = event->linkTerminate.reason);
+        }
         link_up = 0;
         adv_running = ADV_NONE;
         on_disconnected();
@@ -374,6 +384,10 @@ static void hid_state_cb(gapRole_States_t new_state, gapRoleEvent_t *event)
 
     case GAPROLE_CONNECTED:
         if (event->gap.opcode == GAP_LINK_ESTABLISHED_EVENT) {
+            BLE_DIAG(ble_diag.connects++);
+            BLE_DIAG(ble_diag.conn_interval = event->linkCmpl.connInterval);
+            BLE_DIAG(ble_diag.conn_latency = event->linkCmpl.connLatency);
+            BLE_DIAG(ble_diag.conn_timeout = event->linkCmpl.connTimeout);
             link_up = 1;
             adv_running = ADV_NONE;   /* the peripheral role stops on connect */
             tmos_stop_task(task_id, EVT_ADV_SLOW);
@@ -400,9 +414,34 @@ static void hid_state_cb(gapRole_States_t new_state, gapRoleEvent_t *event)
     adv_apply();
 }
 
+static void hid_param_cb(uint16_t conn, uint16_t interval, uint16_t latency, uint16_t timeout)
+{
+    (void)conn;
+    (void)interval;
+    (void)latency;
+    (void)timeout;
+    BLE_DIAG(ble_diag.conn_interval = interval);
+    BLE_DIAG(ble_diag.conn_latency = latency);
+    BLE_DIAG(ble_diag.conn_timeout = timeout);
+}
+
 static void hid_pair_state_cb(uint16_t conn, uint8_t state, uint8_t status)
 {
     (void)conn;
+
+#if RF_DIAG_COUNTERS
+    if (state == GAPBOND_PAIRING_STATE_STARTED) {
+        pair_started_at = RtcClock_Now();
+    } else if (state == GAPBOND_PAIRING_STATE_COMPLETE) {
+        ble_diag.pair_ticks = RtcClock_Now() - pair_started_at;
+        ble_diag.last_pair_status = status;
+        if (status == SUCCESS) {
+            ble_diag.pair_ok++;
+        } else {
+            ble_diag.pair_fail++;
+        }
+    }
+#endif
 
     if (state == GAPBOND_PAIRING_STATE_COMPLETE && status != SUCCESS) {
         /* A failed attempt inside the pairing window leaves it open for
@@ -516,7 +555,16 @@ void BleHid_Init(uint8_t booted_profile, uint8_t booted_generation)
      * from here. */
     ble.SNVAddr = TRANSPORT_SNV_OFF(profile);
 
-    BleHid_SetName((const uint8_t *)KBD_BLE_NAME, (uint8_t)(sizeof(KBD_BLE_NAME) - 1u));
+    {
+        uint8_t        stored_len;
+        const uint8_t *stored = TransportMode_Name(&stored_len);
+
+        if (stored_len != 0) {
+            BleHid_SetName(stored, stored_len);
+        } else {
+            BleHid_SetName((const uint8_t *)KBD_BLE_NAME, (uint8_t)(sizeof(KBD_BLE_NAME) - 1u));
+        }
+    }
 
     GAPRole_PeripheralInit();
     HidDev_Init();
@@ -660,9 +708,17 @@ void BleHid_QueueReport(const uint8_t report[8])
 
 void BleHid_Service(void)
 {
+#if RF_DIAG_COUNTERS
+    ble_diag.adv_running = (uint8_t)adv_running;
+    ble_diag.flags = (uint8_t)((link_up ? BLE_DIAG_FLAG_LINKED : 0u)
+                               | (HidDev_Secure() ? BLE_DIAG_FLAG_ENCRYPTED : 0u)
+                               | (pairing ? BLE_DIAG_FLAG_PAIRING : 0u));
+    ble_diag.generation = generation;
+#endif
     while (queue_count) {
         if (!HidDev_ReportReady(HID_RPT_ID_KEY_IN, HID_REPORT_TYPE_INPUT)) {
             if ((uint32_t)(RtcClock_Now() - queue_since) > RTC_CLOCK_TICKS_US(QUEUE_MAX_AGE_US)) {
+                BLE_DIAG(ble_diag.reports_dropped += queue_count);
                 queue_clear();
             }
             return;
@@ -674,6 +730,7 @@ void BleHid_Service(void)
         queue_head = (uint8_t)((queue_head + 1u) % QUEUE_LEN);
         queue_count--;
         queue_since = RtcClock_Now();
+        BLE_DIAG(ble_diag.reports_sent++);
     }
 }
 
@@ -698,4 +755,11 @@ uint8_t BleHid_Quiet(void)
 void BleHid_LedResync(void)
 {
     KeyboardUart_SendLed(last_led);
+}
+
+void BleHid_SetBattery(uint8_t percent)
+{
+    if (percent <= 100u) {
+        (void)Batt_SetLevel(percent);
+    }
 }

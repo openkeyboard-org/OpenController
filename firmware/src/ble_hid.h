@@ -39,8 +39,12 @@ void BleHid_Unpair(void);
 /* A1: one boot keyboard report, delivered in order once the link is up. */
 void BleHid_QueueReport(const uint8_t report[8]);
 
-/* A9: device name; a '$' becomes the profile number (1-3). */
+/* A9: device name; a '$' becomes the profile number (1-3). The caller
+ * also stores it (TransportMode_StoreName) for later boots. */
 void BleHid_SetName(const uint8_t *name, uint8_t len);
+
+/* A7: the battery level, 0-100 %, for the Battery Service. */
+void BleHid_SetBattery(uint8_t percent);
 
 /* Main loop: deliver queued reports. */
 void BleHid_Service(void);

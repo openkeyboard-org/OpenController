@@ -22,6 +22,7 @@
 #include "rf_task.h"
 #include "openboot_app.h"
 #if KBD_BLE
+#include "ble_diag.h"
 #include "ble_hid.h"
 #include "transport_mode.h"
 #endif
@@ -222,14 +223,25 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     }
 
     if (cmd == 0xA9) {
-        /* BLE device-name frame. */
+        /* BLE device-name frame. Kept on either boot, for the BLE ones. */
 #if KBD_BLE
+        TransportMode_StoreName(payload, len);
         if (ble_mode) {
             BleHid_SetName(payload, len);
         }
 #endif
         return;
     }
+
+#if KBD_BLE
+    if (cmd == 0xA7) {
+        /* Battery level (OpenController extension, sent only after 5B 39). */
+        if (ble_mode) {
+            BleHid_SetBattery(sub);
+        }
+        return;
+    }
+#endif
 
     if (cmd != 0xA6) {
         return;
@@ -656,10 +668,22 @@ __attribute__((noinline))
 void Main_Circulation(void)
 {
     while (1) {
-        LOOP_STAGE(1); TMOS_SystemProcess();
+#if KBD_BLE
+        if (ble_mode) {
+            uint32_t tmos_started = 0;
+
+            BLE_DIAG(tmos_started = RtcClock_Now());
+            LOOP_STAGE(1); TMOS_SystemProcess();
+            BleDiag_NoteTmosPass(tmos_started);
+        } else
+#endif
+        {
+            LOOP_STAGE(1); TMOS_SystemProcess();
+        }
 #if KBD_BLE
         if (ble_mode) {
             BleHid_Service();
+            BleDiag_Service();
         } else
 #endif
         {
@@ -758,6 +782,9 @@ void Main_Circulation(void)
 int main(void)
 {
     BOOT_PHASE(0xA0);
+#if KBD_BLE
+    BleDiag_Paint();
+#endif
 #if KBD_DCDC_ENABLE
     /* Ahead of SetSysClock, matching WCH's own BLE examples: the switch is a
      * supply transient, and taking it while the core still runs from the
@@ -806,6 +833,10 @@ int main(void)
 #endif
     CH59x_BLEInit();
     BOOT_PHASE(0xA3);
+#if KBD_BLE
+    BleDiag_Init(TransportMode_Profile(),
+                 TransportMode_Generation(TransportMode_Profile()));
+#endif
     HAL_Init();
     BOOT_PHASE(0xA4);
 

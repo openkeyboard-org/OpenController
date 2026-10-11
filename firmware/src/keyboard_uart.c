@@ -287,6 +287,9 @@ static uint8_t expected_for_header(uint8_t b)
     switch (b) {
     case 0xA6:
     case 0x61:
+#if KBD_BLE
+    case 0xA7:  /* battery level for the BLE Battery Service */
+#endif
         return 3;
     case 0xA1:
         return 10;
@@ -309,6 +312,10 @@ static uint8_t frame_is_valid(void)
 
     if (cmd == 0xA6) {
         return checksum(rx_buf, 2) == rx_buf[2];
+#if KBD_BLE
+    } else if (cmd == 0xA7) {
+        return checksum(rx_buf, 2) == rx_buf[2];
+#endif
     } else if (cmd == 0xA1) {
         return checksum(rx_buf, 9) == rx_buf[9];
     } else if (cmd == 0xA9) {
@@ -342,6 +349,13 @@ static void dispatch_frame(void)
         if (frame_cb) {
             frame_cb(0xA9, name_len, &rx_buf[2], name_len);
         }
+#if KBD_BLE
+    } else if (cmd == 0xA7) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(0xA7, rx_buf[1], 0, 0);
+        }
+#endif
     } else {
         /* Host ACK to one of our 0x5A/0x5B/0x5C frames. */
 #if KBD_HOST_WAKE

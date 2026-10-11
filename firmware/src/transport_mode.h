@@ -13,7 +13,7 @@
  * DataFlash map (offsets from 0x70000, 256-byte erase pages):
  *   0x4000  2.4 GHz bond (rf_task.c)
  *   0x6000  stock vendor flags (left alone)
- *   0x7B00  this record
+ *   0x7B00  this record (mode, profile, generations, BLE name)
  *   0x7C00  BLE bonds, profile 1 (one 256-byte SNV block per profile)
  *   0x7D00  BLE bonds, profile 2
  *   0x7E00  BLE bonds, profile 3
@@ -27,6 +27,8 @@
 #define TRANSPORT_MODE_BLE      1u
 
 #define TRANSPORT_BLE_PROFILES  3u
+/* The A9 frame carries at most 18 name bytes. */
+#define TRANSPORT_NAME_MAX      18u
 
 #define TRANSPORT_RECORD_OFF    0x7B00u
 #define TRANSPORT_SNV_BASE_OFF  0x7C00u
@@ -63,6 +65,15 @@ uint8_t TransportMode_BootAnnounces(void);
 
 /* Bump `profile`'s generation and write the record. Main-loop context. */
 void TransportMode_BumpGeneration(uint8_t profile);
+
+/* The BLE device name the keyboard host last sent (A9), kept so a mode or
+ * profile switch, which resets the module, doesn't lose it. A length of 0
+ * means none was ever sent. */
+const uint8_t *TransportMode_Name(uint8_t *len);
+
+/* Store a name from A9; writes DataFlash only when it changed. Main-loop
+ * context. */
+void TransportMode_StoreName(const uint8_t *name, uint8_t len);
 
 /* Software reset into the stored mode. OpenBoot boots the app straight
  * away when no update was requested. */

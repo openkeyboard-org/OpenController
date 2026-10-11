@@ -22,10 +22,13 @@ typedef struct {
     uint8_t  profile;
     uint8_t  generation[TRANSPORT_BLE_PROFILES];
     uint8_t  flags;
+    uint8_t  name_len;   /* 0: none stored, use the default */
+    uint8_t  name[TRANSPORT_NAME_MAX];
+    uint8_t  reserved;
     uint8_t  check;
 } transport_record_t;
 
-_Static_assert(sizeof(transport_record_t) == 12, "record layout");
+_Static_assert(sizeof(transport_record_t) == 32, "record layout");
 
 /* `current` is what DataFlash holds; `booted_*` is what this boot runs. They
  * differ between a Store and the reset that follows it. */
@@ -51,6 +54,7 @@ static uint8_t record_valid(const transport_record_t *rec)
         && rec->version == TRANSPORT_RECORD_VERSION
         && rec->mode <= TRANSPORT_MODE_BLE
         && rec->profile < TRANSPORT_BLE_PROFILES
+        && rec->name_len <= TRANSPORT_NAME_MAX
         && rec->check == record_check(rec);
 }
 
@@ -157,4 +161,24 @@ void TransportMode_Reset(void)
     R8_SAFE_ACCESS_SIG = SAFE_ACCESS_SIG0;
     for (;;) {
     }
+}
+
+const uint8_t *TransportMode_Name(uint8_t *len)
+{
+    *len = current.name_len;
+    return current.name;
+}
+
+void TransportMode_StoreName(const uint8_t *name, uint8_t len)
+{
+    if (len > TRANSPORT_NAME_MAX) {
+        len = TRANSPORT_NAME_MAX;
+    }
+    if (len == current.name_len && tmos_memcmp(name, current.name, len)) {
+        return;   /* the host sends it on every link: write only a change */
+    }
+    tmos_memset(current.name, 0, sizeof(current.name));
+    tmos_memcpy(current.name, name, len);
+    current.name_len = len;
+    record_write();
 }

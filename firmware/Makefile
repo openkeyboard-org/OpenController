@@ -468,6 +468,7 @@ endif
 ifeq ($(strip $(KBD_BLE)),1)
 APP_SRC += src/transport_mode.c
 APP_SRC += src/ble_hid.c
+APP_SRC += src/ble_diag.c
 APP_SRC += src/ble/hiddev.c
 APP_SRC += src/ble/hidkbdservice.c
 APP_SRC += src/ble/battservice.c
