@@ -55,6 +55,9 @@
 #include "keyboard_uart.h"
 #include "rf_task.h"
 #include "power_sleep.h"
+#if KBD_BLE
+#include "transport_mode.h"
+#endif
 #include "sleep_protocol.h"
 
 #ifndef KBD_UART1_REMAP
@@ -558,6 +561,14 @@ __HIGH_CODE
 uint32_t CH59x_LowPower(uint32_t time)
 {
     IDLECB_CALL();
+
+#if KBD_BLE
+    /* The BLE stack's own sleep between connection events is not wired up
+     * yet, and the 2.4 GHz rules below would deep-sleep a live BLE link. */
+    if (TransportMode_IsBle()) {
+        return 3;
+    }
+#endif
 
 #if KBD_SLEEP_BENCH_HOOK
     if (pwr_bench_request) {

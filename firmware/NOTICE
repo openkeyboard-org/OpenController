@@ -28,3 +28,9 @@ Apache-2.0 while retaining WCH provenance. The upstream startup file states:
 
 OpenController targets a WCH CH592 microcontroller and complies with that
 stated use condition.
+
+firmware/src/ble/ (hiddev, hidkbdservice, battservice, devinfoservice) are
+modified copies of the Profile sources of WCH's HID_Keyboard example in
+openwch/ch592 (EVT/EXAM/BLE/HID_Keyboard/Profile), distributed under the
+Apache License 2.0 included in that repository. Each file keeps its WCH
+copyright header and states what was changed.

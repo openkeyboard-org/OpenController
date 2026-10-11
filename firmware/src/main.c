@@ -21,6 +21,10 @@
 #endif
 #include "rf_task.h"
 #include "openboot_app.h"
+#if KBD_BLE
+#include "ble_hid.h"
+#include "transport_mode.h"
+#endif
 
 /* Run the core from the CH592's DC-DC converter instead of the LDO.
  * Bench-measured 2026-09-02 at 5.03 mA vs 7.17 mA active (-29.8%), see the
@@ -44,6 +48,58 @@ static uint8_t transport_is_2g4;
 
 /* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
 static volatile uint8_t openboot_entry_pending;
+
+#if KBD_BLE
+/* Which stack this boot runs (transport_mode.h). A select of the other one
+ * latches a mode switch, which Mode_Service() turns into a reset. */
+static uint8_t ble_mode;
+static uint8_t mode_switch_pending;
+static uint8_t mode_switch_mode;
+static uint8_t mode_switch_profile;
+
+static void request_mode_switch(uint8_t mode, uint8_t profile)
+{
+    mode_switch_mode = mode;
+    mode_switch_profile = profile;
+    mode_switch_pending = 1;
+}
+
+/* A6 frames on a BLE boot. Returns nonzero when handled. */
+static uint8_t handle_ble_command(uint8_t sub)
+{
+    switch (sub) {
+    case 0x11: /* select USB: the BLE stack idles */
+        BleHid_Idle();
+        KeyboardUart_SendStatus(0x34);
+        KeyboardUart_SendStatus(0x36);
+        return 1;
+    case 0x30: /* select 2.4G: back to the 2.4 GHz stack */
+        request_mode_switch(TRANSPORT_MODE_2G4, TransportMode_Profile());
+        return 1;
+    case 0x31:
+    case 0x32:
+    case 0x33: {
+        uint8_t profile = (uint8_t)(sub - 0x31);
+        if (TransportMode_NeedsReset(TRANSPORT_MODE_BLE, profile)) {
+            request_mode_switch(TRANSPORT_MODE_BLE, profile);
+        } else {
+            BleHid_Select();
+        }
+        return 1;
+    }
+    case 0x51:
+        BleHid_Pair();
+        return 1;
+    case 0x52:
+        BleHid_Unpair();
+        return 1;
+    case 0x63: /* factory 2.4G pair: not on a BLE boot */
+        return 1;
+    default:
+        return 0;
+    }
+}
+#endif
 
 /* Main-loop stage marker for crash forensics (EXTRA_CFLAGS=-DKBD_IDLECB_FORENSICS=1
  * on a KBD_DEEP_SLEEP build); compiles to nothing otherwise. */
@@ -77,6 +133,32 @@ static sleep_proto_t sleep_proto;
 #endif
 #endif
 
+#if KBD_BLE
+/* RAM code only one mode runs shares a window (ld/ble/highcode.ld); this
+ * copies the booted mode's image into it. Must run before either stack
+ * starts, and nothing in the window may run before it. */
+extern uint32_t __load_start_highcode_2g4[], __load_stop_highcode_2g4[];
+extern uint32_t __load_start_highcode_ble[], __load_stop_highcode_ble[];
+extern uint32_t _highcode_overlay_vma[];
+
+static void highcode_overlay_load(uint8_t ble)
+{
+    const volatile uint32_t *src = ble ? __load_start_highcode_ble : __load_start_highcode_2g4;
+    const uint32_t *end = ble ? __load_stop_highcode_ble : __load_stop_highcode_2g4;
+    uint32_t *dst = _highcode_overlay_vma;
+
+    while (src < end) {
+        *dst++ = *src++;
+    }
+    __asm volatile ("fence.i" ::: "memory");
+}
+
+/* How long a mode switch or OpenBoot entry waits for the BLE link to end
+ * cleanly: a terminate goes out at the next connection event, and the host
+ * may sit at a long interval with latency. */
+#define BLE_QUIESCE_MAX_US 200000u
+#endif
+
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
  * Main_Circulation. Reset-only -- the WWDG interrupt is left disabled because the
  * weak WDOG_BAT_IRQHandler spins forever. Fed every loop iteration; at Fsys/131072
@@ -104,8 +186,6 @@ static void watchdog_init(void) { }
 static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                               const uint8_t *payload, uint8_t len)
 {
-    (void)len;
-
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
     /* MR6 sleep protocol runs FIRST so A1/A9/A6 frames cancel a pending
      * sleep (they return early below). SEND_READY answers the A6 56 unlock;
@@ -131,19 +211,38 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 #endif
 
     if (cmd == 0xA1) {
+#if KBD_BLE
+        if (ble_mode) {
+            BleHid_QueueReport(payload);
+            return;
+        }
+#endif
         RF_QueueHIDReport(payload);
         return;
     }
 
     if (cmd == 0xA9) {
-        /* BLE device-name frame. Accepted for protocol compatibility;
-         * the BLE HID advertising path is not implemented yet. */
+        /* BLE device-name frame. */
+#if KBD_BLE
+        if (ble_mode) {
+            BleHid_SetName(payload, len);
+        }
+#endif
         return;
     }
 
     if (cmd != 0xA6) {
         return;
     }
+
+#if KBD_BLE
+    if (mode_switch_pending) {
+        return;   /* this boot is ending; the next one answers */
+    }
+    if (ble_mode && handle_ble_command(sub)) {
+        return;
+    }
+#endif
 
     switch (sub) {
     case 0x11: /* select USB */
@@ -165,6 +264,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x31: /* select BT1 */
     case 0x32: /* select BT2 */
     case 0x33: /* select BT3 */
+#if KBD_BLE
+        request_mode_switch(TRANSPORT_MODE_BLE, (uint8_t)(sub - 0x31));
+        break;
+#endif
         transport_is_2g4 = 0;
         RF_Disconnect();
         KeyboardUart_SendStatus(0x34);
@@ -232,6 +335,14 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 #endif
         break;
 
+    case 0x59: /* BLE capability query (OpenController extension): a module
+                * with a Bluetooth mode answers 5B 39; the host offers BT only
+                * then. A bare ACK means no BLE, as from a stock module. */
+#if KBD_BLE
+        KeyboardUart_SendStatus(0x39);
+#endif
+        break;
+
     case 0x70: /* version: stock firmwareB often ACKs only */
         break;
 
@@ -284,8 +395,15 @@ static void OpenBoot_Service(void)
         if (!openboot_entry_pending) {
             return;
         }
-        RF_FlushBondSave();
-        RF_Disconnect();
+#if KBD_BLE
+        if (ble_mode) {
+            BleHid_Quiesce();
+        } else
+#endif
+        {
+            RF_FlushBondSave();
+            RF_Disconnect();
+        }
         svc_start = RtcClock_Now();
         svc_state = 1;
         return;
@@ -295,10 +413,60 @@ static void OpenBoot_Service(void)
                        < RTC_CLOCK_TICKS_US(20000u)) {
             return;
         }
+#if KBD_BLE
+        /* Let the host see the link end rather than time it out; bounded,
+         * so a stuck stack can't block the update. */
+        if (ble_mode && !BleHid_Quiet()
+                && (uint32_t)(RtcClock_Now() - svc_start)
+                       < RTC_CLOCK_TICKS_US(BLE_QUIESCE_MAX_US)) {
+            return;
+        }
+#endif
         __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
         openboot_request_update();  /* noreturn */
     }
 }
+
+#if KBD_BLE
+/* Mode switch, mirroring OpenBoot_Service: the select only latched it. End
+ * the running link, let the select's ACK leave, store the record, reset.
+ * The next boot starts the other stack and reports 5B 34 and the link.
+ * Kept out of line: inlined, it would join Main_Circulation in RAM. */
+__attribute__((noinline))
+static void Mode_Service(void)
+{
+    static uint8_t  svc_state;
+    static uint32_t svc_start;
+
+    switch (svc_state) {
+    case 0:
+        if (!mode_switch_pending || openboot_entry_pending) {
+            return;
+        }
+        if (ble_mode) {
+            BleHid_Quiesce();
+        } else {
+            RF_FlushBondSave();
+            RF_Disconnect();
+        }
+        svc_start = RtcClock_Now();
+        svc_state = 1;
+        return;
+    default:
+        if (openboot_entry_pending) {
+            return;   /* OpenBoot_Service owns the exit now */
+        }
+        if ((!KeyboardUart_FifoIdle() || (ble_mode && !BleHid_Quiet()))
+                && (uint32_t)(RtcClock_Now() - svc_start)
+                       < RTC_CLOCK_TICKS_US(BLE_QUIESCE_MAX_US)) {
+            return;
+        }
+        TransportMode_Store(mode_switch_mode, mode_switch_profile);
+        __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
+        TransportMode_Reset();   /* noreturn */
+    }
+}
+#endif
 
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
 /* MR6 explicit-sleep service, mirroring OpenBoot_Service's latch-and-defer.
@@ -322,6 +490,12 @@ static void Power_Service(void)
             sleep_proto.sleep_pending = 0;
             return;
         }
+#if KBD_BLE
+        if (ble_mode) {
+            sleep_proto.sleep_pending = 0;   /* no deep sleep in BLE mode yet */
+            return;
+        }
+#endif
         svc_start = RtcClock_Now();
         svc_state = 1;
         return;
@@ -483,13 +657,30 @@ void Main_Circulation(void)
 {
     while (1) {
         LOOP_STAGE(1); TMOS_SystemProcess();
-        LOOP_STAGE(2); RF_ConnectedTick();
+#if KBD_BLE
+        if (ble_mode) {
+            BleHid_Service();
+        } else
+#endif
+        {
+            LOOP_STAGE(2); RF_ConnectedTick();
+        }
         LOOP_STAGE(3); KeyboardUart_Poll();
         KeyboardUart_Service();
         if (KeyboardUart_TakeLedLost()) {
-            RF_LedResync();
+#if KBD_BLE
+            if (ble_mode) {
+                BleHid_LedResync();
+            } else
+#endif
+            {
+                RF_LedResync();
+            }
         }
         LOOP_STAGE(4); OpenBoot_Service();
+#if KBD_BLE
+        Mode_Service();
+#endif
 #if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
         PowerSleep_BenchService();
 #endif
@@ -512,6 +703,10 @@ void Main_Circulation(void)
         heartbeat_follow_rf_state();
 #endif
         if ((RF_GetState() == RF_STATE_IDLE || RF_GetState() == RF_STATE_RESTING)
+#if KBD_BLE
+                /* TMOS timers are polled: the BLE stack can't idle here */
+                && !ble_mode && !mode_switch_pending
+#endif
                 && !openboot_entry_pending
                 && KeyboardUart_HostWakeIdle()  /* guard and ACK waits are polled */
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
@@ -603,6 +798,12 @@ int main(void)
     SysTick->SR = 0;
     PFIC_ClearPendingIRQ(SysTick_IRQn);
 
+#if KBD_BLE
+    /* Before CH59x_BLEInit: the record says which stack this boot runs. */
+    TransportMode_Load();
+    ble_mode = TransportMode_IsBle();
+    highcode_overlay_load(ble_mode);
+#endif
     CH59x_BLEInit();
     BOOT_PHASE(0xA3);
     HAL_Init();
@@ -633,7 +834,15 @@ int main(void)
                      | (uint16_t)((uint16_t)(RB_SLP_CLK_I2C
                                              | RB_SLP_CLK_LCD) << 8));
 
-    RF_RoleInit();
+#if KBD_BLE
+    if (ble_mode) {
+        BleHid_Init(TransportMode_Profile(),
+                    TransportMode_Generation(TransportMode_Profile()));
+    } else
+#endif
+    {
+        RF_RoleInit();
+    }
     BOOT_PHASE(0xA5);
 
     /* No manual PFIC_EnableIRQ(BLEB_IRQn)/PFIC_EnableIRQ(BLEL_IRQn) here: the BLE
@@ -646,12 +855,26 @@ int main(void)
      * BB_IRQHandler is needed either: the library fast-vectors BLEB to
      * BB_IRQLibFunction in hardware (see the Makefile SCHED_SRC note). */
 
-    RF_TaskInit();
-    BOOT_PHASE(0xA6);
-    if (RF_HasBond() && RF_IdentityValid()) {
-        transport_is_2g4 = 1;
-        KeyboardUart_SendStatus(0x34);
-        KeyboardUart_SendStatus(0x35);
+#if KBD_BLE
+    if (!ble_mode)
+#endif
+    {
+        RF_TaskInit();
+        BOOT_PHASE(0xA6);
+        if (RF_HasBond() && RF_IdentityValid()) {
+            transport_is_2g4 = 1;
+            KeyboardUart_SendStatus(0x34);
+            KeyboardUart_SendStatus(0x35);
+        }
+#if KBD_BLE
+        else if (TransportMode_BootAnnounces()) {
+            /* The A6 30 that switched here gets the answer a 2.4G select
+             * without a bond gets. */
+            transport_is_2g4 = 1;
+            KeyboardUart_SendStatus(0x34);
+            KeyboardUart_SendStatus(0x36);
+        }
+#endif
     }
     watchdog_init();
 #if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK

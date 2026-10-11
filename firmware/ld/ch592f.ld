@@ -59,19 +59,17 @@ SECTIONS
         PROVIDE(_highcode_lma = .);
     } >FLASH AT>FLASH
 
-    .highcode :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_start = .);
-        *(.vector);
-        KEEP(*(SORT_NONE(.vector_handler)))
-        *(.highcode);
-        *(.highcode.*);
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_end = .);
-    } >RAM AT>FLASH
+    /* RAM-resident code. ld/2g4/highcode.ld (a build without the BLE mode)
+     * holds it as one section; ld/ble/highcode.ld adds an overlay for the
+     * code only one mode runs. Either defines _highcode_ram_end (first RAM
+     * byte after the code) and _text_start (first flash byte after its
+     * load image). Picked by -L in the Makefile. */
+    INCLUDE highcode.ld
 
-    .text :
+    /* No AT>FLASH: an overlay's load images (ld/ble/highcode.ld) don't
+     * advance the FLASH region, so .text is placed by address and loads
+     * where it runs. */
+    .text _text_start :
     {
         . = ALIGN(4);
         KEEP(*(SORT_NONE(.handle_reset)))
@@ -84,7 +82,7 @@ SECTIONS
         *(.glue_7t)
         *(.gnu.linkonce.t.*)
         . = ALIGN(4);
-    } >FLASH AT>FLASH
+    } >FLASH
 
     .fini :
     {
@@ -138,7 +136,7 @@ SECTIONS
 
     .dalign :
     {
-        . = ORIGIN(RAM) + SIZEOF(.highcode);
+        . = _highcode_ram_end;
     } >RAM AT>FLASH
 
     .dlalign :
