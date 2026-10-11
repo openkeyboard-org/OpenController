@@ -14,7 +14,9 @@
  *                         what a library that clears its heap shows
  *   0x08 u32 tmos_max     longest single TMOS_SystemProcess() pass on a
  *                         BLE boot, in 32 kHz RTC ticks (LESC key
- *                         generation lands in one; the WWDG allows ~0.56 s)
+ *                         generation lands in one; the WWDG allows ~0.56 s).
+ *                         Meaningful only without KBD_BLE_SLEEP: with it, a
+ *                         pass includes the sleep (the WWDG is frozen then)
  *   0x0C u32 pair_ticks   last pairing, start to completion, RTC ticks
  *   0x10 u16 connects     0x12 u16 disconnects
  *   0x14 u16 pair_ok      0x16 u16 pair_fail
