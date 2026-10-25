@@ -23,6 +23,8 @@ Both modules reuse OpenDongle's independently created, WCH-informed 2.4 GHz PCB 
      top view, 2.54 mm pitch
 ```
 
+Pad 1 is the uppermost pad on the left edge, and the numbering runs counter-clockwise: down the left edge (1-3), up the right edge (4-6), then right to left along the top (7-9). The top silkscreen dot marks pad 1.
+
 See each implementation's README for detailed electrical, fabrication, and assembly information.
 
 ## Shared fabrication constraints
