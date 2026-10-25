@@ -20,7 +20,7 @@ Open the project with KiCad 10 or later. The project-owned symbol and footprints
 
 ## Host interface
 
-J1 is nine castellated half-holes (1.0 mm drill), three on each of three edges, all on one 0.1 in (2.54 mm) grid so a host can also use standard 0.1 in pin headers. Viewed from the top with the antenna at the bottom, the pads are numbered counter-clockwise from the top-left. The top silkscreen dot marks pad 1.
+J1 is nine castellated half-holes (1.0 mm drill), three on each of three edges, all on one 0.1 in (2.54 mm) grid so a host can also use standard 0.1 in pin headers. Viewed from the top with the antenna at the bottom, pad 1 is the uppermost pad on the left edge, and the numbering runs counter-clockwise: down the left edge (1-3), up the right edge (4-6), then right to left along the top (7-9). The top silkscreen dot marks pad 1.
 
 | Pad | Edge | Signal | CH572D pin | Direction | Notes |
 | ---: | --- | --- | --- | --- | --- |
@@ -34,7 +34,7 @@ J1 is nine castellated half-holes (1.0 mm drill), three on each of three edges, 
 | 8 | Top, middle | SWCLK | PA1 (12) | bidir | Also USB D+ and the ROM boot strap; 100 kOhm pull-down (R1) |
 | 9 | Top, left | WAKE | PA4 (13) | out | Host wake line |
 
-The board is 10.16 mm (0.4 in) wide, so the two side rows sit 0.4 in apart. Measured to the hole centres, the top pads are 2.54, 5.08, and 7.62 mm from the left edge, and the side pads are 2.54, 5.08, and 7.62 mm below the top edge. All I/O is 3.3 V and none of the J1 signals is 5 V tolerant. The host PCB must keep copper, ground pour, and metal away from the antenna end of the module.
+The board is 10.16 mm (0.4 in) wide, so the two side rows sit 0.4 in apart. Measured to the hole centres, the top pads are 2.54, 5.08, and 7.62 mm from the left edge, and the side pads are 2.54, 5.08, and 7.62 mm below the top edge. The J1 signals are 3.3 V logic and none is 5 V tolerant; VCC is the supply input and takes 3.3 V to 6.0 V into the LDO. The host PCB must keep copper, ground pour, and metal away from the antenna end of the module.
 
 ## Electrical design notes
 
