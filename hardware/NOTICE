@@ -10,8 +10,9 @@ PCB geometry, informed by the published WCH 2.4 GHz reference antenna and its
 functional requirements:
 
 * CH572/lib/OpenController.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
+* CH592/lib/OpenController.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
 * The corresponding antenna placement, ground edge, and via fence in the
-  OpenController CH572 PCB
+  OpenController CH572 and CH592 PCBs
 
 Reference publication: https://github.com/openwch/schpcb_lib
 

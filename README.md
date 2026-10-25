@@ -12,9 +12,10 @@ toolchain, build, and flashing instructions.
 
 ## Hardware
 
-The first hardware implementation is a 10.16 mm x 20.5 mm castellated WCH
-CH572D module with OpenDongle's PCB antenna, soldered onto the keyboard PCB
-beside the host MCU. It is a first revision that has not been built yet. See [hardware/README.md](./hardware/README.md).
+The hardware is a 10.16 mm x 20.5 mm castellated wireless module with
+OpenDongle's PCB antenna, soldered onto the keyboard PCB beside the host MCU.
+It comes in two pin-compatible versions, built around the WCH CH572D and the
+WCH CH592D. Both are first revisions that have not been built yet. See [hardware/README.md](./hardware/README.md).
 
 ## Repository layout
 

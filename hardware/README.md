@@ -7,8 +7,9 @@ OpenController hardware is a small castellated 2.4 GHz wireless module that sold
 | Implementation | MCU | Board size | Power | Status |
 | --- | --- | --- | --- | --- |
 | [CH572](CH572/) | WCH CH572D (QFN-20) | 10.16 mm x 20.5 mm | VCC via XC6206 3.3 V LDO | First revision, not yet built |
+| [CH592](CH592/) | WCH CH592D (QFN-20) | 10.16 mm x 20.5 mm | VCC via XC6206 3.3 V LDO, internal DC-DC | First revision, not yet built |
 
-The module reuses OpenDongle's independently created, WCH-informed 2.4 GHz PCB antenna and its two-layer 0.8 mm stackup, so the antenna sees the construction it was tuned for. The host connects through nine castellated half-holes, three on each of three edges on one 0.1 in grid, carrying power, two grounds, UART, a wake line, reset, and the SWD/USB pins used for programming.
+Both modules reuse OpenDongle's independently created, WCH-informed 2.4 GHz PCB antenna and its two-layer 0.8 mm stackup, so the antenna sees the construction it was tuned for. They share one outline and pinout: the host connects through nine castellated half-holes, three on each of three edges on one 0.1 in grid, carrying power, two grounds, UART, a wake line, reset, and the SWD pins used for programming (also USB on the CH572). The CH592D has no reset pin, so the CH592 module leaves that pad unconnected.
 
 ```
    9 WAKE  8 SWCLK  7 SWDIO
@@ -43,6 +44,8 @@ Each project opens with KiCad 10 or later. Project-owned symbols and footprints 
 ```sh
 kicad-cli sch erc --severity-all hardware/CH572/OpenController-CH572.kicad_sch
 kicad-cli pcb drc --severity-all --schematic-parity hardware/CH572/OpenController-CH572.kicad_pcb
+kicad-cli sch erc --severity-all hardware/CH592/OpenController-CH592.kicad_sch
+kicad-cli pcb drc --severity-all --schematic-parity hardware/CH592/OpenController-CH592.kicad_pcb
 ```
 
 ## License
