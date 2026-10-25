@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """MR6 UART sleep-protocol reducer tests.
 
 Native-compiles the HAL-free reducer (src/sleep_protocol.c) with the host

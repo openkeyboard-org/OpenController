@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """KBD_REST_IDLE_TICKS hold sweep, v2 (after the Codex protocol review).
 C: key-from-settled-rest episodes, full tail captured (reconnect, hold, rest entry, lock), bracketed floors,
    resting counterfactual -> total and excess mC.  D: continuous host capture, strict one-ordered-pair scoring,

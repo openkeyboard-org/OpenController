@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Application board-profile configuration tests.
 
 These use the toolchain-free print target.  Besides checking the hardware

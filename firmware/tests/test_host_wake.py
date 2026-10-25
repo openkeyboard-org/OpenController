@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Host wake (CHWAKE) state machine tests.
 
 Native-compiles the HAL-free src/host_wake.c with the host compiler and drives

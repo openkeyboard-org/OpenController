@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Map delivery recovery after a dongle outage. usage: drought2.py <label> <held|rested> <L> <offset s ...>
 held  : key -> link held -> rail off L s -> rail on -> keys at the given offsets after rail-on
 rested: controller already resting (no key) -> rail off L s -> rail on -> keys at the offsets"""

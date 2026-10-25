@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """Poll-drought ladder: cut the DONGLE's rail for L seconds while the controller holds a live link
 (1 s into the post-key hold), watch the controller's power path, the dongle's return, the reconnect,
 the next key's delivery/latency, and the episode charge. usage: drought.py <label> <H> [L ...]"""

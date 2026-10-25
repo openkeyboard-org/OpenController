@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """RTC32K monotonic clock tests.
 
 Native-compiles the pure RtcClock_Advance() from src/rtc_clock.c (the HAL
