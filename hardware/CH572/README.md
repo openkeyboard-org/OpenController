@@ -12,7 +12,7 @@ This is the first CH572 revision and no boards have been built yet. The existing
 | `OpenController-CH572.kicad_sch` | Schematic |
 | `OpenController-CH572.kicad_pcb` | PCB layout |
 | `lib/OpenController.kicad_sym` | Project-owned CH572D symbol |
-| `lib/OpenController.pretty/` | Castellated-edge and thermal-via QFN-20 footprints, and the antenna footprint copied unchanged from OpenDongle (see [`../NOTICE`](../NOTICE)) |
+| `lib/OpenController.pretty/` | Castellated-edge and CH572D QFN-20 footprints drawn for this project, and the antenna footprint copied unchanged from OpenDongle (see [`../NOTICE`](../NOTICE)) |
 | `sym-lib-table`, `fp-lib-table` | Portable project-local library configuration |
 | `fab/` | Exported outputs: schematic PDF and gerber/NC drill set (see [Fabrication outputs](#fabrication-outputs)) |
 
@@ -43,7 +43,7 @@ The board is 10.16 mm (0.4 in) wide, so the two side rows sit 0.4 in apart. Meas
 - Y1 is a 32 MHz, 8 pF-load crystal on XI/XO (pins 3 and 2). No external load capacitors are fitted; the CH572 provides programmable internal load capacitance.
 - The RF output (ANT, pin 5) drives the PCB antenna directly, as on OpenDongle.
 - GND reaches the CH572D only through the exposed pad (pin 21 in the footprint, pin 0 in the datasheet), which has four 0.4/0.2 mm thermal vias to the bottom ground plane.
-- U1's footprint is KiCad's `QFN-20-1EP_3x3mm_P0.4mm_EP1.65x1.65mm` land pattern with those vias built in, 0.6 mm from the centre along each axis, near the exposed-pad corners. The exposed-pad solder paste is a central window plus four edge windows, about 47% of the pad, each at least 0.1 mm clear of the via copper, so no paste sits over a via barrel where solder could wick away.
+- U1's footprint was drawn for this project from the CH572 datasheet's QFN20 drawing (3.0 +/- 0.1 mm body, 1.8 +/- 0.2 mm exposed pad, 0.35 +/- 0.12 mm leads). The lands run from 1.15 mm to 1.85 mm from the package centre (0.7 mm x 0.2 mm), 0.15 mm clear of the largest exposed pad; they start where a nominal lead ends, and a longest lead on a smallest body overhangs their inner end by up to 0.17 mm. The exposed-pad land is the nominal 1.8 mm, with the thermal vias built in 0.65 mm from the centre along each axis, near the pad corners. The exposed-pad solder paste is a central window plus four edge windows, 51% of the pad with their rounded corners, each at least 0.09 mm clear of the via copper, so no paste sits over a via barrel where solder could wick away.
 - NRST uses PA8, the factory-default reset pin (datasheet Table 2-3: `CFG_RST_PIN_EN` = 0). The reset input itself is off by default; set `CFG_RESET_EN` in the configuration bits to use it.
 - PA1 is the ROM boot strap: PA1 high with PA0 low at power-on enters USB/UART ISP. R1 holds PA1 low when pad 8 is left open, so a cold power-up never parks in the bootloader by accident. A WCH-LinkE on pads 7/8 or the D+ pull-up "boot cable" still overrides it.
 - R1 is a deliberate trade-off against USB. USB 2.0 full speed asks for at least 300 kOhm input impedance on D+ (Table 7-7), and R1 is 100 kOhm. At 300 kOhm, the CH572's worst-case floating-input leakage (3 uA) would put PA1 exactly at VIL max (0.9 V) and the strap would no longer be guaranteed; at 100 kOhm it sits at 0.3 V or below. USB on this module is only an ISP path, and R1 moves the D+ idle level from about 3.0 V to 2.96 V against a 2.0 V threshold.
@@ -73,7 +73,7 @@ The board-setup constraints are set to JLCPCB's 1-2 layer, 1 oz capabilities. Th
 | Silkscreen text height / thickness | 1.0 mm / 0.15 mm |
 | Solder mask minimum web | 0.10 mm, 1:1 expansion |
 
-KiCad's board setup has a single hole-to-hole minimum and no pad-to-silkscreen minimum, so two JLCPCB limits are not checked by DRC: 0.45 mm between plated pad holes, and 0.15 mm from pads to silkscreen. The layout meets both: the closest pad holes (the castellations) are 1.54 mm apart, and silkscreen stays at least 0.2 mm from every pad opening.
+KiCad's board setup has a single hole-to-hole minimum and no pad-to-silkscreen minimum, so two JLCPCB limits are not checked by DRC: 0.45 mm between plated pad holes, and 0.15 mm from pads to silkscreen. The layout meets both: the closest plated pad holes are U1's thermal vias, 1.1 mm apart edge to edge (the castellations are 1.54 mm apart), and silkscreen stays at least 0.2 mm from every pad opening.
 
 ## Design verification
 
