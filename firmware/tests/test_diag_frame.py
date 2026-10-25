@@ -1,3 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
 """UART diag-dump frame formatter tests (pure module, native-compiled)."""
 import ctypes, struct, subprocess
 from pathlib import Path

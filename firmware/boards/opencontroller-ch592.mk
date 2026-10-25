@@ -1,3 +1,6 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
+#
 # Original OpenController CH592F bench/module hardware.
 # UART1 is routed on its PB12/PB13 alternate mapping and RF pairing retains
 # the historical fixed keyboard identity for compatibility with existing

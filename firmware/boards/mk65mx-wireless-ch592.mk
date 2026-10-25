@@ -1,3 +1,6 @@
+# Copyright 2026 Eric Molitor (EMulator)
+# SPDX-License-Identifier: Apache-2.0
+#
 # MonacoKeys MK65MX Wireless prototype, CH592F sidecar.
 # UART1 is on the silicon-default PA8/RXD1 and PA9/TXD1 pins.  PB13 is the
 # board's CHWAKE output, so this profile must never enable the UART1 remap.
