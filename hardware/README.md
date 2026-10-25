@@ -6,9 +6,21 @@ OpenController hardware is a small castellated 2.4 GHz wireless module that sold
 
 | Implementation | MCU | Board size | Power | Status |
 | --- | --- | --- | --- | --- |
-| [CH572](CH572/) | WCH CH572D (QFN-20) | 10.0 mm x 20.5 mm | VCC via XC6206 3.3 V LDO | First revision, not yet built |
+| [CH572](CH572/) | WCH CH572D (QFN-20) | 10.16 mm x 20.5 mm | VCC via XC6206 3.3 V LDO | First revision, not yet built |
 
-The module reuses OpenDongle's independently created, WCH-informed 2.4 GHz PCB antenna and its two-layer 0.8 mm stackup, so the antenna sees the construction it was tuned for. The host connects through eight castellated half-holes carrying power, UART, a wake line, reset, and the SWD/USB pins used for programming.
+The module reuses OpenDongle's independently created, WCH-informed 2.4 GHz PCB antenna and its two-layer 0.8 mm stackup, so the antenna sees the construction it was tuned for. The host connects through nine castellated half-holes, three on each of three edges on one 0.1 in grid, carrying power, two grounds, UART, a wake line, reset, and the SWD/USB pins used for programming.
+
+```
+   9 WAKE  8 SWCLK  7 SWDIO
+  +---o-------o-------o---+
+1 o GND             GND o 6
+2 o UART_TX         VCC o 5
+3 o UART_RX        NRST o 4
+  |        ground         |
+  |~~~~~~~ antenna ~~~~~~~|
+  +-----------------------+
+     top view, 2.54 mm pitch
+```
 
 See each implementation's README for detailed electrical, fabrication, and assembly information.
 
