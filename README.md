@@ -10,6 +10,12 @@ bonding) driven by the keyboard's host MCU over UART, bench-validated
 against OpenDongle. See [firmware/README.md](./firmware/README.md) for
 toolchain, build, and flashing instructions.
 
+## Hardware
+
+The first hardware implementation is a 10.0 mm x 20.5 mm castellated WCH
+CH572D module with OpenDongle's PCB antenna, soldered onto the keyboard PCB
+beside the host MCU. It is a first revision that has not been built yet. See [hardware/README.md](./hardware/README.md).
+
 ## Repository layout
 
 - `firmware/` — firmware source and related software artifacts.
