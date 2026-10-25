@@ -5,13 +5,14 @@ Licence Version 2 - Weakly Reciprocal in LICENSE.
 
 The symbols and footprints in the project libraries were drawn for
 OpenController, apart from the antenna footprint described below. The QFN-20
-footprint was built from the package drawing in WCH's CH572 datasheet; it is
-not copied or derived from KiCad's footprint libraries:
+footprints were built from the package drawings in WCH's CH572 and CH592
+datasheets; they are not copied or derived from KiCad's footprint libraries:
 
 * CH572/lib/OpenController.pretty/CH572D_QFN-20_3x3mm_P0.4mm_EP1.8mm_ThermalVias.kicad_mod
+* CH592/lib/OpenController.pretty/CH592D_QFN-20_3x3mm_P0.4mm_EP1.9mm_ThermalVias.kicad_mod
 
-Its 3D model is only a reference to the QFN-20 model installed with KiCad; the
-model itself is not distributed here.
+Their 3D model is only a reference to the QFN-20 model installed with KiCad;
+the model itself is not distributed here.
 
 The 2.4 GHz antenna footprint is copied unchanged from the OpenDongle
 hardware (https://github.com/openkeyboard-org/OpenDongle), where
@@ -20,8 +21,9 @@ PCB geometry, informed by the published WCH 2.4 GHz reference antenna and its
 functional requirements:
 
 * CH572/lib/OpenController.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
+* CH592/lib/OpenController.pretty/ANT-F-2-2.4G-0.8MM-FR4-WCH.kicad_mod
 * The corresponding antenna placement, ground edge, and via fence in the
-  OpenController CH572 PCB
+  OpenController CH572 and CH592 PCBs
 
 Reference publication: https://github.com/openwch/schpcb_lib
 
