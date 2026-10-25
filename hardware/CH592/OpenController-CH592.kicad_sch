@@ -5578,7 +5578,7 @@
 				)
 			)
 		)
-		(property "Footprint" "OpenController:QFN-20-1EP_3x3mm_P0.4mm_EP1.9x1.9mm"
+		(property "Footprint" "OpenController:QFN-20-1EP_3x3mm_P0.4mm_EP1.9x1.9mm_ThermalVias"
 			(at 148.59 72.39 0)
 			(hide yes)
 			(show_name no)
