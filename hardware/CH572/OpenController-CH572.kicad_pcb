@@ -133,7 +133,7 @@
 		(layer "F.Cu")
 		(uuid "0696a0a1-6170-4bf4-9361-54d4ef15b796")
 		(at 106 113.7 90)
-		(descr "WCH CH572D QFN-20, 3.0 mm body, 0.4 mm pitch, 1.8 +/- 0.2 mm exposed pad, 0.35 +/- 0.12 mm leads (CH572 datasheet, QFN20 package drawing). Lands 1.15 to 1.85 mm from the centre, 0.15 mm outside the largest exposed pad; four 0.4/0.2 mm thermal vias in the exposed pad, open on the component side and tented on the bottom, with the paste windows kept clear of them. Drawn for OpenController.")
+		(descr "WCH CH572D QFN-20, 3.0 mm body, 0.4 mm pitch, 1.8 +/- 0.2 mm exposed pad, 0.35 +/- 0.12 mm leads (CH572 datasheet, QFN20 package drawing). Lands 1.15 to 1.85 mm from the centre, 0.15 mm outside the largest exposed pad; four 0.6/0.2 mm thermal vias in the exposed pad, open on the component side and tented on the bottom, with the paste windows kept clear of them. Drawn for OpenController.")
 		(tags "QFN NoLead WCH CH572D thermal vias")
 		(property "Reference" "U1"
 			(at 0 -2.8 90)
