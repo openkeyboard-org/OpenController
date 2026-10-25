@@ -3,12 +3,12 @@
 	(generator "pcbnew")
 	(generator_version "10.0")
 	(layer "F.Cu")
-	(descr "WCH CH592D QFN-20, 3.0 mm body, 0.4 mm pitch, 1.9 +/- 0.2 mm exposed pad, 0.25 +/- 0.07 mm leads (CH592 datasheet chapter 21, QFN20 package drawing). Lands 1.20 to 1.85 mm from the centre, 0.15 mm outside the largest exposed pad; four 0.4/0.2 mm thermal vias in the exposed pad, open on the component side and tented on the bottom, with the paste windows kept clear of them. Drawn for OpenController.")
+	(descr "WCH CH592D QFN-20, 3.0 mm body, 0.4 mm pitch, 1.9 +/- 0.2 mm exposed pad, 0.25 +/- 0.07 mm leads (CH592 datasheet chapter 21, QFN20 package drawing). Lands 1.20 to 1.85 mm from the centre, 0.15 mm outside the largest exposed pad; four 0.6/0.2 mm thermal vias in the exposed pad, open on the component side and tented on the bottom, with the paste windows kept clear of them. Drawn for OpenController.")
 	(tags "QFN NoLead WCH CH592D thermal vias")
 	(property "Reference" "REF**"
 		(at 0 -2.8 0)
 		(layer "F.SilkS")
-		(uuid "903a664e-73f2-4110-b86e-6b4d3fd2bd12")
+		(uuid "7a8c4807-a7d7-4f78-9a27-7cf1283aa756")
 		(effects
 			(font
 				(size 1 1)
@@ -19,7 +19,7 @@
 	(property "Value" "CH592D_QFN-20_3x3mm_P0.4mm_EP1.9mm_ThermalVias"
 		(at 0 2.8 0)
 		(layer "F.Fab")
-		(uuid "3363ce7f-1b06-4193-a910-853701781da4")
+		(uuid "d337e662-230b-4e88-b3bb-9ee3a7f6bc08")
 		(effects
 			(font
 				(size 0.5 0.5)
@@ -31,7 +31,7 @@
 		(at 0 0 0)
 		(layer "F.Fab")
 		(hide yes)
-		(uuid "c2932461-b2c9-419a-a7fe-243fbb82fd54")
+		(uuid "c555375a-0cb9-420d-84aa-ad02a8f5bafb")
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -42,7 +42,7 @@
 		(at 0 0 0)
 		(layer "F.Fab")
 		(hide yes)
-		(uuid "ea051ba2-2325-47bb-89f1-f17d00f5d99e")
+		(uuid "c0e66a75-fb64-4fff-b88f-9531b6b2b848")
 		(effects
 			(font
 				(size 1.27 1.27)
@@ -424,7 +424,7 @@
 	)
 	(pad "21" thru_hole circle
 		(at -0.7 -0.7)
-		(size 0.4 0.4)
+		(size 0.6 0.6)
 		(drill 0.2)
 		(layers "*.Cu")
 		(remove_unused_layers no)
@@ -432,7 +432,7 @@
 	)
 	(pad "21" thru_hole circle
 		(at -0.7 0.7)
-		(size 0.4 0.4)
+		(size 0.6 0.6)
 		(drill 0.2)
 		(layers "*.Cu")
 		(remove_unused_layers no)
@@ -448,7 +448,7 @@
 	)
 	(pad "21" thru_hole circle
 		(at 0.7 -0.7)
-		(size 0.4 0.4)
+		(size 0.6 0.6)
 		(drill 0.2)
 		(layers "*.Cu")
 		(remove_unused_layers no)
@@ -456,7 +456,7 @@
 	)
 	(pad "21" thru_hole circle
 		(at 0.7 0.7)
-		(size 0.4 0.4)
+		(size 0.6 0.6)
 		(drill 0.2)
 		(layers "*.Cu")
 		(remove_unused_layers no)
