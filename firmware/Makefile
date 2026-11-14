@@ -286,6 +286,12 @@ CFLAGS := $(ARCH) -O2 -g
 CFLAGS += -std=gnu99
 CFLAGS += -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -ffunction-sections -fdata-sections
+# Give every __HIGH_CODE function its own .highcode.<name> section (a WCH GCC
+# parameter; OpenDongle uses it too). Without it they all share one .highcode
+# section per object, so --gc-sections cannot drop the ones nothing calls and
+# whole files of vendor driver code sat in SRAM unused. ld/ch592f.ld already
+# collects *(.highcode.*).
+CFLAGS += --param=highcode-gen-section-name=1
 CFLAGS += -fno-common
 CFLAGS += -DOPENBOOT_CHIP_CH59X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)

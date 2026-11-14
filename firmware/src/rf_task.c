@@ -225,6 +225,13 @@
 #define RF_BOND_VERSION           2u
 #define RF_BOND_FLAG_ENC_CAPABLE  0x01u  /* peer negotiated encryption at pairing */
 #define RF_BOND_FLAG_ENC_KEY      0x02u  /* link_key holds a provisioned key      */
+/* Keyboard only: a link-key exchange reached the point where the dongle may
+ * have committed a key that this end has not made durable. From then on the
+ * bond must never carry a report in the clear, whatever else happens to the
+ * candidate, until a key is committed (the flag is replaced by ENC_KEY) or
+ * the bond is cleared. Written to flash BEFORE this end's confirmation goes
+ * out, so it survives a reset in that window. */
+#define RF_BOND_FLAG_ENC_PENDING  0x04u
 #else
 #define RF_BOND_VERSION           1u
 #endif
@@ -344,6 +351,15 @@ static uint8_t rf_bond_enc_active(void)
 {
     return (stored_bond_flags & (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY))
            == (RF_BOND_FLAG_ENC_CAPABLE | RF_BOND_FLAG_ENC_KEY);
+}
+
+/* May this bond carry a report in the clear? No if it has a key, and no if an
+ * exchange left it owing one (RF_BOND_FLAG_ENC_PENDING). The transmit path
+ * gates on THIS, so a keyless-but-pending bond sends bare acks, not reports. */
+static uint8_t rf_bond_enc_required(void)
+{
+    return (uint8_t)(rf_bond_enc_active()
+                     || (stored_bond_flags & RF_BOND_FLAG_ENC_PENDING) != 0u);
 }
 #endif
 
@@ -481,6 +497,7 @@ static volatile uint8_t kex_rx_pending;
 static volatile uint8_t kex_tx_buf[KEX_PAYLOAD_BYTES];
 static volatile uint8_t kex_tx_valid;
 static volatile uint16_t kex_polls;
+static volatile uint8_t kex_slot;           /* free-running; paces exchange frames */
 static volatile uint8_t crypt_work_kex;
 static uint8_t          kex_committing;    /* the bond save in progress may write the key */
 static uint32_t         kex_pool[8];
@@ -1056,12 +1073,25 @@ static void rf_kex_service(void)
         rest_arm_idle();
     }
 #endif
+    if (have && (frame[0] & 3u) != KEX_VERSION) {
+        have = 0;                       /* not this protocol version: ignore */
+    }
+#if KBD_REST
+    /* An exchange in progress needs a sustained link: a rest probe that
+     * answers two polls and goes quiet would never carry its fragments. */
+    if (kex_active && !kex_candidate && rest_probe) {
+        rest_probe_wake = 1;
+        rest_quiet_pending = 0;
+        rest_promote_to_normal();
+    }
+#endif
     if (kex_candidate && have && (frame[0] >> 4) == KEX_MSG_PUB) {
         /* The dongle is offering a public key again, which it only does on a
          * bond with no key: it never committed the key we are holding as a
-         * candidate. Drop the candidate and answer the new exchange. (No
-         * report escapes in between: kex_active is set again below before
-         * this function returns, or the bond is keyless and was all along.) */
+         * candidate. Drop the candidate and answer the new exchange. The
+         * frame is unauthenticated, so this is all it may do: the bond keeps
+         * RF_BOND_FLAG_ENC_PENDING, and no report goes out in the clear
+         * whether or not the new exchange starts or completes. */
         rf_kex_stop(0);
     }
     if (!kex_active) {
@@ -1093,6 +1123,10 @@ static void rf_kex_service(void)
         }
         kex_start(&kex, KEX_ROLE_KEYBOARD, priv, prefix, keyboard_mac, stored_dongle_mac);
         tmos_memset(priv, 0, sizeof(priv));
+        /* Reports are suppressed from here on, and bare acks will be sent in
+         * their place. A report already transmitted and not yet acknowledged
+         * must not be retired by the acknowledgement of one of those. */
+        hid_head_sent = 0;
         kex_polls = 0;
         kbd_kex_starts++;
         kex_active = 1;
@@ -1117,11 +1151,17 @@ static void rf_kex_service(void)
             for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
                 stored_link_key[i] = lk[i];
             }
-            stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE);
+            stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE
+                                           | RF_BOND_FLAG_ENC_PENDING);
             kbd_crypt_end_session();
             kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
             kex_candidate = 1;
             kex_polls = 0;
+            /* Make "this bond owes a key" durable before our confirmation can
+             * go out (it is staged below, after this returns). The candidate
+             * itself is not written: rf_build_bond_record() leaves the key out
+             * while kex_candidate is set. */
+            rf_save_bond_to_flash();
         }
         tmos_memset(lk, 0, sizeof(lk));
     } else if (st == KEX_FAILED) {
@@ -1149,10 +1189,10 @@ static void rf_kex_service(void)
      * through the shared secret when it died). One long frame in four slots
      * costs at most the poll that follows it. The exchange needs six
      * fragments each way, so this adds a few milliseconds. */
-    if (!kex_tx_valid && (kex_polls & 3u) == 0u) {
+    if (!kex_tx_valid && (kex_slot & 3u) == 0u) {
         uint8_t next[KEX_PAYLOAD_BYTES];
 
-        if ((kex_polls & 0x1Fu) == 0u) {
+        if ((kex_slot & 0x1Fu) == 0u) {
             /* Status frame (message type 15, not part of the exchange): this
              * module has no debug channel of its own on a keyboard, so about
              * once every 32 slots it tells the dongle where it is, and
@@ -1188,6 +1228,7 @@ static void rf_kex_session_verified(void)
     if (!kex_candidate) {
         return;
     }
+    stored_bond_flags &= (uint8_t)~RF_BOND_FLAG_ENC_PENDING;
     kex_committing = 1;
     rf_save_bond_to_flash();
     kex_committing = 0;
@@ -1915,6 +1956,7 @@ static void rf_do_response_tx(void)
         if (kex_polls < 0xFFFFu) {
             kex_polls++;
         }
+        kex_slot++;
     }
     if (kex_tx_valid) {
         /* An exchange frame takes this slot. */
@@ -1953,7 +1995,7 @@ static void rf_do_response_tx(void)
          * encryption-required bond with no usable session finds no sealed frame
          * and sends the bare ack. Either the pre-sealed frame goes out or the
          * bare ack does -- never the plaintext report. */
-        if (rf_bond_enc_active()) {
+        if (rf_bond_enc_required()) {
             rf_irq_restore(irq);
             if (have || crypt_keepalive_due) {
                 uint8_t sealed_len = 0;

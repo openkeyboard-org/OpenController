@@ -243,6 +243,9 @@ SECTIONS
         PROVIDE( _scratch_hi_end = . );
     } >RAM
 
+    ASSERT(. <= ORIGIN(RAM) + LENGTH(RAM) - __stack_size,
+           ".scratch_hi runs into the stack region")
+
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
         PROVIDE( _heap_end = . );
