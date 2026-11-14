@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  */
 #ifndef RF_TASK_H
 #define RF_TASK_H
@@ -9,21 +9,35 @@
 #define RF_STATE_IDLE       0
 #define RF_STATE_PAIRING    1
 #define RF_STATE_CONNECTED  2
+#define RF_STATE_RESTING    3   /* resting policy: radio off between one-second probes; the
+                                 * keyboard MCU still sees a connected link (RESTING_POLICY.md) */
 
 void RF_TaskInit(void);
 
 uint8_t RF_Select2G4(void);
-void RF_EnterPairing(void);
+/* 0 when the request was ignored because the link is up (or there is no
+ * identity): the host should hear the live link, not PAIRING. */
+uint8_t RF_EnterPairing(void);
 void RF_Disconnect(void);
+/* After RF_Disconnect() for a transport other than 2.4 GHz: drop the queued
+ * reports unless a SELECT_2G4 follows within KBD_RESELECT_KEEP_TICKS. */
+void RF_DropQueueUnlessReselected(void);
 void RF_FlushBondSave(void);
 uint8_t RF_ClearBond(void);   /* 1 = the stored bond is provably gone */
 uint8_t RF_HasBond(void);
+uint8_t RF_CanDeepSleep(void);
+uint8_t RF_IdentityValid(void);
 
 void RF_QueueHIDReport(const uint8_t report[8]);
 
 /* Poll from the main loop: advances the connected-mode listen channel on the
  * time-based hop (no-op unless connected). */
 void RF_ConnectedTick(void);
+
+#if KBD_REST
+/* True while stage-1 rest probing is scheduled (stage 2 probes nothing). */
+uint8_t RF_RestProbing(void);
+#endif
 
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);
@@ -64,5 +78,10 @@ extern volatile uint32_t txo_other[4];
 extern volatile uint32_t txo_dpoll[4][8];
 extern volatile uint32_t txo_arm[8];
 #endif
+
+/* The LED state handed to the host was abandoned unacknowledged (host wake):
+ * forget it, so the receiver's next LED byte is passed on again. Main-loop
+ * context; the connected ISR only reads the value. */
+void RF_LedResync(void);
 
 #endif

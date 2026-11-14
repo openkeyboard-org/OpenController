@@ -4,7 +4,7 @@ Firmware for a WCH CH592F (QingKe RISC-V4F) wireless module that adds
 2.4 GHz wireless support to QMK keyboards. The CH592F sits next to the
 keyboard's host MCU, speaks a binary command/status protocol over UART1,
 and implements the keyboard-side wireless link used by
-[OpenDongle](https://github.com/openkeyboard-org): pairing, connected-mode
+[OpenDongle](https://github.com/openkeyboard-org/OpenDongle): pairing, connected-mode
 channel hopping, HID report uplink, and persistent bonding in DataFlash.
 
 Status: the 2.4 GHz connected-mode HID link is bench-validated end-to-end
@@ -20,7 +20,7 @@ battery reporting are follow-up work.
 > keyboard never rejoins) plus a TMOS misaligned-load fault under halt/read.
 > This is a measurement artifact, not a firmware defect: a 1000-cycle
 > randomized warm-reset soak with a clean USB-HID oracle recovered 999/1000
-> (~2.3 s reconnect). See `BOOT.md` (Known limits) for the full history.
+> (~2.3 s reconnect).
 
 ## Toolchain (a WCH fork of GCC is a hard requirement)
 
@@ -56,28 +56,142 @@ Prerequisites: GNU Make >= 4.3, Python 3 (slot-geometry derivation; plus
 `openboot` CLI (updates/bundles only).
 
 ```bash
-make              # slot A -> build/ch592f-slotA/opencontroller_ch592f.{elf,hex,bin}
-make SLOT=B       # slot B -> build/ch592f-slotB/...
-make bundle       # both slots -> build/opencontroller-ch592f.obb
+make              # default board, slot A -> build/opencontroller-ch592-slotA/...
+make SLOT=B       # default board, slot B -> build/opencontroller-ch592-slotB/...
+make bundle       # both slots -> build/opencontroller-ch592.obb
 make factory      # blessed whole-chip image (bootloader + slot A + record)
+
+# MK65MX Wireless: CH592 UART1 on PA8/PA9 and factory-ROM RF identity
+make BOARD=mk65mx-wireless-ch592
+make BOARD=mk65mx-wireless-ch592 bundle
+make BOARD=mk65mx-wireless-ch592 factory
 make clean
 ```
 
-The size check enforces the 216 KiB slot capacity (see BOOT.md).
+The MK65MX profile takes its 2.4 GHz keyboard identity from the CH592 factory
+ROM. Switching an already-paired module from the default fixed identity to
+this profile requires clearing and re-pairing the receiver bond.
+
+Board profiles own the hardware-dependent knobs below; each is validated at
+parse time, so a missing or non-boolean value fails the build rather than
+producing a wrong image.
+
+| Knob | `opencontroller-ch592` | `mk65mx-wireless-ch592` | Meaning |
+|---|---|---|---|
+| `KBD_UART1_REMAP` | 1 | 0 | 1 = UART1 on PB12/PB13, 0 = silicon-default PA8/PA9 |
+| `KBD_FACTORY_MAC` | 0 | 1 | 1 = 2.4 GHz identity from the CH592 factory ROM |
+| `KBD_DCDC_ENABLE` | 1 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
+| `KBD_HOST_WAKE` | 0 | 1 | 1 = raise CHWAKE (PB13) before every `5A`/`5B`/`5C` frame; needs PB13 free, so never with `KBD_UART1_REMAP=1` |
+
+`KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
+populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
+that cannot do DC-DC at all (`ROM_CFG_ADR_HW` bit 13); it cannot tell that a
+PCB is missing the part, and enabling it there collapses the core supply.
+Both current profiles enable it (bench-measured 2026-09-02: 5.03 mA vs
+7.17 mA active, −29.8%). A deliberate A/B override is
+`make KBD_DCDC_ENABLE=0|1`, which passes the profile validation and is
+reported by `print-board-config`; passing it through `EXTRA_CFLAGS` is
+rejected at parse time because that path would silently diverge from the
+reported configuration.
+
+`KBD_HOST_WAKE` is for a keyboard host that deep-sleeps and cannot receive
+while it does: the MK65MX's STM32U0 in STOP 2, which wakes on CHWAKE at its
+PA1. The module drives PB13 low from boot. CHWAKE covers every `5A` (LED
+state), `5B` (status) and `5C` (battery) frame. To send one, the module
+raises PB13, waits `KBD_HOST_WAKE_GUARD_US` (1000), sends, and holds the line
+until the host's `61 0D 0A` ACK. With no ACK it resends every
+`KBD_HOST_WAKE_ACK_TIMEOUT_US` (20000), up to `KBD_HOST_WAKE_ATTEMPTS` (3)
+sends, then gives the frame up. Frames queued behind it follow at once with
+the line still high, so a burst pays the guard only once. After a resend they
+wait instead, with the line still high, until two ACK timeouts after the last
+copy went out: ACKs carry no sequence number, so a late one could otherwise
+retire the wrong frame. Bare ACKs and the `5D` diagnostic dump are not
+covered: they answer a host that is awake and waiting. The host asks for
+host wake with `A6 58`; a host-wake build answers `5B 38`, and other builds
+only ACK. Every wait is a main-loop state, never a busy wait
+(`src/host_wake.h` covers the queue and the LED slot). The idle WFE and
+module sleep both wait for host wake to finish.
+The three timing macros can be tuned through `EXTRA_CFLAGS`; the knob itself
+is board-owned like the others (A/B with `make KBD_HOST_WAKE=0|1`). The MR5
+bench sleep (`KBD_SLEEP_BENCH_HOOK=1`) blocks for seconds, so it requires
+`KBD_HOST_WAKE=0`.
+
+On every board profile, the application's bounded waits run on RTC32K
+through `src/rtc_clock.c`, not on SysTick. These are host wake, the UART TX
+FIFO wait, and the drains before OpenBoot entry and explicit sleep. On an
+MK65MX rev B02 (2026-10-05), SysTick read all zero over SWD in the running
+application, which held CHWAKE high in the first host-wake build. The cause
+is not established, and both profiles build with `KBD_DEEP_SLEEP=1`, so the
+change applies to `opencontroller-ch592` too. RTC rounding makes the 150 µs
+FIFO wait last up to about 190 µs.
+
+Measured on an MK65MX Wireless rev B02 keyboard (2026-10-04) with
+`288decb`, before the module sleep and link rest work: whole-board current
+at the USB input, with the LED matrix in the same state for every reading.
+The board is USB powered in both rows; the keyboard's routing only decides
+whether key reports go over USB or the 2.4 GHz link.
+
+| Keyboard routed to | LDO | DC-DC |
+|---|---|---|
+| USB | 26.7 mA | 24.3 mA |
+| 2.4 GHz | 31.2 mA | 26.8 mA |
+
+The radio's share (2.4 GHz minus USB) fell from 4.5 to 2.5 mA, in line with
+the datasheet's receive current of 7.5 mA on the LDO and 3.5 mA on DC-DC.
+Received signal strength at an OpenDongle, in DC-DC, LDO and DC-DC runs of
+138 samples each with nothing moved, had medians of -71, -68 and -69 dBm. So
+DC-DC reads about 2 dB weaker, which is inside each run's 4-5 dB spread and
+far above the -95 dBm sensitivity. Pairing, typing, waking the link with a
+keystroke, and OpenBoot updates through the QMK tunnel all worked on the
+DC-DC build.
+
+The size check enforces the 216 KiB slot capacity: OpenBoot's 220 KiB slot
+less the 4 KiB it reserves at the top for the slot's boot record.
+`openboot_geometry.py` reads both from the OpenBoot submodule, so the
+application and its linker script follow the bootloader's own geometry.
 
 ## Boot chain and flashing
 
 The application runs under the [OpenBoot](https://github.com/openkeyboard-org/OpenBoot)
 A/B bootloader: OpenBoot owns flash `0x0000..0x1FFF`, the app links at a
 slot base (`0x2000` / `0x39000`), and updates travel over the module's own
-UART via the OBP protocol. **`firmware/BOOT.md` is the authoritative
-reference** — flash/RAM maps, `A6 81` bootloader entry, update and factory
-flows, and recovery/revert procedures.
+UART via the OBP protocol. The keyboard's `A6 81` command makes the
+application call `openboot_request_update()`, which leaves a request word at
+the top of RAM and resets into the bootloader. The bootloader itself is
+documented in the submodule: `third_party/openboot/docs/AB-UPDATE.md` (slot
+layout and boot records), `docs/PROTOCOL.md` (OBP),
+`firmware/app/README.md` (the application side, including the RAM request
+and factory install) and `tools/README.md` (the `openboot` CLI).
 
 ```bash
 make flash-factory KBD_PROBE=<serial>   # whole-chip factory install via SWD
 make update OB_PORT=/dev/serial/by-id/<probe-cdc>   # A/B update over UART
+make update-qmk QMK_VID=0x4D4B QMK_PID=0x0002       # A/B update through the keyboard
 ```
+
+`make update` follows the selected board profile's UART pins: the default
+board uses PB12/PB13; for the MK65MX profile pass
+`BOARD=mk65mx-wireless-ch592` and connect the serial bridge to PA8/PA9.
+
+`make update-qmk` needs no serial bridge and no disassembly. It builds,
+bundles and family-checks (`0xB2`) exactly like `make update`, then runs
+`openboot --transport qmk … flash <bundle> --force` through the keyboard's
+QMK HID tunnel, with `QMK_VID`/`QMK_PID` (and optionally `QMK_SERIAL`) naming
+the keyboard. The keyboard only forwards bytes: the OBP client stays on the
+PC and the module still reports `transport = UART`. Where `make update`
+sends `A6 81` itself and then sleeps a fixed 6 s, the transport asks the
+keyboard to queue the bootloader entry behind any frame in flight (so never
+inject raw `A6 81 27` into the tunnel), asks it how long ago the module
+acknowledged, and probes HELLO across the post-reset window, typically
+connecting in about 2.3 s. 2.4 GHz and Bluetooth stop for the duration; USB
+typing keeps working.
+
+The tunnel needs a keyboard image that carries the OpenBoot bridge; a
+keyboard flashed before the bridge, or one whose bridge is broken, still
+updates over the serial bridge above. The vendored `openboot` CLI also needs
+the qmk transport (OpenBoot `38dae42` or later), which the pinned revision
+carries. If the pin is ever moved back past it, `update-qmk` checks and stops
+with an error rather than letting the CLI reject the transport name.
 
 Flashing uses [minichlink](https://github.com/cnlohr/ch32fun) (from
 `PATH`, or `make MINICHLINK=/path/to/minichlink`) with a WCH-LinkE probe.
@@ -101,6 +215,8 @@ only for A/B experiments):
 | `RF_TURNAROUND_COUNT` | 6000 | post-poll TX turnaround (~100 µs @ 60 MHz) |
 | `STOCK_RESP_NO_SETCH` | 1 | skip redundant pre-response `RF_SetChannel` |
 | `STOCK_CONNECT_IDX_BIAS` | 1 | first connected hop uses seed+1 |
+| `KBD_PAIR_DUTY_CYCLE` | 1 | bonded-reconnect search listens only in a window after each beacon (power MR4) |
+| `KBD_PAIR_RX_WINDOW_TICKS` | 6 | that window, in 625 µs ticks (3.75 ms); the OpenDongle camp reply completes at beacon + ~2.7 ms. Bench 2026-09-04: 4 ticks fails (0/8 cold reconnects), 6 works (6/6); 5 and 3 untested, so re-measure before lowering below 6 |
 
 Bench-only interop probes (`STOCK_SUPPRESS_RESPONSES`,
 `STOCK_PARK_AFTER_CATCH`, `STOCK_SEED_BOND`, …) default off via `#ifndef`
@@ -108,16 +224,5 @@ fallbacks in `src/rf_task.c`. Enable one with, for example,
 `make EXTRA_CFLAGS="-DSTOCK_SUPPRESS_RESPONSES=1"`; pass multiple `-D`
 options inside the quoted `EXTRA_CFLAGS` value to enable several at once.
 
-The BLE library defaults to the vendored V1.4.2 triple; other versions are
-drop-in directories selected with `make BLE_LIB_DIR=...`.
-
-## Layout and licensing
-
-- `src/`, `ld/`, `Makefile`, `docs/` — first-party, Apache-2.0
-  (see `LICENSE`), **except** `src/startup_CH592_phased.S`, a WCH-derived
-  startup fork that remains under WCH's notice (see `NOTICE`).
-- `vendor/` — WCH SDK subset and BLE library, **not** Apache-2.0; see
-  `NOTICE` and `vendor/README.md` for terms, provenance, and checksums.
-- `docs/TMOS_REVIEW.md` — SDK-alignment review; the written rationale for
-  interrupt-architecture decisions (e.g. why there is no app
-  `BB_IRQHandler`).
+The BLE library defaults to the submodule-provided V1.4.2 triple; other
+versions are drop-in directories selected with `make BLE_LIB_DIR=...`.

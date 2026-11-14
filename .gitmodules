@@ -1,3 +1,6 @@
 [submodule "third_party/openboot"]
 	path = third_party/openboot
 	url = https://github.com/openkeyboard-org/OpenBoot.git
+[submodule "third_party/weactstudio-wch-ble-core"]
+	path = third_party/weactstudio-wch-ble-core
+	url = https://github.com/WeActStudio/WeActStudio.WCH-BLE-Core.git

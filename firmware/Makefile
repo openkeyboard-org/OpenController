@@ -1,5 +1,5 @@
+# Copyright 2026 Eric Molitor (EMulator)
 # SPDX-License-Identifier: Apache-2.0
-# Copyright 2026 OpenController contributors
 #
 # OpenController keyboard wireless-module firmware — CH592F
 # Target: WCH CH592F (QingKe RISC-V4F, 60MHz, 448KB flash, 26KB SRAM)
@@ -7,7 +7,7 @@
 # The application runs under OpenBoot (third_party/openboot): bootloader at
 # [0, 0x2000), two A/B application slots, per-slot boot records. Each build
 # targets ONE slot (SLOT=A|B); releases ship both builds as one .obb bundle.
-# See BOOT.md for the flash map and update flows.
+# See README.md (Boot chain and flashing) for the update flows.
 #
 # TOOLCHAIN — a WCH fork of GCC is REQUIRED (see below); two are supported:
 #
@@ -40,7 +40,7 @@
 # power-cycle (2.2 s). Probe-mediated keyboard resets showed a recovery
 # failure IDENTICALLY under GCC15 and a same-source GCC12 control — that is
 # the known minichlink bench artifact (see README.md), not a toolchain
-# effect; physical warm resets recover (999/1000 soak, BOOT.md).
+# effect; physical warm resets recover (999/1000 soak, README.md).
 
 # Grouped targets (&:) need GNU Make >= 4.3; older make silently races the
 # factory rule instead of failing.
@@ -54,14 +54,17 @@ endif
 # `pip install --user pyserial` stops being importable.
 PYTHON ?= python3
 
-# SDK path (relative to this Makefile): the vendored WeActStudio SDK subset.
-# Layout mirrors the WeAct example tree; see vendor/README.md for provenance.
-SDK ?= vendor/wch-ch592-sdk
+# SDK path: the pinned WeActStudio submodule's CH592 broadcaster example,
+# whose files match the bench-validated SDK subset.
+WEACT_SDK_ROOT := $(abspath ../third_party/weactstudio-wch-ble-core)
+WEACT_SDK_REVISION := 1ee632c27b2caef52a65079a98a51e9bf7f42f61
+SDK ?= $(WEACT_SDK_ROOT)/Examples/CH592/ble/broadcaster
 
 SDK_BLE_DIR := $(SDK)/ble
 SDK_SRC_DIR := $(SDK)
 
-# CH59x BLE library directory. Defaults to the vendored v1.4.2 triple
+# CH59x BLE library directory. Defaults to the v1.4.2 triple in OpenBoot's
+# pinned recursive openwch/ch592 submodule
 # (LIBCH59xBLE.a + CH59xBLE_LIB.h + ble_task_scheduler.S), the
 # CH59x_BLE_LIB_V1.4.2 release. Other library versions (e.g. from the openwch
 # CH592 EVT tree) are drop-in triples; override to A/B-compare:
@@ -70,9 +73,10 @@ SDK_SRC_DIR := $(SDK)
 #
 # NOTE: earlier bench notes thought v1.4.2 required app-side
 # PFIC_EnableIRQ(BLEB/BLEL), but that was a debugger-reset artifact. The app
-# now relies on the library's normal BLEB fast-vector setup; see
-# docs/TMOS_REVIEW.md.
-BLE_LIB_DIR ?= vendor/wch-ble-lib-v1.4.2
+# now relies on the library's normal BLEB fast-vector setup.
+OPENWCH_CH592_ROOT = $(OPENBOOT)/third_party/openwch/ch592
+OPENWCH_CH592_REVISION := a46e0086f1ffb5e5502703970bff94888e67f4cb
+BLE_LIB_DIR ?= $(OPENWCH_CH592_ROOT)/EVT/EXAM/BLE/LIB
 
 # Toolchain. Default: WCH GCC15. Supported alternate: WCH GCC12 —
 #   make MRS_TOOLCHAIN="$$HOME/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin"
@@ -93,7 +97,7 @@ PREFIX ?= $(shell for p in $(TOOL_PREFIXES); do \
 # `test` is host-only (it compiles harnesses with the HOST cc), so it must not
 # demand the WCH cross toolchain -- that is what lets CI run the suite at all.
 NO_APP_CC_GOALS := clean check-deps check-openboot-toolchain \
-                   openboot-image openboot-test info gdbserver test
+                   openboot-image openboot-test info gdbserver print-board-config test
 NEED_TOOLCHAIN := 1
 ifneq ($(MAKECMDGOALS),)
 ifeq ($(filter-out $(NO_APP_CC_GOALS),$(MAKECMDGOALS)),)
@@ -111,20 +115,98 @@ OBJCOPY:= $(PREFIX)objcopy
 SIZE   := $(PREFIX)size
 
 # ---------------------------------------------------------------------------
+# Product board configuration
+# ---------------------------------------------------------------------------
+# Keep the original OpenController module as the default.  A board profile
+# owns every hardware-dependent choice shared by the application and its
+# OpenBoot image; selecting a profile is therefore enough to produce a
+# self-consistent factory image:
+#
+#   make BOARD=mk65mx-wireless-ch592
+BOARD ?= opencontroller-ch592
+BOARD_FILE := boards/$(BOARD).mk
+ifeq ($(wildcard $(BOARD_FILE)),)
+$(error unknown BOARD '$(BOARD)' - expected a file at $(BOARD_FILE))
+endif
+include $(BOARD_FILE)
+
+ifeq ($(strip $(OPENBOOT_BOARD)),)
+$(error BOARD '$(BOARD)' must set OPENBOOT_BOARD)
+endif
+ifneq ($(words $(strip $(KBD_UART1_REMAP))),1)
+$(error BOARD '$(BOARD)' must set KBD_UART1_REMAP to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_UART1_REMAP))),)
+$(error BOARD '$(BOARD)' has invalid KBD_UART1_REMAP='$(KBD_UART1_REMAP)')
+endif
+ifneq ($(words $(strip $(KBD_FACTORY_MAC))),1)
+$(error BOARD '$(BOARD)' must set KBD_FACTORY_MAC to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_FACTORY_MAC))),)
+$(error BOARD '$(BOARD)' has invalid KBD_FACTORY_MAC='$(KBD_FACTORY_MAC)')
+endif
+ifneq ($(words $(strip $(KBD_DCDC_ENABLE))),1)
+$(error BOARD '$(BOARD)' must set KBD_DCDC_ENABLE to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_DCDC_ENABLE))),)
+$(error BOARD '$(BOARD)' has invalid KBD_DCDC_ENABLE='$(KBD_DCDC_ENABLE)')
+endif
+# A deliberate A/B override goes through `make KBD_DCDC_ENABLE=...`, which
+# passes the same validation above and is what print-board-config reports.
+# A -D in EXTRA_CFLAGS would instead win the CFLAGS redefinition silently
+# while print-board-config keeps reporting the board value, so reject it.
+ifneq ($(findstring KBD_DCDC_ENABLE,$(EXTRA_CFLAGS)),)
+$(error KBD_DCDC_ENABLE must not go through EXTRA_CFLAGS; use `make KBD_DCDC_ENABLE=0|1` or the board profile)
+endif
+ifneq ($(words $(strip $(KBD_DEEP_SLEEP))),1)
+$(error BOARD '$(BOARD)' must set KBD_DEEP_SLEEP to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_DEEP_SLEEP))),)
+$(error BOARD '$(BOARD)' has invalid KBD_DEEP_SLEEP='$(KBD_DEEP_SLEEP)')
+endif
+# Same silent-divergence hazard as KBD_DCDC_ENABLE, doubled: HAL_SLEEP must
+# reach the SDK sources as a -D (an app CONFIG.h silently splits the build --
+# quoted-include resolution keeps SDK sources on the SDK CONFIG.h), so BOTH
+# macros are rejected from EXTRA_CFLAGS. A/B goes through
+# `make KBD_DEEP_SLEEP=0|1`, which stays validated and reported.
+ifneq ($(findstring KBD_DEEP_SLEEP,$(EXTRA_CFLAGS)),)
+$(error KBD_DEEP_SLEEP must not go through EXTRA_CFLAGS; use `make KBD_DEEP_SLEEP=0|1` or the board profile)
+endif
+ifneq ($(findstring HAL_SLEEP,$(EXTRA_CFLAGS)),)
+$(error HAL_SLEEP must not go through EXTRA_CFLAGS; it is derived from KBD_DEEP_SLEEP)
+endif
+ifneq ($(words $(strip $(KBD_HOST_WAKE))),1)
+$(error BOARD '$(BOARD)' must set KBD_HOST_WAKE to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_HOST_WAKE))),)
+$(error BOARD '$(BOARD)' has invalid KBD_HOST_WAKE='$(KBD_HOST_WAKE)')
+endif
+# Host wake drives CHWAKE on PB13, which the UART1 remap uses as TXD1.
+ifeq ($(strip $(KBD_HOST_WAKE))$(strip $(KBD_UART1_REMAP)),11)
+$(error BOARD '$(BOARD)': KBD_HOST_WAKE drives PB13, which KBD_UART1_REMAP=1 uses as TXD1)
+endif
+# Same silent-divergence hazard as the knobs above; A/B goes through
+# `make KBD_HOST_WAKE=0|1`. Every spelling that defines or undefines the macro
+# is refused (-DX, -DX=v, -D X, -D X=v, -UX, -U X); the timing macros
+# (KBD_HOST_WAKE_GUARD_US, ...) stay EXTRA_CFLAGS-tunable.
+ifneq ($(filter -DKBD_HOST_WAKE -DKBD_HOST_WAKE=% -UKBD_HOST_WAKE KBD_HOST_WAKE KBD_HOST_WAKE=%,$(EXTRA_CFLAGS)),)
+$(error KBD_HOST_WAKE must not go through EXTRA_CFLAGS; use `make KBD_HOST_WAKE=0|1` or the board profile)
+endif
+
+# ---------------------------------------------------------------------------
 # OpenBoot integration
 # ---------------------------------------------------------------------------
 OPENBOOT := $(abspath ../third_party/openboot)
-OPENBOOT_BOARD := opencontroller-ch592
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := 60a100d13a3a4751dcb7b2b46db368485e05c17f
+OPENBOOT_REVISION := d89d4d67b5e80b212ec0466a57042a55f19687b7
 # The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
-# the app defaults to GCC15. Upstream measured erratic GCC15 bootloader
-# behavior (see check-openboot-toolchain), so this defaults to the validated
-# GCC12 install independently of MRS_TOOLCHAIN, and the hard gate below keeps
-# enforcing GCC12 on every path that builds the bootloader (upstream's own
-# compiler check is advisory).
+# the app defaults to GCC15. GCC12 is the bootloader compiler OpenBoot
+# documents as validated on silicon (see check-openboot-toolchain for the
+# GCC15 history), so this defaults to the GCC12 install independently of
+# MRS_TOOLCHAIN, and the hard gate below keeps enforcing GCC12 on every path
+# that builds the bootloader (upstream's own compiler check is advisory).
 OPENBOOT_TOOLCHAIN ?= $(HOME)/Development/Mounriver/Toolchain/RISC-V Embedded GCC12/bin
 OPENBOOT_CLI := $(OPENBOOT)/tools/target/release/openboot
 
@@ -183,17 +265,17 @@ endif
 
 # Project
 TARGET := opencontroller_ch592f
-BUILD  := build/ch592f-slot$(SLOT)
+BUILD  := build/$(BOARD)-slot$(SLOT)
 MEMORY_LD := $(BUILD)/memory.ld
 
-SLOT_A_BIN := build/ch592f-slotA/$(TARGET).bin
-SLOT_B_BIN := build/ch592f-slotB/$(TARGET).bin
-BUNDLE_BIN := build/opencontroller-ch592f.obb
+SLOT_A_BIN := build/$(BOARD)-slotA/$(TARGET).bin
+SLOT_B_BIN := build/$(BOARD)-slotB/$(TARGET).bin
+BUNDLE_BIN := build/$(BOARD).obb
 
 OPENBOOT_FACTORY_BIN := $(patsubst %.bin,%-factory.bin,$(OPENBOOT_SRC_BIN))
 OPENBOOT_MANIFEST := $(patsubst %.bin,%.manifest,$(OPENBOOT_SRC_BIN))
-FACTORY_BIN := $(BUILD)/$(TARGET)-factory.bin
-FACTORY_MANIFEST := $(BUILD)/$(TARGET)-factory.manifest
+FACTORY_BIN := $(BUILD)/$(BOARD)-factory.bin
+FACTORY_MANIFEST := $(BUILD)/$(BOARD)-factory.manifest
 
 # Architecture flags
 ARCH   := -march=rv32imac_zicsr_zifencei -mabi=ilp32
@@ -208,6 +290,18 @@ CFLAGS += -fno-common
 CFLAGS += -DOPENBOOT_CHIP_CH59X
 CFLAGS += -DOPENBOOT_SLOT_BASE=$(OPENBOOT_SLOT_BASE)
 CFLAGS += -DOPENBOOT_SLOT_SIZE=$(OPENBOOT_SLOT_SIZE)
+CFLAGS += -DKBD_UART1_REMAP=$(KBD_UART1_REMAP)
+CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
+CFLAGS += -DKBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)
+CFLAGS += -DKBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)
+CFLAGS += -DKBD_HOST_WAKE=$(KBD_HOST_WAKE)
+ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
+# HAL_SLEEP=TRUE un-stubs the SDK sleep plumbing (MCU.c wires the TMOS
+# idleCB); the SDK's SLEEP.c is swapped for the app-owned power_sleep.c
+# below (same symbols) -- the stock CH59x_LowPower would deep-sleep a live
+# CONNECTED link because the polled hop scheduler is invisible to TMOS.
+CFLAGS += -DHAL_SLEEP=TRUE
+endif
 
 # Per-build overrides go through EXTRA_CFLAGS. Use `make EXTRA_CFLAGS=...`
 # not `make CFLAGS+=...`; the latter clobbers ARCH.
@@ -217,8 +311,56 @@ CFLAGS += $(EXTRA_CFLAGS)
 # image with `make RF_DIAG_COUNTERS=0` to compile out the counters, their
 # always-on read-modify-writes (incl. the RX-ISR hot path), and their SRAM.
 # Passed to both .c and .S (AS is gcc).
+# Resting policy (RESTING_POLICY.md): silent link drop after KBD_REST_IDLE_MS
+# without a host report, 1.010 s probes, no probes after 30 min. 0 compiles the
+# policy out.
+KBD_REST ?= 1
+ifneq ($(words $(strip $(KBD_REST))),1)
+$(error KBD_REST must be a single value, got '$(KBD_REST)')
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_REST))),)
+$(error KBD_REST must be 0 or 1, got '$(KBD_REST)')
+endif
+CFLAGS += -DKBD_REST=$(KBD_REST)
+# T_idle (RESTING_POLICY.md D1): milliseconds without a host report before the
+# link is dropped. Default 3000 after the 2026-09-13 hold sweep
+# (firmware/bench/2026-09-13-rest-hold-sweep): 24 mC per key from rest vs 39 at
+# 5 s, first-key delivery and latency unchanged, and a dongle outage recovers
+# through rest instead of supervision. Production parity is
+# `make KBD_REST_IDLE_MS=5000`. Converted to TMOS 625 us ticks (x 8/5) HERE so
+# the C default and the knob cannot drift; an EXTRA_CFLAGS -D of the tick macro
+# would win the CFLAGS redefinition silently, so it is rejected like the others.
+KBD_REST_IDLE_MS ?= 3000
+ifneq ($(words $(strip $(KBD_REST_IDLE_MS))),1)
+$(error KBD_REST_IDLE_MS must be a single value, got '$(KBD_REST_IDLE_MS)')
+endif
+# Digits only, decided by make itself: nothing reaches a shell until it is
+# known to be a plain number (a quote in the value would otherwise escape).
+ifneq ($(subst 0,,$(subst 1,,$(subst 2,,$(subst 3,,$(subst 4,,$(subst 5,,$(subst 6,,$(subst 7,,$(subst 8,,$(subst 9,,$(strip $(KBD_REST_IDLE_MS)))))))))))),)
+$(error KBD_REST_IDLE_MS must be a whole number of milliseconds, got '$(KBD_REST_IDLE_MS)')
+endif
+ifeq ($(shell [ $(strip $(KBD_REST_IDLE_MS)) -ge 500 ] && [ $(strip $(KBD_REST_IDLE_MS)) -le 60000 ] && echo ok),)
+$(error KBD_REST_IDLE_MS must be 500..60000, got '$(KBD_REST_IDLE_MS)')
+endif
+# Neither macro may arrive by another road: a -D in EXTRA_CFLAGS would win
+# silently, and a command-line tick count would skip the range check.
+ifneq ($(findstring KBD_REST_IDLE,$(EXTRA_CFLAGS)),)
+$(error KBD_REST_IDLE_MS / KBD_REST_IDLE_TICKS must not go through EXTRA_CFLAGS; use `make KBD_REST_IDLE_MS=<ms>`)
+endif
+ifneq ($(origin KBD_REST_IDLE_TICKS),undefined)
+$(error KBD_REST_IDLE_TICKS is derived; set KBD_REST_IDLE_MS=<ms> instead)
+endif
+KBD_REST_IDLE_TICKS := $(shell expr $(strip $(KBD_REST_IDLE_MS)) \* 8 / 5)
+CFLAGS += -DKBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)u
+
 RF_DIAG_COUNTERS ?= 1
 CFLAGS += -DRF_DIAG_COUNTERS=$(RF_DIAG_COUNTERS)
+# UART diag dump (A6 71 / A6 72): bench tool returning the .diag_safe counters and
+# the fault/reset record over UART (SWD reads reset the target). Follows
+# RF_DIAG_COUNTERS by default. The byte-identical pre-sleep regression reference
+# is `make KBD_DEEP_SLEEP=0 KBD_UART_DIAG_DUMP=0`.
+KBD_UART_DIAG_DUMP ?= $(RF_DIAG_COUNTERS)
+CFLAGS += -DKBD_UART_DIAG_DUMP=$(KBD_UART_DIAG_DUMP)
 
 # Independent WWDG watchdog (last-resort recovery for an unknown firmware hang),
 # on by default. `make WATCHDOG_ENABLE=0` builds without it.
@@ -278,11 +420,13 @@ CFLAGS += -DKBD_RF_CRYPT=$(KBD_RF_CRYPT)
 #   make KBD_RF_CRYPT=1 KBD_CRYPT_BENCH_KEY=1
 KBD_CRYPT_BENCH_KEY ?= 0
 CFLAGS += -DKBD_CRYPT_BENCH_KEY=$(KBD_CRYPT_BENCH_KEY)
-# BENCH ONLY: route UART1 on the chip-default PA8/PA9 pins (generic CH592F
-# devboard wiring: probe TX -> PA8/RXD1, probe RX <- PA9/TXD1). The keyboard
-# PCB wires the PB12/PB13 remap, which remains the default.
-KBD_UART1_DEFAULT_PINS ?= 0
-CFLAGS += -DKBD_UART1_DEFAULT_PINS=$(KBD_UART1_DEFAULT_PINS)
+# KBD_UART1_DEFAULT_PINS (the bench knob for the chip-default PA8/PA9 pins) is
+# gone: the board profile's KBD_UART1_REMAP owns the UART1 pins now, and
+# keyboard_uart.c reads only that. Refuse the old name rather than accept it
+# and leave the UART on the other pins.
+ifneq ($(origin KBD_UART1_DEFAULT_PINS),undefined)
+$(error KBD_UART1_DEFAULT_PINS is no longer a knob: pass KBD_UART1_REMAP=0 for the chip-default PA8/PA9 pins)
+endif
 # BENCH ONLY: transmit-outcome counters (UART 0xB2). Answers whether a response
 # frame the keyboard believes it sent was ever accepted by the radio, and how
 # late in its poll slot it went out -- neither of which kbd_crypt_tx_sealed can
@@ -292,6 +436,16 @@ CFLAGS += -DKBD_UART1_DEFAULT_PINS=$(KBD_UART1_DEFAULT_PINS)
 # with and without it for an A/B against the same metric.
 KBD_TX_OUTCOME ?= 0
 CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
+# BENCH ONLY, never ship: key every keyless bond with a key compiled into the
+# image (rf_task.c). For a keyboard whose module UART goes to its own
+# controller, where the 0xAE bench command cannot be sent from a probe.
+KBD_CRYPT_BENCH_FORCE_KEY ?= 0
+CFLAGS += -DKBD_CRYPT_BENCH_FORCE_KEY=$(KBD_CRYPT_BENCH_FORCE_KEY)
+ifeq ($(KBD_CRYPT_BENCH_FORCE_KEY),1)
+ifneq ($(KBD_RF_CRYPT),1)
+$(error KBD_CRYPT_BENCH_FORCE_KEY=1 needs KBD_RF_CRYPT=1)
+endif
+endif
 ifeq ($(KBD_CRYPT_BENCH_KEY),1)
 ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_KEY=1 needs KBD_RF_CRYPT=1 - there is no key to provision otherwise)
@@ -316,7 +470,10 @@ endif
 # a defaulted-plaintext update in that state; a deliberate downgrade says
 # KBD_RF_CRYPT=0 explicitly, which also clears the markers so later defaulted
 # updates stop tripping this.
-CRYPT_BUILD_MARKERS := $(wildcard build/ch592f-slot*/kbd_rf_crypt.o)
+# Per BOARD: object trees are build/$(BOARD)-slot$(SLOT) since the board
+# profiles landed, and a pattern naming the old single tree matched nothing --
+# the guard was silently disarmed for every board.
+CRYPT_BUILD_MARKERS := $(wildcard build/$(BOARD)-slot*/kbd_rf_crypt.o)
 # Cover every goal that PRODUCES a flashable artifact, not just the two that
 # flash one: `bundle` emits the .obb the OpenBoot CLI flashes directly and
 # `factory` emits the SWD whole-chip image, so both could silently hand over a
@@ -343,12 +500,20 @@ endif
 # first target in the file silently becomes it.
 .DEFAULT_GOAL := all
 
+# Host-only gate: no cross toolchain, no hardware, so it can run anywhere --
+# which is the point, because until now nothing ran this suite automatically and
+# the pins in it were only as good as someone remembering. Mirrors OpenDongle's
+# `make -C firmware test`. Not a release gate: shipping still needs the pinned
+# toolchains and the hardware matrix.
+test:
+	cd tests && $(PYTHON) -m unittest discover
+
 # Clearing the markers is a real build step: it runs only when the goal actually
 # executes, and `make -n` prints it instead of doing it.
 .PHONY: crypt-downgrade-ack
 crypt-downgrade-ack:
 ifeq ($(CRYPT_DOWNGRADE_ACK),1)
-	rm -f build/ch592f-slot*/kbd_rf_crypt.o
+	rm -f build/$(BOARD)-slot*/kbd_rf_crypt.o
 endif
 # INT_SOFT=1 forces plain __attribute__((interrupt)) and is known to produce
 # broken RF/BLE binaries against LIBCH59xBLE.a. Keep native
@@ -377,11 +542,23 @@ INCLUDES += -I $(OPENBOOT)/firmware/app
 
 # Source files - our application
 # This is the keyboard-side wireless module: no USB device. Firmware updates
-# go through OpenBoot (A6 81 -> openboot_request_update; see BOOT.md).
+# go through OpenBoot (A6 81 -> openboot_request_update; see README.md).
 APP_SRC := src/main.c
 APP_SRC += src/rf_task.c
 APP_SRC += src/keyboard_uart.c
+APP_SRC += src/rtc_clock.c
 APP_SRC += src/kbd_image_id.c
+ifeq ($(strip $(KBD_UART_DIAG_DUMP)),1)
+APP_SRC += src/diag_frame.c
+APP_SRC += src/diag_dump.c
+endif
+ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
+APP_SRC += src/power_sleep.c
+APP_SRC += src/sleep_protocol.c
+endif
+ifeq ($(strip $(KBD_HOST_WAKE)),1)
+APP_SRC += src/host_wake.c
+endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # Link encryption (see KBD_RF_CRYPT above). Compiled only when enabled.
 ifeq ($(KBD_RF_CRYPT),1)
@@ -422,7 +599,9 @@ STARTUP_SRC := src/startup_CH592_phased.S
 # Source files - SDK HAL (TMOS/BLE init)
 HAL_SRC := $(SDK_BLE_DIR)/HAL/MCU.c
 HAL_SRC += $(SDK_BLE_DIR)/HAL/RTC.c
+ifneq ($(strip $(KBD_DEEP_SLEEP)),1)
 HAL_SRC += $(SDK_BLE_DIR)/HAL/SLEEP.c
+endif
 HAL_SRC += $(SDK_BLE_DIR)/HAL/KEY.c
 HAL_SRC += $(SDK_BLE_DIR)/HAL/LED.c
 
@@ -451,7 +630,7 @@ SCHED_SRC := $(BLE_LIB_DIR)/ble_task_scheduler.S
 # while RF callbacks fired, and removing it kept full pairing + connected HID
 # delivery. Matches the SDK LWNS example, which ships no app BB handler.
 # (NOTE: no app-side PFIC_EnableIRQ(BLEB/BLEL) calls are required in main.c; the
-# earlier contrary note was a debugger-reset artifact. See docs/TMOS_REVIEW.md.)
+# earlier contrary note was a debugger-reset artifact.)
 # Strong NMI_Handler / HardFault_Handler overrides. Vendor startup ships
 # weak handlers that infinite-loop with zero diagnostic state. Ours
 # capture mepc/mcause/mtval to fixed SRAM (0x20005804..0x20005810) so
@@ -482,7 +661,7 @@ OBJS   := $(C_OBJS) $(S_OBJS)
 # prepend reaches $(shell) is version-dependent, and a bare invocation could
 # silently fingerprint a different compiler than the build uses.
 CC_FOR_VERSION := $(if $(findstring /,$(CC)),$(CC),$(MRS_TOOLCHAIN)/$(CC))
-CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
+CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "BOARD=$(BOARD)" "OPENBOOT_BOARD=$(OPENBOOT_BOARD)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
 CONFIG_STAMP := $(BUILD)/.config-$(CONFIG_FINGERPRINT)
 
 # VPATH for source file lookup
@@ -505,11 +684,30 @@ GDB        := $(PREFIX)gdb
 KBD_PROBE ?=
 PROBE_ARG := $(if $(KBD_PROBE),-l $(KBD_PROBE))
 
-.PHONY: all clean size size-check info gdbserver debug factory flash-factory test \
-        bundle update check-deps check-openboot-toolchain check-factory-slot \
-        openboot-image openboot-test FORCE
+.PHONY: all clean size size-check info gdbserver debug factory flash-factory \
+        bundle update update-qmk check-bundle-family check-deps \
+        check-openboot-toolchain check-factory-slot \
+        openboot-image openboot-test print-board-config test FORCE
 
 all: $(BUILD)/$(TARGET).hex $(BUILD)/$(TARGET).bin size size-check
+
+# Toolchain-free, machine-readable summary used by profile tests and useful
+# before producing a factory image for similarly named CH592 boards.
+print-board-config:
+	@printf '%s\n' \
+	    'BOARD=$(BOARD)' \
+	    'OPENBOOT_BOARD=$(OPENBOOT_BOARD)' \
+	    'KBD_UART1_REMAP=$(KBD_UART1_REMAP)' \
+	    'KBD_FACTORY_MAC=$(KBD_FACTORY_MAC)' \
+	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
+	    'KBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)' \
+	    'KBD_HOST_WAKE=$(KBD_HOST_WAKE)' \
+	    'KBD_REST=$(KBD_REST)' \
+	    'KBD_REST_IDLE_MS=$(KBD_REST_IDLE_MS)' \
+	    'KBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)' \
+	    'BUILD=$(BUILD)' \
+	    'BUNDLE_BIN=$(BUNDLE_BIN)' \
+	    'FACTORY_BIN=$(FACTORY_BIN)'
 
 # Exactly one stamp may exist: returning to a config used EARLIER left its old
 # stamp in place, older than objects built under another config since — make
@@ -528,7 +726,7 @@ $(OBJS): $(CONFIG_STAMP)
 # when the bytes actually change, so an unchanged slot does not relink.
 $(MEMORY_LD): FORCE | $(BUILD)
 	@ram_len=$$(printf '0x%X' $$(( $(OPENBOOT_BOOTREQ_ADDR) - 0x20000000 ))); \
-	 { echo "/* Generated by firmware/Makefile for slot $(SLOT). DO NOT EDIT. */"; \
+	 { echo "/* Generated by firmware/Makefile for board $(BOARD), slot $(SLOT). DO NOT EDIT. */"; \
 	   echo "MEMORY"; \
 	   echo "{"; \
 	   echo "    FLASH (rx)  : ORIGIN = $(OPENBOOT_SLOT_BASE), LENGTH = $(OPENBOOT_SLOT_CAP)"; \
@@ -573,7 +771,7 @@ size-check: $(BUILD)/$(TARGET).bin
 	    echo "       by the first COMMIT."; \
 	    exit 1; \
 	 else \
-	    echo "  firmware: $$sz / $$max B ($$pct% of slot capacity, slot $(SLOT))"; \
+	    echo "  firmware: $$sz / $$max B ($$pct% of slot capacity, board $(BOARD), slot $(SLOT))"; \
 	 fi
 
 # ---------------------------------------------------------------------------
@@ -581,25 +779,40 @@ size-check: $(BUILD)/$(TARGET).bin
 # ---------------------------------------------------------------------------
 # Assert the OpenBoot submodule IS the pinned revision and its worktree is
 # clean. --skip-toolchain because verifying a SHA must not require GCC12 to
-# be installed. (The WCH SDK is vendored in-tree - see vendor/README.md - so
-# there is no SDK-revision half to this check.)
-# Host-only gate: no cross toolchain, no hardware, so it can run anywhere --
-# which is the point, because until now nothing ran this suite automatically and
-# the pins in it were only as good as someone remembering. Mirrors OpenDongle's
-# `make -C firmware test`. Not a release gate: shipping still needs the pinned
-# toolchains and the hardware matrix.
-test:
-	cd tests && $(PYTHON) -m unittest discover
-
+# be installed. Check the application SDK and BLE-library source pins too;
+# they are build inputs in separate (one recursive) submodules.
 check-deps:
 	$(PYTHON) -I $(OPENBOOT)/firmware/check_dependencies.py \
 	    --expect-revision $(OPENBOOT_REVISION) --skip-toolchain
+	@for spec in \
+	  "$(WEACT_SDK_ROOT)|$(WEACT_SDK_REVISION)|WeActStudio WCH SDK" \
+	  "$(OPENWCH_CH592_ROOT)|$(OPENWCH_CH592_REVISION)|openwch CH592 SDK"; do \
+	    root=$${spec%%|*}; rest=$${spec#*|}; \
+	    expected=$${rest%%|*}; name=$${rest#*|}; \
+	    actual=$$(git -C "$$root" rev-parse HEAD 2>/dev/null) || { \
+	      echo "ERROR: $$name submodule is not initialized: $$root"; \
+	      echo "       run: git submodule update --init --recursive"; \
+	      exit 1; \
+	    }; \
+	    if [ "$$actual" != "$$expected" ]; then \
+	      echo "ERROR: $$name revision $$actual; expected $$expected"; \
+	      exit 1; \
+	    fi; \
+	    if [ -n "$$(git -C "$$root" status --porcelain)" ]; then \
+	      echo "ERROR: $$name submodule has local changes: $$root"; \
+	      exit 1; \
+	    fi; \
+	    echo "$$name: $$actual (clean)"; \
+	  done
 
 # OpenBoot's own compiler gate is ADVISORY: a mismatch warns and continues.
-# GCC15 is bench-unvalidated for the bootloader (upstream measured erratic
-# idle auto-boot at 1.5-4.8 s against a configured 10 s, and 4/32 failed
-# software-reset returns on CH572). Keep a HARD gate on the paths that build
-# the bootloader. Override only to reproduce that investigation:
+# Upstream once measured erratic GCC15 bootloader behavior on CH572 (idle
+# auto-boot at 1.5-4.8 s against a configured 10 s, 4/32 failed
+# software-reset returns). OpenBoot 6f98580 re-validated GCC15 on CH572 and
+# CH570 and now accepts it, but its README still names GCC12 as the compiler
+# validated on silicon, and every CH592 factory image built here has carried
+# a GCC12 bootloader. Keep a HARD gate on the paths that build the
+# bootloader. Override only to try another compiler deliberately:
 #   make ... OPENBOOT_ALLOW_UNVALIDATED_GCC=1
 check-openboot-toolchain:
 	@if [ "$(OPENBOOT_ALLOW_UNVALIDATED_GCC)" = "1" ]; then \
@@ -702,8 +915,10 @@ flash-factory: crypt-downgrade-ack factory
 #	keeps the bond deliberately via ALLOW_BONDED_FLASH=1 (compared against
 #	exactly "1" so a scripted =0 fails safe). Clear it over UART (A6 52
 #	unpair) if needed - never write CH592 DataFlash over SWD.
+#	BSD od pads the bytes with two spaces, GNU od with one: match either, or
+#	the guard never fires on macOS (it did not, 2026-09-13).
 	"$(MINICHLINK)" -C linke -r "$(BUILD)/.flash-bond.bin" 0x74000 4 $(PROBE_ARG)
-	@if head -c 4 "$(BUILD)/.flash-bond.bin" | od -An -tx1 | grep -qi "4b 42 44 32"; then \
+	@if head -c 4 "$(BUILD)/.flash-bond.bin" | od -An -tx1 | grep -qiE "4b +42 +44 +32"; then \
 	  if [ "$(strip $(ALLOW_BONDED_FLASH))" = "1" ]; then \
 	    echo "WARNING: KBD2 bond present at 0x74000 (-E will not clear DataFlash); continuing (ALLOW_BONDED_FLASH=1)" >&2; \
 	  else \
@@ -736,8 +951,8 @@ flash-factory: crypt-downgrade-ack factory
 # both recurse into the shared OpenBoot submodule build directory - run such
 # goals as separate invocations.
 bundle: crypt-downgrade-ack
-	+$(MAKE) SLOT=A $(SLOT_A_BIN)
-	+$(MAKE) SLOT=B $(SLOT_B_BIN)
+	+$(MAKE) BOARD=$(BOARD) SLOT=A $(SLOT_A_BIN)
+	+$(MAKE) BOARD=$(BOARD) SLOT=B $(SLOT_B_BIN)
 	@test -x "$(OPENBOOT_CLI)" || { \
 	  echo "build the OpenBoot CLI first: cargo build --release --manifest-path $(OPENBOOT)/tools/Cargo.toml" >&2; \
 	  exit 1; }
@@ -746,16 +961,11 @@ bundle: crypt-downgrade-ack
 	    "$(SLOT_B_BIN)@$(OPENBOOT_SLOT_B_BASE)"
 	@echo "bundle: $(abspath $(BUNDLE_BIN)) ($$(stat -c%s "$(BUNDLE_BIN)") B)"
 
-# Bench OBP update over the WCH-LinkE CDC wired to PB12/PB13. Opening the
-# port resets the target into OpenBoot's 10 s idle window; the CLI's HELLO
-# then holds it (fail-stay). Both bundle members are family-checked (ODG2
-# family 0xB2 at image offset 0x25) before anything talks to the device:
-# OpenBoot's COMMIT attests only length+CRC, so this is the only guard
-# against cross-flashing a dongle CH592 image on a shared bench.
-OB_PORT ?=
-update: crypt-downgrade-ack bundle
-	@test -n "$(strip $(OB_PORT))" || { \
-	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
+# Family check shared by `update` and `update-qmk`. Both bundle members are
+# family-checked (ODG2 family 0xB2 at image offset 0x25) before anything talks
+# to the device: OpenBoot's COMMIT attests only length+CRC, so this is the only
+# guard against cross-flashing a dongle CH592 image on a shared bench.
+check-bundle-family: bundle
 	@for f in "$(SLOT_A_BIN)" "$(SLOT_B_BIN)"; do \
 	  magic=$$(od -An -c -j $$(( 0x20 )) -N4 "$$f" | tr -d ' '); \
 	  test "$$magic" = "ODG2" || { \
@@ -766,17 +976,57 @@ update: crypt-downgrade-ack bundle
 	    echo "ERROR: $$f has ODG2 family 0x$$fam, expected 0xb2 (OpenController keyboard)" >&2; \
 	    exit 1; }; \
 	done
+
+# Bench OBP update over UART1 on the selected board profile's pins. Opening
+# the port resets the target into OpenBoot's 10 s idle window; the CLI's
+# HELLO then holds it (fail-stay).
+OB_PORT ?=
+update: check-bundle-family
+	@test -n "$(strip $(OB_PORT))" || { \
+	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
 #	Ask the running application to enter the bootloader (A6 81 = stock OTA
 #	mode), then ride out the ~2 s of post-reset UART turbulence before the
 #	first HELLO - the CLI's fast retries all land inside it otherwise
 #	(bench-measured: HELLO fails at t<2 s, succeeds from ~2.3 s). If the
 #	device is already in the bootloader the A6 81 bytes are SOF-hunt noise
 #	and the settle is harmless.
-	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
+#	The A6 81 is prefixed with the deep-sleep wake preamble (one NULL +
+#	~5 ms gap): if the module was put to sleep with A6 54, the NULL's start
+#	bit is the RX-pin GPIO wake edge and is consumed by the wake, so the
+#	real A6 81 must follow the settle gap (MR6 wake contract). On an awake
+#	module the idle parser drops the stray NULL, so this is harmless.
+	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0x00])); p.flush(); time.sleep(0.005); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
 #	No separate `boot` step: the flash flow ends with BOOT itself
 #	("boot after: yes"), so the device is already running the new image
 #	when this returns - a trailing boot would HELLO an application.
 	"$(OPENBOOT_CLI)" --transport uart --port "$(OB_PORT)" flash "$(BUNDLE_BIN)" --force
+
+# OBP update through the keyboard's QMK HID tunnel: no serial bridge, no
+# disassembly. Same bundle and same family guard as `update`; the A6 81 and the
+# post-reset settle move into the transport, which anchors on the elapsed time
+# the keyboard reports and probes HELLO across the window instead of sleeping a
+# fixed 6 s. The keyboard runs no OBP client - it forwards bytes, and the module
+# still reports transport = UART. It does go off air until this finishes.
+QMK_VID ?=
+QMK_PID ?=
+QMK_SERIAL ?=
+update-qmk: check-bundle-family
+	@test -n "$(strip $(QMK_VID))" -a -n "$(strip $(QMK_PID))" || { \
+	  echo "set QMK_VID and QMK_PID to the KEYBOARD's USB identity" >&2; \
+	  echo "  e.g. make $@ QMK_VID=0x4D4B QMK_PID=0x0002" >&2; exit 1; }
+#	The tunnel is newer than some pinned OpenBoot revisions. Ask the CLI's
+#	own argument parser whether it accepts 'qmk' (an older CLI rejects it as
+#	an unknown enum value) and say so plainly, rather than relying on the
+#	wording of its help text.
+	@"$(OPENBOOT_CLI)" --transport qmk --help >/dev/null 2>&1 || { \
+	  echo "ERROR: the vendored openboot CLI has no qmk transport." >&2; \
+	  echo "  Bump OPENBOOT_REVISION / the third_party/openboot submodule to a" >&2; \
+	  echo "  revision that carries tools/src/transport/qmk.rs." >&2; exit 1; }
+#	No separate `boot` step, for the same reason as `update` above.
+	"$(OPENBOOT_CLI)" --transport qmk \
+	    --vid "$(QMK_VID)" --pid "$(QMK_PID)" \
+	    $(if $(strip $(QMK_SERIAL)),--serial "$(QMK_SERIAL)") \
+	    flash "$(BUNDLE_BIN)" --force
 
 # Probe the keyboard-side CH592F.
 # minichlink selects the probe with `-l <serial>`, which MUST be the last arg.

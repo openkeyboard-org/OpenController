@@ -1,8 +1,8 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware linker script (CH592F).
- * Based on CH592 SDK Link.ld
+ * Based on the WCH CH592 SDK Link.ld; see ../NOTICE for provenance.
  *
  * The application runs under OpenBoot (third_party/openboot), which owns
  * flash [0x0000, 0x2000) and boots one of two equal A/B slots:
@@ -18,7 +18,8 @@
  *
  * RAM LENGTH is 0x67F0, not 26K: OpenBoot's boot-request mailbox occupies
  * the top 16 bytes of SRAM (0x200067F0), written by openboot_request_update()
- * and consumed by the bootloader after the soft reset. See firmware/BOOT.md.
+ * and consumed by the bootloader after the soft reset. See "RAM boot request"
+ * in third_party/openboot/firmware/app/README.md.
  */
 
 INCLUDE memory.ld
@@ -202,6 +203,13 @@ SECTIONS
         . = ALIGN(4);
         PROVIDE( _diag_safe_start = . );
         *(.diag_safe)
+        /* Legacy counters end here. New (power-ladder) counters live in
+         * .diag_safe.power and MUST stay below this line: exact-name
+         * sections collect in object order, so a counter added to an
+         * earlier object with the bare section name would silently shift
+         * every legacy absolute address the bench scripts read. */
+        PROVIDE( _diag_safe_legacy_end = . );
+        *(.diag_safe.power)
         *(.diag_safe.*)
         . = ALIGN(4);
         PROVIDE( _diag_safe_end = . );
@@ -211,6 +219,14 @@ SECTIONS
            "diag counters must start right after the asm scratch window")
     ASSERT(_diag_safe_end <= _diag_scratch_start + 0x200,
            ".diag_safe overflows the 0x200 diag window")
+    /* Pin the legacy block: 0x200059e8 is its END ADDRESS as of power MR2
+     * (start 0x20005820 + 0x1c8 of legacy counters). It moves only when a
+     * counter is added with the bare .diag_safe name - do that deliberately
+     * (update this constant AND the bench scripts), never by accident.
+     * RF_DIAG_COUNTERS=0 builds have an empty block. */
+    ASSERT(_diag_safe_legacy_end == 0x200059e8
+           || _diag_safe_legacy_end == _diag_safe_start,
+           "legacy .diag_safe counters moved - bench absolute addresses broken")
 
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {

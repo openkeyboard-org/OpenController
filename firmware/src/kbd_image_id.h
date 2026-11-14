@@ -1,5 +1,5 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController application image identity header. Wire-compatible with
  * OpenDongle's ODG2 format so the same host-side parsers work; the family

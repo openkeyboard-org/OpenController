@@ -1,0 +1,91 @@
+=== drought ladder h5: H=5.0s L=[1.5, 2.5, 4.0, 8.0, 30.0]  dongle=W
+h5 L=1.5s: path=SUPERVISION (ll_drop 0->1) | during outage net mA/s: 7.7 7.7 | dongle back 1.1s after rail-on | after return net mA/s: 0.2 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[AWAKE DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 20s after rail-on | episode 32s 25 mC
+h5 L=2.5s: path=SUPERVISION (ll_drop 1->2) | during outage net mA/s: 7.8 7.8 7.7 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[AWAKE DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 20s after rail-on | episode 33s 26 mC
+h5 L=4.0s: path=SUPERVISION (ll_drop 2->3) | during outage net mA/s: 7.7 7.7 7.7 1.2 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[AWAKE DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 19s after rail-on | episode 34s 25 mC
+h5 L=8.0s: path=SUPERVISION (ll_drop 3->4) | during outage net mA/s: 7.7 7.8 7.7 1.1 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 25s after rail-on | episode 43s 66 mC
+h5 L=30.0s: path=SUPERVISION (ll_drop 4->5) | during outage net mA/s: 7.7 7.7 7.7 1.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 25s after rail-on | episode 65s 66 mC
+=== h5 done
+X2 rested L=2.5s: pre dongle=W net=0.0mA nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+X2 rested L=2.5s key@+5s: FAIL(d0u0)  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X2 rested L=2.5s key@+15s: OK 112ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X2 rested L=2.5s key@+30s: OK 52ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X2 rested L=2.5s key@+45s: OK 89ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X1 held L=2.5s: pre dongle=C net=3.8mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X1 held L=2.5s key@+5s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+X1 held L=2.5s key@+15s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+X1 held L=2.5s key@+30s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+X1 held L=2.5s key@+45s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+X1 held L=2.5s key@+60s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+=== drought ladder h3: H=3.0s L=[1.5, 2.5, 4.0, 8.0, 30.0]  dongle=W
+h3 L=1.5s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.7 | dongle back 1.1s after rail-on | after return net mA/s: 0.1 0.1 0.1 0.2 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.2 dongle=C nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=89ms | lock 20s after rail-on | episode 32s 42 mC
+h3 L=2.5s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.7 0.1 | dongle back 1.1s after rail-on | after return net mA/s: 0.1 0.1 0.2 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.0 0.1 dongle=W nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=37ms | lock 19s after rail-on | episode 33s 43 mC
+h3 L=4.0s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.7 0.1 0.7 | dongle back 0.6s after rail-on | after return net mA/s: 0.4 0.1 0.1 0.2 0.1 0.1 0.1 0.2 0.1 0.2 0.1 0.2 dongle=W nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=95ms | lock 19s after rail-on | episode 33s 44 mC
+h3 L=8.0s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.7 0.1 0.7 0.7 0.7 0.7 0.7 | dongle back 1.1s after rail-on | after return net mA/s: 0.1 0.1 0.1 0.1 0.1 0.1 0.0 0.2 0.1 0.2 0.0 0.0 dongle=W nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=75ms | lock 19s after rail-on | episode 38s 47 mC
+h3 L=30.0s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.7 0.0 0.7 0.7 0.7 0.7 0.7 0.8 0.7 0.7 0.7 0.7 0.7 0.7 0.7 0.7 0.7 0.8 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=78ms | lock 20s after rail-on | episode 60s 52 mC
+=== h3 done
+Y1 held L=2.5s: pre dongle=C net=3.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y1 held L=2.5s key@+5s: OK 30ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y1 held L=2.5s key@+15s: OK 31ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y1 held L=2.5s key@+30s: OK 92ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y1 held L=2.5s key@+45s: OK 31ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y1 held L=2.5s key@+60s: OK 92ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y2 rested L=2.5s: pre dongle=W net=0.1mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y2 rested L=2.5s key@+20s: FAIL(d0u0)  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+Y2 rested L=2.5s key@+30s: OK 30ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X3 held L=2.5s: pre dongle=C net=3.8mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X3 held L=2.5s key@+5s: FAIL(d0u0)  dongle=W net=0.0mA nucleo[AWAKE DISCONNECTED DISCONNECTED]
+F1 held L=2.5s: pre dongle=C net=3.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F1 held L=2.5s key@+5s: OK 78ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F1 held L=2.5s key@+15s: OK 51ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F1 held L=2.5s key@+30s: OK 31ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+=== drought ladder h5fix: H=5.0s L=[1.5, 2.5, 4.0, 8.0, 30.0]  dongle=W
+h5fix L=1.5s: path=SUPERVISION (ll_drop 2->3) | during outage net mA/s: 7.7 7.7 | dongle back 1.1s after rail-on | after return net mA/s: 0.2 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=78ms | lock 24s after rail-on | episode 37s 65 mC
+h5fix L=2.5s: path=SUPERVISION (ll_drop 3->4) | during outage net mA/s: 7.7 7.7 7.7 | dongle back 0.6s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=75ms | lock 24s after rail-on | episode 37s 65 mC
+h5fix L=4.0s: path=SUPERVISION (ll_drop 4->5) | during outage net mA/s: 7.7 7.7 7.7 1.0 | dongle back 0.6s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=75ms | lock 24s after rail-on | episode 38s 65 mC
+h5fix L=8.0s: path=SUPERVISION (ll_drop 5->6) | during outage net mA/s: 7.7 7.7 7.7 0.9 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 25s after rail-on | episode 43s 65 mC
+h5fix L=30.0s: path=SUPERVISION (ll_drop 6->7) | during outage net mA/s: 7.8 7.7 7.7 1.1 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 | dongle back 0.6s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key FAIL(downs=0 ups=0) | lock 24s after rail-on | episode 64s 66 mC
+=== h5fix done
+F2 held L=2.5s: pre dongle=C net=3.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F2 held L=2.5s key@+5s: OK 79ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F2 held L=2.5s key@+15s: OK 32ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+F2 held L=2.5s key@+30s: OK 90ms  dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+ABSENT: pre net=0.01mA nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+ABSENT: key with dongle absent -> net mA/s: 1.9 1.7 1.7 1.7 1.7 1.7 1.7 1.7 1.7 1.8 1.7 1.7 1.7 1.7 1.7 1.7 1.7 1.7 1.7 1.7 0.3 0.0 0.0 0.0 0.0 | nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+ABSENT: rail on, key@+8s: OK 79ms dongle=C net=7.5mA nucleo[AWAKE CONNECTED SLEEP_READY]
+D2a held8 PRE: ctrl[rf_state=0 sleep_entered=1897 wake_gpio=75 ll_drop=8 ll_hid_rx=146 ll_hid_tx=59 ll_hid_rx_down=29 ll_hid_tx_down=29 ll_hid_tx_done_down=29 ll_hid_fifo_drop=0] swd[rfd_hid_rx_down=1 rfd_hid_rx=2 usb_ep1_completions_down=1 usb_ep1_arms_down=1 usb_ep1_overwrites=0 usb_ep1_completions=18 usb_ep1_arms=18] dongle[connected_rx_count=0 rx_done=0 tx_done=0 len10_seen=0 rx_restart_handled=0 supervision_lapses=0 connected_promotes=0 persist_ok=0] nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+D2a held8: rail on; nucleo[ASLEEP DISCONNECTED DISCONNECTED] at +13s
+D2a held8 KEY1 @+17s: OK 80ms dongle=C net=7.5 | dongle diag delta over key: connected_promotes+1 rx_restart_handled+3120 supervision_lapses+0 rx_done+3119 tx_done+2 nucleo[AWAKE CONNECTED SLEEP_READY]
+D2a held8 after KEY1: ctrl delta ll_hid_rx_down+2 ll_hid_tx_down+2 ll_hid_tx_done_down+2 ll_hid_fifo_drop+0 ll_drop+1 wake_gpio+4 rf_state=3
+D2a held8 KEY2: OK 73ms dongle=C | dongle diag delta: connected_promotes+8 rx_restart_handled+5762 supervision_lapses+8 rx_done+5769 tx_done+0
+D2a held8 POST: ctrl delta(2 keys) ll_hid_rx_down+3 ll_hid_tx_down+3 ll_hid_tx_done_down+3 ll_hid_fifo_drop+0 ll_drop+1 | dongle SWD delta rfd_hid_rx_down+1 rfd_hid_rx+2 usb_ep1_completions_down+1 usb_ep1_arms_down+1 usb_ep1_overwrites+0 usb_ep1_completions+2 usb_ep1_arms+2
+D2b rested PRE: ctrl[rf_state=0 sleep_entered=1955 wake_gpio=83 ll_drop=9 ll_hid_rx=158 ll_hid_tx=65 ll_hid_rx_down=32 ll_hid_tx_down=32 ll_hid_tx_done_down=32 ll_hid_fifo_drop=0] swd[rfd_hid_rx_down=0 rfd_hid_rx=0 usb_ep1_completions_down=0 usb_ep1_arms_down=0 usb_ep1_overwrites=0 usb_ep1_completions=8 usb_ep1_arms=8] dongle[connected_rx_count=0 rx_done=0 tx_done=0 len10_seen=0 rx_restart_handled=0 supervision_lapses=0 connected_promotes=0 persist_ok=0] nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+D2b rested KEY1 @+23s: OK 78ms dongle=C net=7.5 | dongle diag delta over key: connected_promotes+1 rx_restart_handled+3216 supervision_lapses+0 rx_done+3215 tx_done+2 nucleo[AWAKE CONNECTED SLEEP_READY]
+D2b rested after KEY1: ctrl delta ll_hid_rx_down+1 ll_hid_tx_down+1 ll_hid_tx_done_down+1 ll_hid_fifo_drop+0 ll_drop+0 wake_gpio+2 rf_state=3
+D2b rested KEY2: OK 50ms dongle=C | dongle diag delta: connected_promotes+8 rx_restart_handled+5742 supervision_lapses+8 rx_done+5750 tx_done+0
+D2b rested POST: ctrl delta(2 keys) ll_hid_rx_down+2 ll_hid_tx_down+2 ll_hid_tx_done_down+2 ll_hid_fifo_drop+0 ll_drop+0 | dongle SWD delta rfd_hid_rx_down+2 rfd_hid_rx+4 usb_ep1_completions_down+2 usb_ep1_arms_down+2 usb_ep1_overwrites+0 usb_ep1_completions+12 usb_ep1_arms+12
+D2c PRE: nucleo[ASLEEP DISCONNECTED DISCONNECTED] ctrl[rf_state=0 sleep_entered=2017 wake_gpio=89 ll_drop=9 ll_hid_rx=165 ll_hid_tx=69 ll_hid_rx_down=34 ll_hid_tx_down=34 ll_hid_tx_done_down=34 ll_hid_fifo_drop=0]
+D2c: dongle back, diag[connected_rx_count=0 rx_done=0 tx_done=0 len10_seen=0 len10_accept_known=0 len10_accept_fresh=0 len10_rejected=0 len10_ev10_seen=0 pair_ack_posted=0 pair_ack_tx_done=0 rx_restart_handled=0 supervision_lapses=0 ev10_entries=0 ev10_giveups=0 ev10_ack_tx=0 connected_promotes=0 fresh_relistens=0 bootwin_closes=0 confirm_armed=0 confirm_to_waitrx=0 confirm_to_waitrearm=0 persist_attempts=0 persist_ok=0] at +3s
+D2c K1 @+8s: OK 77ms dongle=C | dongle diag delta connected_promotes+1 rx_restart_handled+3187 supervision_lapses+0 len10_seen+1 len10_accept_known+1 len10_ev10_seen+0 ev10_ack_tx+0 ev10_entries+0 pair_ack_posted+1 pair_ack_tx_done+2 confirm_armed+0 confirm_to_waitrx+0 persist_ok+0 bootwin_closes+1
+D2c after K1: ctrl delta ll_hid_rx_down+1 ll_hid_tx_down+1 ll_hid_tx_done_down+1 ll_hid_fifo_drop+0 ll_drop+0 rf_state=3
+D2c K2: OK 33ms dongle=C | dongle diag delta connected_promotes+8 rx_restart_handled+5785 supervision_lapses+8
+D2c POST: ctrl delta(2 keys) ll_hid_rx_down+2 ll_hid_tx_down+2 ll_hid_tx_done_down+2 ll_hid_fifo_drop+0 ll_drop+0 | dongle ABS since reset: rfd_hid_rx_down=2 rfd_hid_rx=4 usb_ep1_completions_down=2 usb_ep1_arms_down=2 usb_ep1_overwrites=0 usb_ep1_completions=20 usb_ep1_arms=20
+X5 rested L=2.5s: pre dongle=W net=0.1mA nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+X5 rested L=2.5s key@+5s: OK 75ms  dongle=C net=7.6mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X5 rested L=2.5s key@+15s: OK 54ms  dongle=C net=7.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X6 rested L=2.5s: pre dongle=W net=0.1mA nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+X6 rested L=2.5s key@+5s: OK 75ms  dongle=C net=7.6mA nucleo[AWAKE CONNECTED SLEEP_READY]
+X6 rested L=2.5s key@+15s: OK 50ms  dongle=C net=7.6mA nucleo[AWAKE CONNECTED SLEEP_READY]
+=== drought ladder h5x: H=5.0s L=[8.0, 30.0]  dongle=W
+h5x L=8.0s: path=SUPERVISION (ll_drop 9->10) | during outage net mA/s: 7.8 7.8 7.7 1.0 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=74ms | lock 24s after rail-on | episode 43s 65 mC
+h5x L=30.0s: path=SUPERVISION (ll_drop 10->11) | during outage net mA/s: 7.8 7.8 7.7 0.8 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=78ms | lock 25s after rail-on | episode 65s 65 mC
+=== h5x done
+=== drought ladder r1_cmain_dfix: H=5.0s L=[2.5, 8.0]  dongle=W
+r1_cmain_dfix L=2.5s: path=SUPERVISION (ll_drop 11->12) | during outage net mA/s: 7.8 7.8 7.8 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=78ms | lock 25s after rail-on | episode 38s 65 mC
+r1_cmain_dfix L=8.0s: path=SUPERVISION (ll_drop 12->13) | during outage net mA/s: 7.8 7.8 7.7 1.0 0.0 0.0 0.0 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0 dongle=W nucleo[ASLEEP DISCONNECTED DISCONNECTED] | next key OK lat=76ms | lock 25s after rail-on | episode 43s 65 mC
+=== r1_cmain_dfix done
+r3x rested L=2.5s: pre dongle=W net=0.1mA nucleo[ASLEEP DISCONNECTED DISCONNECTED]
+r3x rested L=2.5s key@+5s: OK 76ms  dongle=C net=7.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+r3x rested L=2.5s key@+15s: OK 51ms  dongle=C net=7.7mA nucleo[AWAKE CONNECTED SLEEP_READY]
+=== drought ladder v3s: H=3.0s L=[2.5]  dongle=W
+v3s L=2.5s: path=REST (ll_drop 0->0) | during outage net mA/s: 7.7 7.5 0.0 | dongle back 1.1s after rail-on | after return net mA/s: 0.1 0.1 0.2 0.1 0.1 0.0 0.1 0.1 0.1 0.1 0.1 0.1 dongle=W nucleo[AWAKE CONNECTED SLEEP_READY] | next key OK lat=34ms | lock 20s after rail-on | episode 33s 44 mC
+=== v3s done

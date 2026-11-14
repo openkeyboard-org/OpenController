@@ -1,21 +1,41 @@
-/* SPDX-License-Identifier: Apache-2.0
- * Copyright 2026 OpenController contributors
+/* Copyright 2026 Eric Molitor (EMulator)
+ * SPDX-License-Identifier: Apache-2.0
  *
  * OpenController keyboard wireless-module firmware for the WCH CH592F.
  *
  * This is intentionally a keyboard-module application, not a USB dongle:
- * UART1 is remapped to PB12/PB13 and speaks the wireless-module binary
- * command/status protocol used by the keyboard's host MCU.
+ * UART1 uses the selected board profile's pin mapping and speaks the
+ * wireless-module binary command/status protocol used by the keyboard's
+ * host MCU.
  */
 
 #include "CONFIG.h"
 #include "HAL.h"
 #include "keyboard_uart.h"
+#include "rtc_clock.h"
+#ifndef KBD_UART_DIAG_DUMP
+#define KBD_UART_DIAG_DUMP RF_DIAG_COUNTERS
+#endif
+#if KBD_UART_DIAG_DUMP
+#include "diag_dump.h"
+#endif
 #include "rf_task.h"
 #if KBD_CRYPT_BENCH_KEY
 #include "kbd_rf_crypt.h"   /* bench self-verify counters + latch */
 #endif
 #include "openboot_app.h"
+
+/* Run the core from the CH592's DC-DC converter instead of the LDO.
+ * Bench-measured 2026-09-02 at 5.03 mA vs 7.17 mA active (-29.8%), see the
+ * enabling commit. This is a board hardware claim owned by the board
+ * profile (boards/*.mk, validated at parse time): the board must populate
+ * the DC-DC inductor -- PWR_DCDCCfg only declines on silicon that cannot do
+ * DC-DC at all (ROM_CFG_ADR_HW bit 13), never on a board that simply lacks
+ * the part, and without the inductor the core supply collapses. The
+ * fallback below covers non-Makefile builds only. */
+#ifndef KBD_DCDC_ENABLE
+#define KBD_DCDC_ENABLE 1
+#endif
 
 __attribute__((aligned(4))) uint32_t MEM_BUF[BLE_MEMHEAP_SIZE / 4];
 
@@ -27,6 +47,38 @@ static uint8_t transport_is_2g4;
 
 /* Latched by the A6 81 UART command, acted on by OpenBoot_Service(). */
 static volatile uint8_t openboot_entry_pending;
+
+/* Main-loop stage marker for crash forensics (EXTRA_CFLAGS=-DKBD_IDLECB_FORENSICS=1
+ * on a KBD_DEEP_SLEEP build); compiles to nothing otherwise. */
+#ifndef KBD_IDLECB_FORENSICS
+#define KBD_IDLECB_FORENSICS 0
+#endif
+#if KBD_DEEP_SLEEP && KBD_IDLECB_FORENSICS
+#define LOOP_STAGE(n) PowerSleep_Stage(n)
+#else
+#define LOOP_STAGE(n) ((void)0)
+#endif
+
+#if KBD_DEEP_SLEEP
+#include "power_sleep.h"
+#if RF_DIAG_COUNTERS
+extern volatile uint16_t pwr_loop_passes;
+extern volatile uint8_t pwr_forensics_frozen;
+#endif
+/* Exported for the deep-sleep gate: a pending bootloader entry vetoes
+ * sleep (the update path expects a running main loop). */
+uint8_t OpenBoot_EntryPending(void)
+{
+    return openboot_entry_pending;
+}
+#if !KBD_SLEEP_BENCH_HOOK
+#include "sleep_protocol.h"
+/* MR6 explicit-sleep state: the A6 56 -> 5B 37 capability gate and the
+ * A6 54 deferred-sleep latch, serviced by Power_Service() below. Not the
+ * MR5 bench-hook build, which drives A6 54 to a fixed RTC diagnostic sleep. */
+static sleep_proto_t sleep_proto;
+#endif
+#endif
 
 /* Independent watchdog (WWDG): last-resort recovery for an unknown hang in
  * Main_Circulation. Reset-only -- the WWDG interrupt is left disabled because the
@@ -56,6 +108,30 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                               const uint8_t *payload, uint8_t len)
 {
     (void)len;
+
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+    /* MR6 sleep protocol runs FIRST so A1/A9/A6 frames cancel a pending
+     * sleep (they return early below). SEND_READY answers the A6 56 unlock;
+     * ARM/CANCEL only update sleep_proto, serviced in the main loop. */
+    switch (SleepProtocol_OnFrame(&sleep_proto, cmd, sub,
+                                  openboot_entry_pending)) {
+    case SLEEP_PROTO_SEND_READY:
+        KeyboardUart_SendStatus(SLEEP_PROTO_STATUS_READY);   /* 5B 37 92 */
+        break;
+    default:
+        break;
+    }
+    /* MR7: mirror the reducer's auto-sleep lifetime into the power module,
+     * and treat every accepted frame as host activity (holdoff restart). */
+    PowerSleep_SetAutosleep(sleep_proto.autosleep);
+    PowerSleep_NoteActivity();
+    /* A state-changing command also withdraws an explicit sleep request the
+     * power layer may already hold (Power_Service consumed the reducer's
+     * sleep_pending when it armed it), so it cannot fire later as a surprise. */
+    if (SleepProtocol_IsStateChanging(cmd, sub)) {
+        PowerSleep_CancelExplicit();
+    }
+#endif
 
     if (cmd == 0xA1) {
         RF_QueueHIDReport(payload);
@@ -150,6 +226,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x11: /* select USB */
         transport_is_2g4 = 0;
         RF_Disconnect();
+        RF_DropQueueUnlessReselected();
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x36);
         break;
@@ -168,6 +245,7 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
     case 0x33: /* select BT3 */
         transport_is_2g4 = 0;
         RF_Disconnect();
+        RF_DropQueueUnlessReselected();
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x36);
         KeyboardUart_SendStatus(0x23);
@@ -175,9 +253,18 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 
     case 0x51: /* pair current transport */
         if (transport_is_2g4) {
-            RF_EnterPairing();
-            KeyboardUart_SendStatus(0x31);
-            KeyboardUart_SendStatus(0x23);
+            if (!RF_IdentityValid()) {
+                KeyboardUart_SendStatus(0x36);
+                break;
+            }
+            if (RF_EnterPairing()) {
+                KeyboardUart_SendStatus(0x31);
+                KeyboardUart_SendStatus(0x23);
+            } else {
+                /* Ignored because the link is up: say so. A PAIRING reply
+                 * would have the host stop sending reports on a live link. */
+                KeyboardUart_SendStatus(0x32);
+            }
         }
         break;
 
@@ -198,14 +285,28 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         KeyboardUart_SendBattery(100);
         break;
 
-    case 0x54: /* sleep */
-    case 0x55: /* sleep-bt-en */
-    case 0x57: /* sleep-2g4-en */
+    case 0x54: /* sleep now (MR6). Real arming is done by the sleep-protocol
+                * reducer at the top of this function; here only the MR5
+                * bench build diverts A6 54 to its fixed RTC diagnostic. */
+#if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
+        PowerSleep_BenchRequest();
+#endif
+        break;
+    case 0x55: /* sleep-bt-en: reserved BT twin of the 2.4G sleep path;
+                * no BT transport in this firmware, ACK-only (parser already
+                * sent 61 0D 0A). */
+    case 0x57: /* sleep-2g4-en (stock: enable auto-sleep on 2.4G). MR7 arms
+                * auto-sleep in the reducer above -- behind the A6 56 gate, so
+                * a legacy host's bare A6 57 stays a no-op. Nothing to do here. */
     case 0x62: /* factory BT pair */
         break;
 
     case 0x63: /* factory 2.4G pair */
         transport_is_2g4 = 1;
+        if (!RF_IdentityValid()) {
+            KeyboardUart_SendStatus(0x36);
+            break;
+        }
         RF_Disconnect();
         if (!RF_ClearBond()) {
             KeyboardUart_SendStatus(0x36);   /* stale bond survives; do not pair */
@@ -216,8 +317,26 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         KeyboardUart_SendStatus(0x23);
         break;
 
+    case 0x58: /* host-wake capability query (OpenController extension). Only
+                * a KBD_HOST_WAKE build answers, with 5B 38; the host treats a
+                * bare ACK as "no host wake" and never sleeps behind it. Inert
+                * to the sleep protocol, like every unrecognised A6 sub. */
+#if KBD_HOST_WAKE
+        KeyboardUart_SendStatus(0x38);
+#endif
+        break;
+
     case 0x70: /* version: stock firmwareB often ACKs only */
         break;
+
+#if KBD_UART_DIAG_DUMP
+    case 0x71: /* diag dump (OpenController bench extension): 5D <len> ... */
+        DiagDump_Send();
+        break;
+    case 0x72: /* diag zero (OpenController bench extension): ACK only */
+        DiagDump_Zero();
+        break;
+#endif
 
     case 0x81: /* OTA mode -> enter the OpenBoot bootloader.
                 * Latch only; OpenBoot_Service() acts from the main loop so
@@ -241,8 +360,10 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
  *             lose the bond; RF_Disconnect() clears the pending flag), then
  *             RF_Disconnect(): TMR0 stopped, RF tasks stopped, RF_Shut;
  *   DRAIN   — wait for the frame's 61 0D 0A ACK to physically leave the
- *             UART (bounded ~20 ms wall clock: a host not draining must
- *             not block the update);
+ *             UART (bounded ~20 ms on RTC32K, see rtc_clock.h: a host not
+ *             draining must not block the update). Host-wake frames still
+ *             queued are not waited for: nothing may stand between the
+ *             host and an update, and the reset drops CHWAKE anyway;
  * then mask global IRQs (CSR 0x800, same idiom as rf_task's critical
  * sections — nothing may re-arm the radio past this point) and enter the
  * bootloader via openboot_request_update() (writes OB_BOOTREQ_MAGIC to the
@@ -259,13 +380,13 @@ static void OpenBoot_Service(void)
         }
         RF_FlushBondSave();
         RF_Disconnect();
-        svc_start = SYS_GetSysTickCnt();
+        svc_start = RtcClock_Now();
         svc_state = 1;
         return;
     default:
-        if (!KeyboardUart_TxIdle()
-                && (uint32_t)(SYS_GetSysTickCnt() - svc_start)
-                       < (GetSysClock() / 50u)) {   /* ~20 ms */
+        if (!KeyboardUart_FifoIdle()
+                && (uint32_t)(RtcClock_Now() - svc_start)
+                       < RTC_CLOCK_TICKS_US(20000u)) {
             return;
         }
         __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
@@ -273,16 +394,258 @@ static void OpenBoot_Service(void)
     }
 }
 
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+/* MR6 explicit-sleep service, mirroring OpenBoot_Service's latch-and-defer.
+ * A6 54 (via the reducer) sets sleep_proto.sleep_pending; this drains TX,
+ * tears the link down (sleep => disconnect, the ladder's locked rule) and
+ * enters one GPIO-wake deep sleep. OTA always wins: OpenBoot_Service runs
+ * before this and the checks below defer to a pending entry. On a TX-drain
+ * timeout we ABORT and stay awake rather than sleep with the A6 54 ACK
+ * unsent. Runs after OpenBoot_Service in Main_Circulation. */
+static void Power_Service(void)
+{
+    static uint8_t  svc_state;
+    static uint32_t svc_start;
+
+    switch (svc_state) {
+    case 0:
+        if (!sleep_proto.sleep_pending) {
+            return;
+        }
+        if (openboot_entry_pending) {
+            sleep_proto.sleep_pending = 0;
+            return;
+        }
+        svc_start = RtcClock_Now();
+        svc_state = 1;
+        return;
+    default:
+        /* A meaningful frame in the meantime cleared sleep_pending (reducer);
+         * OTA still wins. Either way, stand down. */
+        if (!sleep_proto.sleep_pending || openboot_entry_pending) {
+            sleep_proto.sleep_pending = 0;
+            svc_state = 0;
+            return;
+        }
+        /* TX includes host-wake frames: the module must not sleep with one
+         * unanswered, so the bound allows the whole backlog to finish (each
+         * frame is itself bounded) on top of the ~20 ms FIFO drain. This is a
+         * main-loop state, not a busy wait. */
+        if (!KeyboardUart_TxIdle()) {
+            if ((uint32_t)(RtcClock_Now() - svc_start)
+                    < RTC_CLOCK_TICKS_US(20000u + KBD_HOST_WAKE_BACKLOG_MAX_US)) {
+                return;                          /* keep draining */
+            }
+            sleep_proto.sleep_pending = 0;       /* host not draining: abort */
+            svc_state = 0;
+            return;
+        }
+        sleep_proto.sleep_pending = 0;
+        svc_state = 0;
+        RF_FlushBondSave();
+        RF_Disconnect();
+        PowerSleep_RequestExplicit();   /* performed by the TMOS idle callback */
+        return;
+    }
+}
+#endif
+
+#if KBD_IDLE_WFI
+/* Idle-state WFI (power ladder MR2). Heartbeat: WWDG counts whenever Fsys
+ * runs -- idle mode included -- so an idle keyboard with no UART traffic
+ * and no other IRQ must still wake inside the ~559 ms watchdog window to
+ * feed it. 200 ms leaves >2x margin. TMR3 is raw-register one-purpose use,
+ * mirroring rf_task's TMR0 idiom; the later clock-gating rung must never
+ * gate TMR3 for this reason. The handler only clears the flag: waking IS
+ * the point. */
+static void heartbeat_set(uint32_t cnt_end)
+{
+    R8_TMR3_CTRL_MOD = RB_TMR_ALL_CLEAR;
+    R32_TMR3_CNT_END = cnt_end;
+    R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
+    R8_TMR3_INTER_EN = RB_TMR_IE_CYC_END;
+    R8_TMR3_CTRL_MOD = RB_TMR_COUNT_EN;
+}
+static void heartbeat_init(void)
+{
+    heartbeat_set(GetSysClock() / 5u);   /* 200 ms */
+    PFIC_EnableIRQ(TMR3_IRQn);
+}
+#if KBD_REST
+/* Resting policy: between probes the core idles here, and TMOS timers are only
+ * serviced when something wakes the loop. A 200 ms heartbeat would deliver the
+ * probe timer up to 200 ms late, outside the dongle's 45 ms phase lead, so rest
+ * runs a 4 ms heartbeat (~250 wakes/s, negligible) and the normal period returns
+ * with the session. Gated on stage-1 probing actually being scheduled: stage 2
+ * probes nothing, so the fast heartbeat would be pure wake overhead there. */
+static void heartbeat_follow_rf_state(void)
+{
+    static uint8_t fast;
+    uint8_t want = (uint8_t)(RF_GetState() == RF_STATE_RESTING && RF_RestProbing());
+    if (want != fast) {
+        fast = want;
+        heartbeat_set(want ? GetSysClock() / 250u : GetSysClock() / 5u);
+    }
+}
+#endif
+
+__INTERRUPT
+__HIGH_CODE
+void TMR3_IRQHandler(void)
+{
+    R8_TMR3_INT_FLAG = RB_TMR_IF_CYC_END;
+}
+
+#ifndef KBD_SLEEP_BENCH_HOOK
+#define KBD_SLEEP_BENCH_HOOK 0
+#endif
+#ifndef RF_DIAG_COUNTERS
+#define RF_DIAG_COUNTERS 1
+#endif
+#if RF_DIAG_COUNTERS
+/* .diag_safe.power: the linker collects subsections AFTER every exact-name
+ * .diag_safe section, so power counters never shift the legacy rf_task/
+ * keyboard_uart counter addresses bench scripts read by absolute address
+ * (guarded by an ASSERT in ch592f.ld). NOLOAD: zeroed in main(). */
+volatile uint32_t pwr_wfi_count
+    __attribute__((section(".diag_safe.power")));
+#if KBD_DEEP_SLEEP
+extern volatile uint8_t pwr_forensics_frozen;
+#define PWR_DIAG_INC(x) do { if (!pwr_forensics_frozen) { (x)++; } } while (0)
+#else
+#define PWR_DIAG_INC(x) do { (x)++; } while (0)
+#endif
+#else
+#define PWR_DIAG_INC(x) do { } while (0)
+#endif
+#endif /* KBD_IDLE_WFI */
+
+#if KBD_IDLE_WFI
+/* Idle via WFE (WFI reinterpreted as wait-for-event, SCTLR WFITOWFE bit 3)
+ * with SEVONPEND (bit 4), NOT a masked WFI: a WFI entered with the global-IRQ
+ * CSR masked never wakes on a pending source on this silicon -- the masked
+ * WFI slept to the WWDG reset and reboot-looped (~1 boot/2.7 s; this also
+ * invalidated the first "1.75 mA idle" figure, which was that loop's
+ * average). Under SEVONPEND an interrupt going pending is a wake event even
+ * while global delivery stays masked.
+ *
+ * The split into arm-drain / sleep is load-bearing, not stylistic. SEVONPEND
+ * on this core only latches a NEW pending edge; a source ALREADY pending when
+ * SEVONPEND is enabled generates no event. So the stale-event drain (the
+ * self-SEV + WFE that the SDK __WFE folds together) must run BEFORE the final
+ * wake-source check, not after it: otherwise a UART byte or TMR3 heartbeat
+ * that pends in the window between the check and the drain is neither seen by
+ * the check nor edge-detected by SEVONPEND, and the real WFE can sleep past
+ * it to the WWDG reset (a TMR3 cycle-end is the dangerous case -- its RW1
+ * flag stays set with the ISR masked, so it produces no later edge). This
+ * ordering was the adversarial-review blocker on the single-function form.
+ *
+ * Sequence (all under the caller's CSR-0x800 mask):
+ *   idle_arm_and_drain(): arm WFE+SEVONPEND, self-SEV, one WFE -> latch clean
+ *   caller re-checks every wake source, INCLUDING the TMR3 flag, with
+ *     SEVONPEND now live: anything already pending is caught here; anything
+ *     that pends later is a fresh edge the real WFE below catches.
+ *   idle_sleep_once(): flash off (until next fetch), one real WFE.
+ *   idle_disarm(): clear WFE+SEVONPEND. */
+__HIGH_CODE
+static void idle_arm_and_drain(void)
+{
+    PFIC->SCTLR &= ~(1u << 2);                        /* sleep, not deep */
+    PFIC->SCTLR |= (1u << 4) | (1u << 3) | (1u << 5); /* SEVONPEND|WFE|SEV */
+    __asm__ volatile ("wfi");                         /* self-SEV -> drains */
+    PFIC->SCTLR |= (1u << 3);                         /* re-arm WFE mode */
+}
+
+__HIGH_CODE
+static void idle_sleep_once(void)
+{
+    FLASH_ROM_SW_RESET();
+    R8_FLASH_CTRL = 0x04;                             /* flash off til fetch */
+    __asm__ volatile ("wfi");                         /* real wait */
+}
+
+__HIGH_CODE
+static void idle_disarm(void)
+{
+    PFIC->SCTLR &= ~((1u << 4) | (1u << 3));
+}
+#endif
+
 __HIGH_CODE
 __attribute__((noinline))
 void Main_Circulation(void)
 {
     while (1) {
-        TMOS_SystemProcess();
-        RF_ConnectedTick();
-        KeyboardUart_Poll();
-        OpenBoot_Service();
+        LOOP_STAGE(1); TMOS_SystemProcess();
+        LOOP_STAGE(2); RF_ConnectedTick();
+        LOOP_STAGE(3); KeyboardUart_Poll();
+        KeyboardUart_Service();
+        if (KeyboardUart_TakeLedLost()) {
+            RF_LedResync();
+        }
+        LOOP_STAGE(4); OpenBoot_Service();
+#if KBD_DEEP_SLEEP && KBD_SLEEP_BENCH_HOOK
+        PowerSleep_BenchService();
+#endif
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+        LOOP_STAGE(5); Power_Service();
+#endif
         WATCHDOG_FEED();
+#if KBD_DEEP_SLEEP && RF_DIAG_COUNTERS
+        if (!pwr_forensics_frozen) { pwr_loop_passes++; }   /* liveness for the diag dump */
+#endif
+        LOOP_STAGE(6);
+#if KBD_IDLE_WFI
+        /* Idle the core only in RF_STATE_IDLE (and RESTING, radio off between
+         * probes, with the fast heartbeat above): TMOS scheduling and the hop
+         * servo are POLL-driven, so PAIRING (20 ms beacon cadence) and
+         * CONNECTED (~875 us hop grid) must keep spinning. rf_state only
+         * changes in main-loop context (TMOS handlers), so it needs no
+         * re-check below. */
+#if KBD_REST
+        heartbeat_follow_rf_state();
+#endif
+        if ((RF_GetState() == RF_STATE_IDLE || RF_GetState() == RF_STATE_RESTING)
+                && !openboot_entry_pending
+                && KeyboardUart_HostWakeIdle()  /* guard and ACK waits are polled */
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+                && !sleep_proto.sleep_pending   /* let Power_Service run */
+                && !PowerSleep_SleepPending()   /* idleCB owes a deep sleep */
+#endif
+                && KeyboardUart_RxQuiet()) {
+            uint32_t irq_state;
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+            /* Deep sleep (explicit or armed auto-sleep) is performed by the TMOS
+             * idle callback so the BLE library is told about it; this shallow
+             * WFE only runs when that callback declined this pass. */
+            LOOP_STAGE(7);
+#endif
+            /* Global-mask critical section (CSR 0x800 MPIE|MIE, rf_task.c
+             * idiom). Under the mask: drain any stale event FIRST, then
+             * re-check every wake source with SEVONPEND live, then sleep.
+             * The re-check covers the ring/FIFO (a byte that pended before
+             * the mask), OpenBoot, and the TMR3 heartbeat flag -- its ISR
+             * cannot run while masked, so a heartbeat that already pended
+             * would be an edge-less source the WFE could sleep past to the
+             * WWDG reset. A source that pends AFTER this check is a fresh
+             * edge the WFE catches. Woken handlers run at the csrrs. */
+            __asm volatile ("csrrc %0, 0x800, %1"
+                            : "=r"(irq_state) : "r"(0x88) : "memory");
+            idle_arm_and_drain();
+            if (KeyboardUart_RxQuiet() && R8_UART1_RFC == 0
+                    && !openboot_entry_pending
+                    && (R8_TMR3_INT_FLAG & RB_TMR_IF_CYC_END) == 0) {
+                WATCHDOG_FEED();
+                PWR_DIAG_INC(pwr_wfi_count);
+                LOOP_STAGE(9);
+                idle_sleep_once();
+                LOOP_STAGE(10);
+            }
+            idle_disarm();
+            __asm volatile ("csrrs zero, 0x800, %0"
+                            :: "r"(irq_state & 0x88) : "memory");
+        }
+#endif
     }
 }
 
@@ -294,8 +657,29 @@ void Main_Circulation(void)
 int main(void)
 {
     BOOT_PHASE(0xA0);
+#if KBD_DCDC_ENABLE
+    /* Ahead of SetSysClock, matching WCH's own BLE examples: the switch is a
+     * supply transient, and taking it while the core still runs from the
+     * reset-default clock keeps it away from the PLL. Requires the board to
+     * populate the DC-DC inductor (board profile knob) -- PWR_DCDCCfg only
+     * declines on silicon that cannot do DC-DC at all (ROM_CFG_ADR_HW bit
+     * 13), never on a board that simply lacks the part. */
+    PWR_DCDCCfg(ENABLE);
+#endif
     SetSysClock(CLK_SOURCE_PLL_60MHz);
     BOOT_PHASE(0xA1);
+
+    /* Park every pin as a pulled-up input before any peripheral claims its
+     * own (WCH's own examples do the same ahead of low-power use): a
+     * floating CMOS input can sit mid-rail and burn crossbar current
+     * continuously. KeyboardUart_Init re-claims the UART pins immediately
+     * below. PB13 is excluded from the park: on the MK65MX profile it is
+     * CHWAKE, pulled down at the keyboard host and driven by this module
+     * only in a KBD_HOST_WAKE build, so it must never be biased even
+     * transiently (review finding); on the remap profile it is this
+     * firmware's own TX pin and is driven high a few lines down. */
+    GPIOA_ModeCfg(GPIO_Pin_All, GPIO_ModeIN_PU);
+    GPIOB_ModeCfg(GPIO_Pin_All & ~bTXD1_, GPIO_ModeIN_PU);
 
     KeyboardUart_Init();
     KeyboardUart_SetFrameCallback(handle_uart_frame);
@@ -317,6 +701,32 @@ int main(void)
     BOOT_PHASE(0xA3);
     HAL_Init();
     BOOT_PHASE(0xA4);
+
+    /* Power ladder MR3: mark every unused peripheral's clock for gating in
+     * R32_SLEEP_CONTROL. Semantics note (inverted API): DISABLE *sets* the
+     * SLP_CLK bits = clock off while the core sleeps -- and per CH592
+     * datasheet section 5.3 that includes Idle (SLEEPDEEP=0, WFI/WFE), so
+     * with the WFE idle from the previous rung this should show up as an
+     * S2 idle delta; awake current is unchanged. Never gate: TMR0
+     * (connected-mode turnaround one-shot), TMR3 (WFE watchdog heartbeat),
+     * UART1 (host link + wake source), BLE (radio). I2C and LCD have no
+     * BIT_SLP_CLK_* convenience macros but their SFR-level byte-1 bits
+     * exist and both peripherals are unused (review finding) -- gated via
+     * the shifted RB_ forms. SPI1's documented bit position (0x0200) is
+     * deliberately NOT set: the CH592 headers comment the SPI1 peripheral
+     * out (not present on this part), and poking a bit the headers refuse
+     * to name buys nothing measurable. */
+#if (RB_SLP_CLK_I2C | RB_SLP_CLK_LCD) > 0xFF
+#error "RB_SLP_CLK_I2C/LCD must be byte-local masks for the <<8 shift below"
+#endif
+    PWR_PeriphClkCfg(DISABLE,
+                     BIT_SLP_CLK_TMR1 | BIT_SLP_CLK_TMR2
+                     | BIT_SLP_CLK_UART0 | BIT_SLP_CLK_UART2
+                     | BIT_SLP_CLK_UART3 | BIT_SLP_CLK_SPI0
+                     | BIT_SLP_CLK_PWMX | BIT_SLP_CLK_USB
+                     | (uint16_t)((uint16_t)(RB_SLP_CLK_I2C
+                                             | RB_SLP_CLK_LCD) << 8));
+
     RF_RoleInit();
     BOOT_PHASE(0xA5);
 
@@ -332,12 +742,31 @@ int main(void)
 
     RF_TaskInit();
     BOOT_PHASE(0xA6);
-    if (RF_HasBond()) {
+    if (RF_HasBond() && RF_IdentityValid()) {
         transport_is_2g4 = 1;
         KeyboardUart_SendStatus(0x34);
         KeyboardUart_SendStatus(0x35);
     }
     watchdog_init();
+#if KBD_DEEP_SLEEP && !KBD_SLEEP_BENCH_HOOK
+    SleepProtocol_Reset(&sleep_proto);   /* boot-scoped: unlock starts cleared */
+#endif
+#if KBD_IDLE_WFI
+#if RF_DIAG_COUNTERS
+    /* .diag_safe.power is NOLOAD; startup never clears it. Deep-sleep builds
+     * keep it across a WATCHDOG boot (forensic record, see power_sleep.c). */
+#if KBD_DEEP_SLEEP && KBD_UART_DIAG_DUMP
+    /* Keep the pre-crash value across a WATCHDOG boot ONLY when a UART dump can
+     * read and thaw it; otherwise nothing consumes the frozen record. */
+    if (((*(volatile uint8_t *)0x20005801u) & 0x07u) != 0x02u) {
+        pwr_wfi_count = 0;
+    }
+#else
+    pwr_wfi_count = 0;
+#endif
+#endif
+    heartbeat_init();
+#endif
     BOOT_PHASE(0xA7);
     Main_Circulation();
 }
