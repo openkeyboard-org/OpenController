@@ -839,3 +839,40 @@ out:
     kbd_crypt_release();
 }
 #endif /* KBD_CRYPT_BENCH_KEY */
+
+#if KBD_KEX
+/* kex_kdf.h port hooks. Every block is computed twice and compared, with a
+ * bounded retry: the exchange's CMACs run in task context beside the radio,
+ * exactly where the engine can return a preempted block's stale output (the
+ * reason seal_begin double-computes). Setting the key replaces the engine's
+ * key; the caller reinstalls the link key when the exchange ends. */
+int kex_aes_set_key(const uint8_t key[16])
+{
+    hal_aes_set_key(key);
+    return 0;
+}
+
+int kex_aes_block(const uint8_t in[16], uint8_t out[16])
+{
+    uint8_t inb[16], chk[16];
+    uint8_t attempt, i, diff;
+
+    for (i = 0; i < 16u; i++) {
+        inb[i] = in[i];
+    }
+    for (attempt = 0u; attempt < 3u; attempt++) {
+        if (hal_aes_encrypt_block(inb, out) != HAL_AES_OK
+            || hal_aes_encrypt_block(inb, chk) != HAL_AES_OK) {
+            return 1;
+        }
+        diff = 0u;
+        for (i = 0; i < 16u; i++) {
+            diff |= (uint8_t)(out[i] ^ chk[i]);
+        }
+        if (diff == 0u) {
+            return 0;
+        }
+    }
+    return 1;
+}
+#endif

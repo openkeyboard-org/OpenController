@@ -228,6 +228,21 @@ SECTIONS
            || _diag_safe_legacy_end == _diag_safe_start,
            "legacy .diag_safe counters moved - bench absolute addresses broken")
 
+    /* Uninitialised working storage in the span between the diag window and
+     * the stack, which nothing else uses (0x20005A00..0x20005FF0 in a build
+     * without the Bluetooth sections). NOLOAD and never zeroed by startup:
+     * only state that its owner initialises before every use belongs here
+     * (the link-key exchange context: kex_start/kex_reset write all of it). */
+    .scratch_hi (NOLOAD) :
+    {
+        . = ALIGN(4);
+        PROVIDE( _scratch_hi_start = . );
+        *(.scratch_hi)
+        *(.scratch_hi.*)
+        . = ALIGN(4);
+        PROVIDE( _scratch_hi_end = . );
+    } >RAM
+
     .stack ORIGIN(RAM) + LENGTH(RAM) - __stack_size :
     {
         PROVIDE( _heap_end = . );

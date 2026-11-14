@@ -441,6 +441,19 @@ CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
 # controller, where the 0xAE bench command cannot be sent from a probe.
 KBD_CRYPT_BENCH_FORCE_KEY ?= 0
 CFLAGS += -DKBD_CRYPT_BENCH_FORCE_KEY=$(KBD_CRYPT_BENCH_FORCE_KEY)
+# Negotiate the link key over the air after pairing (X25519 + AES-CMAC; the
+# dongle starts it, see rf_task.c "link-key exchange"). X25519_RAM selects
+# X25519_ARITH_IN_RAM (x25519.c): how much of the field arithmetic runs from
+# SRAM. The three kex sources are byte-for-byte copies of OpenDongle's.
+KBD_KEX ?= 0
+X25519_RAM ?= 2
+CFLAGS += -DKBD_KEX=$(KBD_KEX)
+ifeq ($(KBD_KEX),1)
+ifneq ($(KBD_RF_CRYPT),1)
+$(error KBD_KEX=1 needs KBD_RF_CRYPT=1)
+endif
+CFLAGS += -DX25519_ARITH_IN_RAM=$(X25519_RAM)
+endif
 ifeq ($(KBD_CRYPT_BENCH_FORCE_KEY),1)
 ifneq ($(KBD_RF_CRYPT),1)
 $(error KBD_CRYPT_BENCH_FORCE_KEY=1 needs KBD_RF_CRYPT=1)
@@ -587,6 +600,9 @@ else
 $(error KBD_AES_BACKEND must be hw or sw, got '$(KBD_AES_BACKEND)')
 endif
 APP_SRC += src/kbd_rf_crypt.c
+ifeq ($(KBD_KEX),1)
+APP_SRC += src/x25519.c src/kex_kdf.c src/kex_proto.c
+endif
 endif
 
 # Source files - SDK startup

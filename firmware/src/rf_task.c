@@ -438,6 +438,57 @@ static volatile uint8_t hid_last_acked[8];
  * for retirement: if that head were lost, the keepalive's late ack would
  * retire it. Cleared when the phase advances (RX ISR) and at connect. */
 static volatile uint8_t crypt_phase_tainted;
+#if KBD_KEX
+/* ---------------------------------------------------------- link-key exchange
+ *
+ * The dongle starts it after a fresh pair (its first PUB fragment is the only
+ * signal); this end answers. kex_proto.c is the protocol; here is the glue:
+ *   - the RX ISR copies a received exchange frame into a one-frame buffer;
+ *   - a third work latch (task context) feeds it to the protocol, runs a few
+ *     steps of arithmetic, and stages the next frame to send;
+ *   - the response path sends a staged frame in place of the poll response,
+ *     and while an exchange is running sends NO report: queued reports wait
+ *     in the report queue rather than going out in the clear;
+ *   - when the dongle's confirmation verifies, the new key is installed in
+ *     RAM only (a "candidate"), and written to the bond when the first
+ *     session the dongle announces under it verifies. If that never comes
+ *     the candidate is dropped and the previous state restored.
+ *
+ * PRIVATE KEY: no hardware random source. The pool collects SysTick at every
+ * connected RX re-arm (the poll's arrival time on the dongle's crystal,
+ * measured on ours), and a key is drawn only after KBD_KEX_ENTROPY_SAMPLES of
+ * them, conditioned through AES-CMAC with the chip's unique ID. What a sample
+ * is really worth is NOT measured. */
+#include "kex_proto.h"
+
+/* Upper bound on steps per slot. The real limit is the next poll: the loop
+ * stops the moment one arrives (response_pending), so a step can delay a
+ * response by at most its own length. */
+#ifndef KBD_KEX_STEPS_PER_POLL
+#define KBD_KEX_STEPS_PER_POLL   12u
+#endif
+#define KBD_KEX_ENTROPY_SAMPLES  1024u
+#define KBD_KEX_TIMEOUT_POLLS    6860u     /* about 6 s of 875 us poll slots */
+
+/* In .scratch_hi (ld/ch592f.ld): unused SRAM above the diag window, never
+ * zeroed at startup. Safe here because nothing reads it unless kex_active,
+ * and kex_start() writes the whole context before that is set. */
+static kex_t            kex __attribute__((section(".scratch_hi")));
+static volatile uint8_t kex_active;        /* an exchange (or its candidate) is live */
+static volatile uint8_t kex_candidate;     /* new key in RAM, not yet in the bond    */
+static volatile uint8_t kex_rx_buf[KEX_PAYLOAD_BYTES];
+static volatile uint8_t kex_rx_pending;
+static volatile uint8_t kex_tx_buf[KEX_PAYLOAD_BYTES];
+static volatile uint8_t kex_tx_valid;
+static volatile uint16_t kex_polls;
+static volatile uint8_t crypt_work_kex;
+static uint8_t          kex_committing;    /* the bond save in progress may write the key */
+static uint32_t         kex_pool[8];
+static uint16_t         kex_samples;
+static uint8_t          kex_pool_at;
+/* Bench visibility, read with the crypto counters. */
+volatile uint8_t kbd_kex_starts, kbd_kex_done, kbd_kex_last_fail;
+#endif
 
 #else
 static uint8_t tx_payload[10];
@@ -906,6 +957,245 @@ __attribute__((always_inline)) static inline void rf_crypt_post_arm(void)
     crypt_work_arm = 1u;
     rf_set_event_atomic(RF_EVT_WAKE);
 }
+#if KBD_KEX
+__attribute__((always_inline)) static inline void rf_kex_post_work(void)
+{
+    crypt_work_kex = 1u;
+    rf_set_event_atomic(RF_EVT_WAKE);
+}
+#endif
+
+#if KBD_KEX
+static uint32_t rf_crypt_ctr_start(void);
+static void rf_save_bond_to_flash(void);
+
+static void rf_kex_absorb(uint32_t s)
+{
+    uint8_t i = kex_pool_at;
+
+    kex_pool[i] = ((kex_pool[i] << 7) | (kex_pool[i] >> 25)) ^ s;
+    kex_pool[i] += kex_pool[(i + 3u) & 7u];
+    kex_pool_at = (uint8_t)((i + 1u) & 7u);
+    if (kex_samples < 0xFFFFu) {
+        kex_samples++;
+    }
+}
+
+/* Draw a private scalar and re-key the pool. Returns 0 on success. */
+static int rf_kex_draw(uint8_t priv[32])
+{
+    uint8_t key[16], msg[16u + 8u + 1u], next[32];
+    uint8_t uid[8] __attribute__((aligned(4))) = {0};
+    uint8_t i;
+    int rc;
+
+    GET_UNIQUE_ID(uid);
+    for (i = 0; i < 16u; i++) {
+        key[i] = (uint8_t)(kex_pool[i >> 2] >> (8u * (i & 3u)));
+        msg[i] = (uint8_t)(kex_pool[4u + (i >> 2)] >> (8u * (i & 3u)));
+    }
+    for (i = 0; i < 8u; i++) {
+        msg[16u + i] = uid[i];
+    }
+    msg[24] = 0u;
+    rc = kex_cmac(key, msg, sizeof(msg), &priv[0]);
+    msg[24] = 1u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &priv[16]);
+    msg[24] = 2u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[0]);
+    msg[24] = 3u;
+    rc |= kex_cmac(key, msg, sizeof(msg), &next[16]);
+    for (i = 0; i < 32u; i++) {
+        kex_pool[i >> 2] ^= (uint32_t)next[i] << (8u * (i & 3u));
+    }
+    kex_samples = 0u;
+    tmos_memset(key, 0, sizeof(key));
+    tmos_memset(msg, 0, sizeof(msg));
+    tmos_memset(next, 0, sizeof(next));
+    return rc;
+}
+
+/* End the exchange. An exchange only ever starts on a bond with NO link key
+ * (see rf_kex_service), so there is never an older key to put back: dropping
+ * an unconfirmed candidate returns the bond to keyless. */
+static void rf_kex_stop(uint8_t keep_candidate)
+{
+    if (kex_candidate && !keep_candidate) {
+        stored_bond_flags &= (uint8_t)~RF_BOND_FLAG_ENC_KEY;
+        tmos_memset(stored_link_key, 0, sizeof(stored_link_key));
+        kbd_crypt_end_session();
+        kbd_crypt_clear();
+    }
+    kex_candidate = 0;
+    kex_active = 0;
+    kex_tx_valid = 0;
+    kex_rx_pending = 0;
+    kex_reset(&kex);
+}
+
+/* The exchange's work latch (task context). */
+static void rf_kex_service(void)
+{
+    uint8_t frame[KEX_PAYLOAD_BYTES];
+    uint8_t have = 0;
+    kex_state_t st;
+
+    if (kex_rx_pending) {
+        for (uint8_t i = 0; i < KEX_PAYLOAD_BYTES; i++) {
+            frame[i] = kex_rx_buf[i];
+        }
+        kex_rx_pending = 0;            /* after the copy: the ISR may refill it */
+        have = 1;
+    }
+    if (rf_state != RF_STATE_CONNECTED) {
+        return;                        /* resumes, rewound, on the next connection */
+    }
+#if KBD_REST
+    /* An exchange in progress is activity: do not let the link rest under it. */
+    if (kex_active && (kex_polls & 0x3FFu) == 1u) {
+        rest_arm_idle();
+    }
+#endif
+    if (kex_candidate && have && (frame[0] >> 4) == KEX_MSG_PUB) {
+        /* The dongle is offering a public key again, which it only does on a
+         * bond with no key: it never committed the key we are holding as a
+         * candidate. Drop the candidate and answer the new exchange. (No
+         * report escapes in between: kex_active is set again below before
+         * this function returns, or the bond is keyless and was all along.) */
+        rf_kex_stop(0);
+    }
+    if (!kex_active) {
+        /* Only the dongle's public key starts an exchange, only with a full
+         * entropy pool, and ONLY on a bond that has no link key. A keyed bond
+         * never accepts a replacement key this way: the frames are not
+         * authenticated, so that would let anyone in radio range who can
+         * guess the session address install a key of their choosing. A new
+         * key for a keyed bond needs an unpair, which is a physical act. */
+        uint8_t priv[32], prefix[KEX_T_PREFIX_BYTES];
+
+        if (!have || (frame[0] >> 4) != KEX_MSG_PUB || !has_bond
+            || (stored_bond_flags & RF_BOND_FLAG_ENC_KEY)
+            || kex_samples < KBD_KEX_ENTROPY_SAMPLES) {
+            return;
+        }
+        if (rf_kex_draw(priv) != 0) {
+            kbd_kex_last_fail = (uint8_t)KEX_FAIL_ENGINE;
+            return;
+        }
+        for (uint8_t i = 0; i < KEX_T_PREFIX_BYTES; i++) {
+            prefix[i] = 0u;
+        }
+        prefix[0] = 'O'; prefix[1] = 'K'; prefix[2] = 'X'; prefix[3] = '1';
+        prefix[4] = 0xA6u; prefix[5] = 2u;
+        for (uint8_t i = 0; i < 6u; i++) {
+            prefix[6u + i] = keyboard_mac[i];
+            prefix[12u + i] = stored_dongle_mac[i];
+        }
+        kex_start(&kex, KEX_ROLE_KEYBOARD, priv, prefix, keyboard_mac, stored_dongle_mac);
+        tmos_memset(priv, 0, sizeof(priv));
+        kex_polls = 0;
+        kbd_kex_starts++;
+        kex_active = 1;
+    }
+    if (have) {
+        kex_rx(&kex, frame);
+    }
+    /* One step at a time, and stop as soon as the next poll has arrived: its
+     * response must not wait behind a batch of arithmetic. */
+    st = kex_state(&kex);
+    for (uint8_t n = 0; n < KBD_KEX_STEPS_PER_POLL && !response_pending; n++) {
+        st = kex_work(&kex, 1u);
+        if (st != KEX_KEYGEN && st != KEX_DH) {
+            break;                       /* nothing left to compute right now */
+        }
+    }
+    if (st == KEX_DONE && !kex_candidate) {
+        uint8_t lk[KBD_CRYPT_KEY_BYTES];
+
+        if (kex_take_link_key(&kex, lk) == 0) {
+            /* Candidate: usable now, durable only once a session verifies. */
+            for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
+                stored_link_key[i] = lk[i];
+            }
+            stored_bond_flags |= (uint8_t)(RF_BOND_FLAG_ENC_KEY | RF_BOND_FLAG_ENC_CAPABLE);
+            kbd_crypt_end_session();
+            kbd_crypt_install_key(stored_link_key, rf_crypt_ctr_start());
+            kex_candidate = 1;
+            kex_polls = 0;
+        }
+        tmos_memset(lk, 0, sizeof(lk));
+    } else if (st == KEX_FAILED) {
+        kbd_kex_last_fail = (uint8_t)kex_failure(&kex);
+        if (kex.abort_tx == 0u && !kex_tx_valid) {
+            rf_kex_stop(0);
+            return;
+        }
+    }
+    /* A running exchange times out. A CANDIDATE does not: only the dongle
+     * knows whether it committed, and dropping to plaintext on a timer would
+     * send reports in the clear to a dongle that may now require encryption.
+     * The candidate ends when a session verifies (commit), when the dongle
+     * offers a public key again (it did not commit; above), or on unpair. */
+    if (!kex_candidate && kex_polls >= KBD_KEX_TIMEOUT_POLLS) {
+        kbd_kex_last_fail = (uint8_t)KEX_FAIL_TIMEOUT;
+        kex_expire(&kex);
+    }
+    /* Stage the next frame for the response path, if it has taken the last --
+     * but only for one slot in four. An exchange frame is 11 bytes on air
+     * against the bare ack's 1, so its transmission ends about 80 us later and
+     * the receiver is re-armed that much later; sent in EVERY slot, the re-arm
+     * kept landing after the next poll had begun, polls were missed back to
+     * back, and the link lapsed (bench 2026-11-14: both ends were mid-way
+     * through the shared secret when it died). One long frame in four slots
+     * costs at most the poll that follows it. The exchange needs six
+     * fragments each way, so this adds a few milliseconds. */
+    if (!kex_tx_valid && (kex_polls & 3u) == 0u) {
+        uint8_t next[KEX_PAYLOAD_BYTES];
+
+        if ((kex_polls & 0x1Fu) == 0u) {
+            /* Status frame (message type 15, not part of the exchange): this
+             * module has no debug channel of its own on a keyboard, so about
+             * once every 32 slots it tells the dongle where it is, and
+             * `opendongle --crypt-diag` shows the last one received. Public
+             * state only: phase and counters, never key material. */
+            next[0] = (uint8_t)((15u << 4) | KEX_VERSION);
+            next[1] = (uint8_t)kex_state(&kex);
+            next[2] = (uint8_t)kex_failure(&kex);
+            next[3] = (uint8_t)((kex_candidate ? 1u : 0u) | (kex.keys_ready ? 2u : 0u)
+                                | (kex.peer_conf_ok ? 4u : 0u) | (kex.peer_pub_mask << 4));
+            next[4] = kex.x.phase;
+            next[5] = (uint8_t)kex.x.count;
+            next[6] = kex.x.op;
+            next[7] = kex.peer_conf_mask;
+            next[8] = (uint8_t)kbd_crypt_sess_ok;
+            for (uint8_t i = 0; i < KEX_PAYLOAD_BYTES; i++) {
+                kex_tx_buf[i] = next[i];
+            }
+            kex_tx_valid = 1;
+        } else if (kex_tx(&kex, next)) {
+            for (uint8_t i = 0; i < KEX_PAYLOAD_BYTES; i++) {
+                kex_tx_buf[i] = next[i];
+            }
+            kex_tx_valid = 1;
+        }
+    }
+}
+
+/* A session verified under the candidate key: the dongle holds it too. Make
+ * it durable and finish. */
+static void rf_kex_session_verified(void)
+{
+    if (!kex_candidate) {
+        return;
+    }
+    kex_committing = 1;
+    rf_save_bond_to_flash();
+    kex_committing = 0;
+    kbd_kex_done++;
+    kbd_kex_last_fail = 0;
+    rf_kex_stop(1);
+}
+#endif /* KBD_KEX */
 
 /* Seal the next uplink frame, and act on a failure instead of discarding it.
  *
@@ -1028,9 +1318,17 @@ static void rf_build_bond_record(rf_bond_record_t *rec)
     }
 #if KBD_RF_CRYPT
     rec->flags = stored_bond_flags;
+#if KBD_KEX
+    /* A candidate key is not durable. Any save that is not the candidate's
+     * own commit (the ordinary post-reconnect tuple save, for one) writes the
+     * bond as it durably is: keyless. */
+    if (kex_candidate && !kex_committing) {
+        rec->flags &= (uint8_t)~RF_BOND_FLAG_ENC_KEY;
+    }
+#endif
     /* Canonical form: no key provisioned => the field is zero, so a stale key
      * can never sit behind a cleared flag. */
-    if (stored_bond_flags & RF_BOND_FLAG_ENC_KEY) {
+    if (rec->flags & RF_BOND_FLAG_ENC_KEY) {
         for (uint8_t i = 0; i < KBD_CRYPT_KEY_BYTES; i++) {
             rec->link_key[i] = stored_link_key[i];
         }
@@ -1365,6 +1663,11 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                  * and verify in task context (hal_aes must not run in an ISR). */
                 && len != KBD_CRYPT_LEN_SESSION
 #endif
+#if KBD_KEX
+                /* Link-key exchange frames come in place of polls too. Only
+                 * the exact (length, tag) pair is let through. */
+                && !(len == KEX_FRAME_LEN && rxBuf[3] == KEX_TAG_DOWN)
+#endif
                 ) {
                 rf_set_event_atomic(RF_EVT_RX_RESTART);
                 return;
@@ -1461,6 +1764,17 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                 kbd_crypt_sess_rx++;
                 rf_crypt_post_session();
             }
+#if KBD_KEX
+            /* Link-key exchange frame: one-frame buffer, the task takes it.
+             * A frame arriving while one is waiting is dropped; the dongle
+             * repeats every fragment until it sees the answer. */
+            if (len == KEX_FRAME_LEN && rxBuf[3] == KEX_TAG_DOWN && !kex_rx_pending) {
+                for (uint8_t i = 0; i < KEX_PAYLOAD_BYTES; i++) {
+                    kex_rx_buf[i] = rxBuf[4 + i];
+                }
+                kex_rx_pending = 1;      /* taken after this slot's response */
+            }
+#endif
             /* Count every connected reception against the receiver's silence
              * guard; only a frame we actually authenticated resets it. */
             if (crypt_polls_since_auth < 0xFFu) {
@@ -1527,6 +1841,14 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
             crypt_arm_after_tx = 0u;
             rf_crypt_post_arm();
         }
+#if KBD_KEX
+        /* The exchange's work runs once per slot, after this transmission and
+         * (by event priority) after the receiver is re-armed -- never between
+         * a poll's arrival and its response. */
+        if (kex_active || kex_rx_pending) {
+            rf_kex_post_work();
+        }
+#endif
 #endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
@@ -1542,6 +1864,14 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
             crypt_arm_after_tx = 0u;
             rf_crypt_post_arm();
         }
+#if KBD_KEX
+        /* The exchange's work runs once per slot, after this transmission and
+         * (by event priority) after the receiver is re-armed -- never between
+         * a poll's arrival and its response. */
+        if (kex_active || kex_rx_pending) {
+            rf_kex_post_work();
+        }
+#endif
 #endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
         return;
@@ -1580,6 +1910,26 @@ static void rf_do_response_tx(void)
 #endif
     tx_payload[0] = response_ctrl;
     tx_len = 1;
+#if KBD_KEX
+    if (kex_active) {
+        if (kex_polls < 0xFFFFu) {
+            kex_polls++;
+        }
+    }
+    if (kex_tx_valid) {
+        /* An exchange frame takes this slot. */
+        tx_payload[1] = KEX_TAG_UP;
+        for (uint8_t i = 0; i < KEX_PAYLOAD_BYTES; i++) {
+            tx_payload[2 + i] = kex_tx_buf[i];
+        }
+        tx_len = KEX_FRAME_LEN;
+        kex_tx_valid = 0;
+    } else if (kex_active && !kex_candidate) {
+        /* An exchange is running and has nothing to send this slot: answer
+         * with the bare ack. Reports stay queued -- they must not go out in
+         * the clear seconds before the link has a key. */
+    } else
+#endif
     {
         /* Select the head atomically against the RX-ISR retire: the occupancy
          * test and the slot index must observe ONE head, or a retire landing
@@ -1785,6 +2135,14 @@ static void rf_do_response_tx(void)
             crypt_arm_after_tx = 0u;
             rf_crypt_post_arm();
         }
+#if KBD_KEX
+        /* The exchange's work runs once per slot, after this transmission and
+         * (by event priority) after the receiver is re-armed -- never between
+         * a poll's arrival and its response. */
+        if (kex_active || kex_rx_pending) {
+            rf_kex_post_work();
+        }
+#endif
 #endif
         rf_set_event_atomic(RF_EVT_RX_RESTART);
     }
@@ -1805,7 +2163,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 {
     uint16_t left = rf_process_event_body(task_id, events);
 
+#if KBD_KEX
+    if (crypt_work_session | crypt_work_arm | crypt_work_kex) {
+#else
     if (crypt_work_session | crypt_work_arm) {
+#endif
         rf_set_event_atomic(RF_EVT_WAKE);
     }
     return left;
@@ -1838,6 +2200,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     }
 
     if (events & RF_EVT_RX_RESTART) {
+#if KBD_KEX
+        if (rf_state == RF_STATE_CONNECTED) {
+            /* SysTick runs from the crystal, the RTC counter from the 32 kHz
+             * RC oscillator: their relative phase is the one physically
+             * independent quantity available here. */
+            rf_kex_absorb(systick_read() ^ (rtc_read_32k() << 16));
+        }
+#endif
         /* In PAIRING the re-arm is gated by pair_rx_open: after the duty
          * cycle's RX_OFF closed the window, a stale RX_RESTART (late
          * TX-finish or RX-error callback) must not reopen the receiver for
@@ -1937,6 +2307,9 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
                 == KBD_CRYPT_OK) {
             kbd_crypt_adopt_session(sid);
             kbd_crypt_sess_ok++;
+#if KBD_KEX
+            rf_kex_session_verified();
+#endif
             rf_crypt_post_arm();
         } else {
             kbd_crypt_sess_bad++;
@@ -1953,7 +2326,14 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         }
         return events;
     }
-    /* Both latches clear: the wake is spent. A post that lands after this line
+#if KBD_KEX
+    if (crypt_work_kex) {
+        crypt_work_kex = 0;
+        rf_kex_service();
+        return events;
+    }
+#endif
+    /* Every latch clear: the wake is spent. A post that lands after this line
      * sets the bit again in TMOS's own event word. */
     events &= (uint16_t)~RF_EVT_WAKE;
 #endif
@@ -2332,6 +2712,21 @@ static void rf_enter_connected(void)
     for (uint8_t i = 0; i < 8; i++) {
         hid_last_acked[i] = 0;
     }
+#if KBD_KEX
+    /* An exchange belongs to one connection. A candidate key survives a
+     * reconnect: the dongle may have committed it, and the first session of
+     * the new connection settles that either way. */
+    if (kex_active && !kex_candidate) {
+        /* Keep the key pair if the exchange had not got past the shared
+         * secret; the link rests and reconnects often. */
+        if (kex_rewind(&kex) != 0) {
+            rf_kex_stop(0);
+        }
+        kex_tx_valid = 0;
+        kex_rx_pending = 0;
+    }
+    kex_polls = 0;
+#endif
 #endif
     /* New session: the control phase restarts, so no queued entry has been
      * transmitted under it yet. Keep the QUEUE (that is the whole point of the
@@ -2916,6 +3311,12 @@ uint8_t RF_ClearBond(void)
 #endif
     rf_clear_bond_ram();
     bond_save_pending = 0;
+#if KBD_KEX
+    /* Revoke any exchange and candidate with the bond (after the RAM clear,
+     * so there is no key state left for a rollback to touch). */
+    kex_candidate = 0;
+    rf_kex_stop(0);
+#endif
     /* Propagate the result: an unpair that only cleared RAM looks identical to
      * the caller but resurrects the whole bond -- key included -- at the next
      * boot, so the UART path must be able to report failure rather than ack it. */
