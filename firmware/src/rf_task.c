@@ -394,6 +394,10 @@ static void rf_discard_hid_queue(void)
 {
     hid_fifo_head = hid_fifo_tail;
     hid_head_sent = 0;
+    /* The dedup reference describes the newest QUEUED report, and that report
+     * is gone: keeping it would suppress the same state when the host sends it
+     * again (a key still held across the discard). */
+    hid_last_queued_valid = 0;
 }
 #if KBD_RF_CRYPT
 /* An encrypted boot-keyboard frame is 22 bytes on air, so the response buffer
@@ -1713,22 +1717,16 @@ static void rf_do_response_tx(void)
         }
     }
 #if KBD_RF_CRYPT
-    else if (tx_status == 0 && rf_bond_enc_active()) {
-        /* A started frame that did NOT carry the head -- the bare ack sent
-         * when no seal was ready, or a keepalive. The receiver admits it and
-         * advances its control bit exactly as it would for a report, so the
-         * next poll looks like an acknowledgement. If the head went out
-         * earlier and was lost (or failed its tag), honouring that ack would
-         * retire a report the receiver never accepted: a lost keystroke.
-         * Withdraw the eligibility; the head is sealed and sent again, and
-         * only an ack that follows THAT transmission retires it. The cost is
-         * one duplicate delivery when the earlier frame had in fact arrived,
-         * which repeats a state the host already has. A plaintext bond never
-         * gets here with a report queued: it sends the head on every poll. */
-        hid_head_sent = 0;
-        if (tx_len != 1u) {
-            crypt_phase_tainted = 1;   /* a sealed keepalive: its ack may come late */
-        }
+    else if (tx_status == 0 && tx_len != 1u && rf_bond_enc_active()) {
+        /* A sealed keepalive went out in this control phase; see
+         * crypt_phase_tainted. A BARE reply changes nothing: on an
+         * encryption-required bond the receiver advances its control bit only
+         * for a frame whose tag and counter verified, so a bare reply can
+         * neither fake an acknowledgement nor does it need to withdraw one.
+         * (Withdrawing eligibility on every bare reply was tried and livelocked:
+         * a head verified just after the receiver's next poll left, answered
+         * with a bare reply because no seal was ready, could never retire.) */
+        crypt_phase_tainted = 1;
     }
 #endif
     RF_DIAG_INC(rf_connected_tx_count);

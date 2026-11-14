@@ -479,7 +479,7 @@ CRYPT_BUILD_MARKERS := $(wildcard build/$(BOARD)-slot*/kbd_rf_crypt.o)
 # `factory` emits the SWD whole-chip image, so both could silently hand over a
 # plaintext build. (Prerequisites still never appear in MAKECMDGOALS, so the
 # original reasoning holds for bundle-as-a-prerequisite-of-update.)
-CRYPT_GUARDED_GOALS := update flash-factory bundle factory
+CRYPT_GUARDED_GOALS := update update-qmk flash-factory bundle factory
 ifneq ($(filter $(CRYPT_GUARDED_GOALS),$(MAKECMDGOALS)),)
 ifeq ($(KBD_RF_CRYPT),0)
 ifneq ($(CRYPT_BUILD_MARKERS),)
