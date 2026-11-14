@@ -503,6 +503,9 @@ static uint8_t          kex_committing;    /* the bond save in progress may writ
 static uint32_t         kex_pool[8];
 static uint16_t         kex_samples;
 static uint8_t          kex_pool_at;
+static uint8_t          kex_seed[KEX_SEED_BYTES];   /* host MCU seed, until the next draw */
+static uint8_t          kex_seed_fresh;
+static uint8_t          kex_seeded;        /* the last draw folded a seed (status frame) */
 /* Bench visibility, read with the crypto counters. */
 volatile uint8_t kbd_kex_starts, kbd_kex_done, kbd_kex_last_fail;
 #endif
@@ -1006,6 +1009,16 @@ static int rf_kex_draw(uint8_t priv[32])
     uint8_t i;
     int rc;
 
+    /* A seed from the host MCU, if one is waiting: XORed over the whole pool,
+     * so the pool is at least as unpredictable as the better of the two. */
+    kex_seeded = kex_seed_fresh;
+    if (kex_seed_fresh) {
+        kex_seed_fresh = 0u;
+        for (i = 0; i < KEX_SEED_BYTES; i++) {
+            kex_pool[i >> 2] ^= (uint32_t)kex_seed[i] << (8u * (i & 3u));
+            kex_seed[i] = 0u;
+        }
+    }
     GET_UNIQUE_ID(uid);
     for (i = 0; i < 16u; i++) {
         key[i] = (uint8_t)(kex_pool[i >> 2] >> (8u * (i & 3u)));
@@ -1202,7 +1215,8 @@ static void rf_kex_service(void)
             next[1] = (uint8_t)kex_state(&kex);
             next[2] = (uint8_t)kex_failure(&kex);
             next[3] = (uint8_t)((kex_candidate ? 1u : 0u) | (kex.keys_ready ? 2u : 0u)
-                                | (kex.peer_conf_ok ? 4u : 0u) | (kex.peer_pub_mask << 4));
+                                | (kex.peer_conf_ok ? 4u : 0u) | (kex_seeded ? 8u : 0u)
+                                | (kex.peer_pub_mask << 4));
             next[4] = kex.x.phase;
             next[5] = (uint8_t)kex.x.count;
             next[6] = kex.x.op;
@@ -1235,6 +1249,14 @@ static void rf_kex_session_verified(void)
     kbd_kex_done++;
     kbd_kex_last_fail = 0;
     rf_kex_stop(1);
+}
+
+void RF_KexSeed(const uint8_t seed[32])
+{
+    for (uint8_t i = 0; i < KEX_SEED_BYTES; i++) {
+        kex_seed[i] = seed[i];
+    }
+    kex_seed_fresh = 1u;
 }
 #endif /* KBD_KEX */
 

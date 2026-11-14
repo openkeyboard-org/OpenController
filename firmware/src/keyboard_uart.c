@@ -6,7 +6,12 @@
 #include "keyboard_uart.h"
 #include "rtc_clock.h"
 
+#if KBD_KEX
+#include "kex_proto.h"       /* KEX_SEED_*: the entropy seed packet */
+#define KBD_UART_MAX_FRAME  KEX_SEED_PACKET
+#else
 #define KBD_UART_MAX_FRAME  24
+#endif
 
 #ifndef KBD_UART1_REMAP
 #define KBD_UART1_REMAP 1
@@ -69,7 +74,11 @@ static volatile uint8_t rx_activity_latch;
  * ack-only handler would retrigger forever. Single-producer/single-consumer:
  * head is ISR-owned, tail main-loop-owned, uint8_t indexes wrap mod 256 and
  * are masked mod size on access, so no index ever needs a critical section. */
+#if KBD_KEX
+#define KBD_UART_RING_SIZE 128u  /* power of two, > 2 max frames (the 35-byte seed) */
+#else
 #define KBD_UART_RING_SIZE 64u   /* power of two, > 2 max frames */
+#endif
 static volatile uint8_t rx_ring[KBD_UART_RING_SIZE];
 static volatile uint8_t rx_ring_head;
 static volatile uint8_t rx_ring_tail;
@@ -371,6 +380,39 @@ static void reset_parser(void)
     rx_expected = 0;
 }
 
+/* A frame left incomplete this long is abandoned. A host sends every frame
+ * in one piece (35 bytes take 3 ms at 115200 baud), so a parser still waiting
+ * after this has locked onto a stray header byte, and would otherwise hold
+ * the bytes it has for ever: KeyboardUart_RxQuiet() stays false and the
+ * module never idles. Matches the host's own partial-frame timeout. */
+#define KBD_UART_RX_PARTIAL_US 20000u
+static uint32_t rx_last_byte_at;      /* RtcClock_Now() at the last byte fed */
+
+static void wipe_rx_buf(void)
+{
+    volatile uint8_t *p = rx_buf;
+
+    for (uint8_t i = 0; i < KBD_UART_MAX_FRAME; i++) {
+        p[i] = 0;
+    }
+}
+
+/* Call from KeyboardUart_Poll() once the bytes that have arrived are fed. */
+static void expire_partial_frame(uint8_t fed)
+{
+    if (rx_len == 0) {
+        return;
+    }
+    if (fed) {
+        rx_last_byte_at = RtcClock_Now();
+    } else if ((uint32_t)(RtcClock_Now() - rx_last_byte_at)
+                   >= RTC_CLOCK_TICKS_US(KBD_UART_RX_PARTIAL_US)) {
+        KBD_UART_DIAG_INC(kbd_uart_rx_frame_error_count);
+        wipe_rx_buf();      /* it may be part of an entropy seed */
+        reset_parser();
+    }
+}
+
 static uint8_t expected_for_header(uint8_t b)
 {
     switch (b) {
@@ -392,6 +434,13 @@ static uint8_t expected_for_header(uint8_t b)
 #if KBD_TX_OUTCOME
     case KBD_UART_CMD_TX_OUTCOME:
         return 2;    /* [B2][chk] -- read-only, no body */
+#endif
+#if KBD_KEX
+    case KEX_SEED_CMD:
+        /* [9C][20][seed 0..31][chk]: the packet the dongle takes over USB,
+         * byte for byte (kex_proto.h). The host sends it only after 5B 3A
+         * has answered its A6 5A. */
+        return KEX_SEED_PACKET;
 #endif
     case 0xA9:
         /* BLE device-name frames are FIXED 21 bytes on the wire: the host
@@ -421,6 +470,11 @@ static uint8_t frame_is_valid(void)
                 checksum(rx_buf, chk_idx) == rx_buf[chk_idx]);
     } else if (cmd == 0x61) {
         return rx_buf[1] == 0x0D && rx_buf[2] == 0x0A;
+#if KBD_KEX
+    } else if (cmd == KEX_SEED_CMD) {
+        return rx_buf[1] == KEX_SEED_BYTES &&
+               checksum(rx_buf, KEX_SEED_PACKET - 1u) == rx_buf[KEX_SEED_PACKET - 1u];
+#endif
 #if KBD_TX_OUTCOME
     } else if (cmd == KBD_UART_CMD_TX_OUTCOME) {
         return checksum(rx_buf, 1) == rx_buf[1];
@@ -459,6 +513,17 @@ static void dispatch_frame(void)
         if (frame_cb) {
             frame_cb(0xA9, name_len, &rx_buf[2], name_len);
         }
+#if KBD_KEX
+    } else if (cmd == KEX_SEED_CMD) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(KEX_SEED_CMD, 0, &rx_buf[2], KEX_SEED_BYTES);
+        }
+        /* The parser keeps the frame until the next one overwrites it. */
+        for (volatile uint8_t *p = &rx_buf[2]; p < &rx_buf[KEX_SEED_PACKET]; p++) {
+            *p = 0;
+        }
+#endif
 #if KBD_CRYPT_BENCH_KEY
     } else if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
         KeyboardUart_SendAck();
@@ -534,6 +599,18 @@ static void process_rx_buf(void)
             shift_rx_buf(consumed);
         } else {
             KBD_UART_DIAG_INC(kbd_uart_rx_frame_error_count);
+#if KBD_KEX
+            if (rx_buf[0] == KEX_SEED_CMD) {
+                /* A complete seed frame that fails its checksum is dropped
+                 * whole. Its body is 32 arbitrary bytes: resynchronising
+                 * inside it would let a damaged seed that happens to contain
+                 * a well-formed frame (A6 52 F8 is unpair) run as a command.
+                 * The host resends the seed when no ACK comes. */
+                wipe_rx_buf();
+                reset_parser();
+                return;
+            }
+#endif
             resync_parser();
         }
     }
@@ -554,6 +631,12 @@ static void feed_byte(uint8_t b)
     }
 
     rx_buf[rx_len++] = b;
+    /* A 9C whose second byte is not the seed length is NOT given up early:
+     * it may be a seed with a damaged length byte, and looking for headers
+     * in what follows would run a command that happens to sit in its body.
+     * The candidate is collected to 35 bytes and dropped whole, or abandoned
+     * by the partial-frame timeout. A stray 9C therefore costs the host the
+     * frames it sends in that window; they are retried. */
     process_rx_buf();
 }
 
@@ -589,6 +672,8 @@ void UART1_IRQHandler(void)
 
 void KeyboardUart_Poll(void)
 {
+    uint8_t fed = 0;
+
     for (;;) {
         /* Checked before EVERY byte, not just once per Poll: the ISR can
          * record a stream hole (hardware overrun or full ring) while this
@@ -600,13 +685,26 @@ void KeyboardUart_Poll(void)
          * was set are pre-hole and were valid to parse. */
         if (rx_overrun_latch) {
             uint32_t irq_state;
+            /* What is discarded may be part of an entropy seed: clear it
+             * before the slots are released. The bulk goes with interrupts
+             * on (the ISR cannot write an occupied slot); the masked section
+             * clears only what arrived meanwhile. */
+            uint8_t t = rx_ring_tail;
+            uint8_t end = rx_ring_head;
+            for (; t != end; t++) {
+                rx_ring[t & (KBD_UART_RING_SIZE - 1u)] = 0;
+            }
             __asm volatile ("csrrc %0, 0x800, %1"
                             : "=r"(irq_state) : "r"(0x88) : "memory");
+            for (; t != rx_ring_head; t++) {
+                rx_ring[t & (KBD_UART_RING_SIZE - 1u)] = 0;
+            }
             rx_ring_tail = rx_ring_head;
             rx_overrun_latch = 0;
             __asm volatile ("csrrs zero, 0x800, %0"
                             :: "r"(irq_state & 0x88) : "memory");
             KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
+            wipe_rx_buf();
             reset_parser();
             continue;   /* the ISR may already have queued post-gap bytes */
         }
@@ -614,8 +712,13 @@ void KeyboardUart_Poll(void)
             break;
         }
         feed_byte(rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)]);
+        /* Cleared before the slot is released (the ISR never writes the tail
+         * slot): the ring would otherwise keep a copy of an entropy seed. */
+        rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)] = 0;
         rx_ring_tail++;
+        fed = 1;
     }
+    expire_partial_frame(fed);
 }
 
 #else /* !KBD_IDLE_WFI: original pure-polling path */
@@ -624,18 +727,23 @@ static void check_uart_line_status(void)
 {
     if (R8_UART1_LSR & RB_LSR_OVER_ERR) {
         KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
+        wipe_rx_buf();
         reset_parser();
     }
 }
 
 void KeyboardUart_Poll(void)
 {
+    uint8_t fed = 0;
+
     check_uart_line_status();
     while (R8_UART1_RFC) {
         RX_NOTE_ACTIVITY();
         feed_byte(R8_UART1_RBR);
         check_uart_line_status();
+        fed = 1;
     }
+    expire_partial_frame(fed);
 }
 
 #endif /* KBD_IDLE_WFI */

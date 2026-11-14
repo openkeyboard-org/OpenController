@@ -42,6 +42,15 @@ uint8_t RF_RestProbing(void);
 uint8_t RF_GetState(void);
 int8_t RF_GetRSSI(void);
 
+#if KBD_KEX
+/* A 32-byte entropy seed from the host MCU (UART frame 0x9C, the packet in
+ * kex_proto.h that the dongle takes over USB). Held until the next
+ * private-key draw folds it into the pool, then wiped; a later seed replaces
+ * one still waiting. RAM only. Call from the main loop, like every other
+ * UART frame handler. */
+void RF_KexSeed(const uint8_t seed[32]);
+#endif
+
 #if KBD_RF_CRYPT
 /* Attach a 16-byte link key to the current bond and activate encryption.
  * Returns 0 if there is no bond, or the key is all-zero / all-0xFF.

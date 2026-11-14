@@ -20,6 +20,9 @@
 #include "diag_dump.h"
 #endif
 #include "rf_task.h"
+#if KBD_KEX
+#include "kex_proto.h"      /* KEX_SEED_CMD */
+#endif
 #if KBD_CRYPT_BENCH_KEY
 #include "kbd_rf_crypt.h"   /* bench self-verify counters + latch */
 #endif
@@ -143,6 +146,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
          * the BLE HID advertising path is not implemented yet. */
         return;
     }
+
+#if KBD_KEX
+    if (cmd == KEX_SEED_CMD) {
+        /* Entropy for the next link-key exchange, from the host MCU's random
+         * number generator: this chip has none. */
+        RF_KexSeed(payload);
+        return;
+    }
+#endif
 
 #if KBD_CRYPT_BENCH_KEY
     if (cmd == KBD_UART_CMD_SET_LINK_KEY) {
@@ -323,6 +335,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                 * to the sleep protocol, like every unrecognised A6 sub. */
 #if KBD_HOST_WAKE
         KeyboardUart_SendStatus(0x38);
+#endif
+        break;
+
+    case 0x5A: /* entropy-seed capability query (OpenController extension).
+                * Only a KBD_KEX build answers, with 5B 3A; the host sends a
+                * seed frame (0x9C) only after it, since to any other module
+                * those 35 bytes are noise that could alias a command. */
+#if KBD_KEX
+        KeyboardUart_SendStatus(0x3A);
 #endif
         break;
 
