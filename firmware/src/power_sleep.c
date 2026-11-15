@@ -34,7 +34,7 @@
  * UNMASKED. Two bench experiments killed the first design (a fork of
  * LowPower_Sleep with a SEVONPEND-WFE wait): it wedged the part whether the
  * wait ran masked or unmasked, and only a power cycle recovered it. Root
- * cause (Codex root-cause pass, confirmed by the vendor's own working
+ * cause (root-cause pass, confirmed by the vendor's own working
  * path): WFE-mode (WFITOWFE) is incompatible with SLEEPDEEP=1 on this core.
  * The MR2 shallow-idle lesson -- masked WFI hangs, masked WFE wakes -- does
  * NOT transfer to deep sleep. So the deep wait is a plain WFI, which wakes

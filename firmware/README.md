@@ -111,6 +111,25 @@ host wake with `A6 58`; a host-wake build answers `5B 38`, and other builds
 only ACK. Every wait is a main-loop state, never a busy wait
 (`src/host_wake.h` covers the queue and the LED slot). The idle WFE and
 module sleep both wait for host wake to finish.
+A `KBD_KEX=1` build also takes an entropy seed for its link-key exchange from
+the host MCU, since the CH592 has no random number generator. The frame is
+`9C 20 <32 bytes> <sum>`, byte for byte the packet OpenDongle takes over USB
+as command `0x9C`, and is ACKed like any other. The host asks first with
+`A6 5A`; a `KBD_KEX` build answers `5B 3A` and other builds only ACK, and a
+host must not send the seed without that answer, because to a parser that
+does not know `9C` its bytes could contain a command. The seed is held in
+RAM until the next private key is drawn, mixed into the timing pool, and
+wiped; without one the key rests on the pool alone.
+
+The UART rate is fixed at build time: `make KBD_UART_BAUD=500000` instead of
+the default 115200 (`src/keyboard_uart.h`). It never changes while the module
+runs, and OpenBoot stays at 115200. A host has to be built to look for the
+fast rate and must be installed first: one that only speaks 115200 cannot
+reach a 500000 module, not even to ask it into its bootloader. A 500000
+build also recovers from receive errors more strictly: after an overrun, a
+framing error or a break it parses nothing until the line has been silent
+for 1 ms, so a frame sent into that wait is dropped and has to be retried.
+
 The three timing macros can be tuned through `EXTRA_CFLAGS`; the knob itself
 is board-owned like the others (A/B with `make KBD_HOST_WAKE=0|1`). The MR5
 bench sleep (`KBD_SLEEP_BENCH_HOOK=1`) blocks for seconds, so it requires

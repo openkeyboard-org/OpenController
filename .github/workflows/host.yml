@@ -1,0 +1,39 @@
+# Host gates only. This is deliberately NOT a release gate: the MounRiver cross
+# toolchain is not redistributable, so CI never links the firmware, never builds
+# a bundle and never runs check-deps. "This tree can ship" still means
+# `make -C firmware release`-equivalent on a machine with the pinned toolchains,
+# plus the hardware matrix.
+#
+# What it does buy: the host test suite now runs on every push and PR. Until
+# 2026-08-22 this repo had no CI at all, so the pins in firmware/tests -- notably
+# the pairing slot policy that keeps capability negotiation order-independent --
+# were only as good as someone remembering to run them.
+name: host
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  firmware-host:
+    name: firmware host suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The Makefile reads OpenBoot's slot geometry at parse time, so the
+      # submodule has to exist even for a host-only goal. Only this one: the
+      # vendored WCH SDK is committed in-tree, and nothing here cross-compiles.
+      - name: fetch OpenBoot
+        run: git submodule update --init third_party/openboot
+      - name: host test suite
+        run: make -C firmware test

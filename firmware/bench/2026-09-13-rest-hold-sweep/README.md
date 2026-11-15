@@ -14,7 +14,7 @@ constant ~1.55 mA power LED, all figures below are net of it. Host oracle: CGEve
 (`firmware/bench/tools/hid_capture.py`), scored as exactly one ordered down/up per key on
 a continuous capture. RSSI -37 dBm throughout.
 
-Protocol (after a Codex refutation pass): identical flags on build and flash with the
+Protocol (after a refutation pass): identical flags on build and flash with the
 image hash logged; controller diag counters (`bench.py diag`, frame v3) snapshotted per
 arm; full-tail raw capture per key (reconnect, hold, rest entry, lock); floor = p05 of the
 settled window before the key, resting counterfactual subtracted; jittered rest depths;
