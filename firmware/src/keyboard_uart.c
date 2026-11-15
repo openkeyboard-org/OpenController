@@ -83,8 +83,15 @@ static volatile uint8_t rx_ring[KBD_UART_RING_SIZE];
 static volatile uint8_t rx_ring_head;
 static volatile uint8_t rx_ring_tail;
 /* Set by the ISR on a hardware overrun OR a full ring (same recovery: the
- * byte stream has a hole, so the parser must resync). Consumed by Poll. */
+ * byte stream has a hole, so the parser must resync). Consumed by Poll.
+ * A fast build (KBD_UART_FAST) sets it on a framing error or a break too,
+ * and wherever else LSR is read, so kbd_uart_rx_overrun_count counts those
+ * recoveries as well. */
 static volatile uint8_t rx_overrun_latch;
+#if KBD_UART_FAST
+/* Reading LSR clears these, so every read of it has to keep them. */
+#define KBD_UART_LSR_RX_ERR (RB_LSR_OVER_ERR | RB_LSR_FRAME_ERR | RB_LSR_BREAK_ERR)
+#endif
 #endif
 
 #if KBD_UART_DIAG_COUNTERS
@@ -171,7 +178,7 @@ void KeyboardUart_Init(void)
 #endif
 
     UART1_DefInit();
-    UART1_BaudRateCfg(115200);
+    UART1_BaudRateCfg(KBD_UART_BAUD);
     UART1_CLR_RXFIFO();
     UART1_CLR_TXFIFO();
 
@@ -387,6 +394,30 @@ static void reset_parser(void)
  * module never idles. Matches the host's own partial-frame timeout. */
 #define KBD_UART_RX_PARTIAL_US 20000u
 static uint32_t rx_last_byte_at;      /* RtcClock_Now() at the last byte fed */
+
+#if KBD_UART_FAST
+/* After a hole in the stream, a fast build parses nothing until the line
+ * has been silent this long. Resetting the parser is not enough: what
+ * arrives next may be the rest of the frame the hole was in, and a seed's
+ * body is 32 arbitrary bytes, which can hold a well-formed command (A6 52
+ * F8 is unpair). Silence is a frame boundary because a host sends each
+ * frame in one piece (35 bytes take 0.7 ms here), and a frame dropped here
+ * is not ACKed, so the host says nothing more for its 20 ms retry interval
+ * apart from ACKs of its own, which are three bytes.
+ *
+ * It has to stay well under two things: that retry interval, and the 5 ms
+ * a host leaves between its wake byte and the frame behind it, since the
+ * wake byte can arrive damaged while the clock restarts. A frame that
+ * starts inside the wait is dropped whole, and a host that retries (the
+ * keyboard does; the bench `make update` helper sends its command three
+ * times for this reason) gets through on the next attempt.
+ *
+ * The time is taken when Poll discards a byte, not when the byte arrived,
+ * so a late Poll lengthens the wait and never shortens it. */
+#define KBD_UART_RX_RESYNC_US 1000u
+static uint8_t  rx_resync;            /* discarding until the line is silent */
+static uint32_t rx_resync_at;         /* RtcClock_Now() at the last discard */
+#endif
 
 static void wipe_rx_buf(void)
 {
@@ -653,6 +684,26 @@ __INTERRUPT
 __HIGH_CODE
 void UART1_IRQHandler(void)
 {
+#if KBD_UART_FAST
+    /* A fast build also treats a framing error or a break as a hole in the
+     * stream: a byte that arrived damaged, at a rate where one is likelier.
+     * (It is not what stops a host at 115200 from being understood; see
+     * keyboard_uart.h.) The error belongs to the byte at the head of the
+     * FIFO, so LSR is read before each byte is taken; the read clears the
+     * overrun bit too, which is kept. The latch is set before the byte is
+     * queued and in the same interrupt, which is what lets Poll take a byte
+     * and know it came before any hole. */
+    if (UART1_GetITFlag() == UART_II_LINE_STAT) {
+        if (R8_UART1_LSR & KBD_UART_LSR_RX_ERR) {
+            rx_overrun_latch = 1;
+        }
+    }
+    while (R8_UART1_RFC) {
+        if (R8_UART1_LSR & KBD_UART_LSR_RX_ERR) {
+            rx_overrun_latch = 1;
+        }
+        uint8_t b = R8_UART1_RBR;
+#else
     if (UART1_GetITFlag() == UART_II_LINE_STAT) {
         if (R8_UART1_LSR & RB_LSR_OVER_ERR) {   /* reading LSR clears it */
             rx_overrun_latch = 1;
@@ -660,6 +711,7 @@ void UART1_IRQHandler(void)
     }
     while (R8_UART1_RFC) {
         uint8_t b = R8_UART1_RBR;
+#endif
         RX_NOTE_ACTIVITY();
         if ((uint8_t)(rx_ring_head - rx_ring_tail) < KBD_UART_RING_SIZE) {
             rx_ring[rx_ring_head & (KBD_UART_RING_SIZE - 1u)] = b;
@@ -679,11 +731,39 @@ void KeyboardUart_Poll(void)
          * record a stream hole (hardware overrun or full ring) while this
          * loop is draining, and feeding even one post-hole byte lets a
          * retained pre-gap header swallow the next valid command (review
-         * finding). On a hole: discard everything queued and resync from
-         * silence; tail=head must be atomic against the ISR (CSR 0x800
+         * finding). On a hole: discard everything queued and reset the
+         * parser; tail=head must be atomic against the ISR (CSR 0x800
          * global-mask idiom, see rf_task.c). Bytes fed before the latch
          * was set are pre-hole and were valid to parse. */
+#if KBD_UART_FAST
+        /* A fast build closes the gap between that check and the byte it
+         * guards: the latch is read and the byte taken under one mask, so a
+         * byte that reaches the parser was queued while the latch was still
+         * clear. (Unmasked, the ISR could set the latch and queue the
+         * damaged byte between the two, and the byte would be parsed before
+         * the latch was looked at again.) The byte is parsed with interrupts
+         * back on. */
+        uint8_t b = 0;
+        uint8_t got = 0;
+        uint8_t hole;
+        uint32_t take_state;
+
+        __asm volatile ("csrrc %0, 0x800, %1"
+                        : "=r"(take_state) : "r"(0x88) : "memory");
+        hole = rx_overrun_latch;
+        if (!hole && rx_ring_tail != rx_ring_head) {
+            b = rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)];
+            /* Cleared before the slot is released: see the 115200 path. */
+            rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)] = 0;
+            rx_ring_tail++;
+            got = 1;
+        }
+        __asm volatile ("csrrs zero, 0x800, %0"
+                        :: "r"(take_state & 0x88) : "memory");
+        if (hole) {
+#else
         if (rx_overrun_latch) {
+#endif
             uint32_t irq_state;
             /* What is discarded may be part of an entropy seed: clear it
              * before the slots are released. The bulk goes with interrupts
@@ -706,8 +786,25 @@ void KeyboardUart_Poll(void)
             KBD_UART_DIAG_INC(kbd_uart_rx_overrun_count);
             wipe_rx_buf();
             reset_parser();
+#if KBD_UART_FAST
+            rx_resync = 1;      /* see KBD_UART_RX_RESYNC_US */
+            rx_resync_at = RtcClock_Now();
+#endif
             continue;   /* the ISR may already have queued post-gap bytes */
         }
+#if KBD_UART_FAST
+        if (!got) {
+            break;
+        }
+        if (rx_resync) {
+            /* Still inside what the hole was in, or what followed it without
+             * a pause: not parsed. (b is a plain local; it is overwritten by
+             * the next byte or dies with this call.) */
+            rx_resync_at = RtcClock_Now();
+            continue;
+        }
+        feed_byte(b);
+#else
         if (rx_ring_tail == rx_ring_head) {
             break;
         }
@@ -716,8 +813,35 @@ void KeyboardUart_Poll(void)
          * slot): the ring would otherwise keep a copy of an entropy seed. */
         rx_ring[rx_ring_tail & (KBD_UART_RING_SIZE - 1u)] = 0;
         rx_ring_tail++;
+#endif
         fed = 1;
     }
+#if KBD_UART_FAST
+    /* Every byte taken above restarted the clock, so this much time without
+     * one is this much silence on the line, provided nothing has arrived
+     * since the loop last looked: interrupts can hold this spot for longer
+     * than the wait while the rest of a damaged frame is queued. The time is
+     * read first and the ring, the FIFO and the latch are looked at after
+     * it, masked, so anything that arrived before that time is seen. If
+     * something has, the next Poll discards it and the wait starts again. */
+    if (rx_resync) {
+        uint32_t now = RtcClock_Now();
+
+        if ((uint32_t)(now - rx_resync_at)
+                >= RTC_CLOCK_TICKS_US(KBD_UART_RX_RESYNC_US)) {
+            uint32_t quiet_state;
+
+            __asm volatile ("csrrc %0, 0x800, %1"
+                            : "=r"(quiet_state) : "r"(0x88) : "memory");
+            if (rx_ring_tail == rx_ring_head && R8_UART1_RFC == 0
+                    && !rx_overrun_latch) {
+                rx_resync = 0;
+            }
+            __asm volatile ("csrrs zero, 0x800, %0"
+                            :: "r"(quiet_state & 0x88) : "memory");
+        }
+    }
+#endif
     expire_partial_frame(fed);
 }
 
@@ -752,7 +876,13 @@ uint8_t KeyboardUart_RxQuiet(void)
 {
 #if KBD_IDLE_WFI
     return (rx_ring_tail == rx_ring_head) && (rx_len == 0)
-        && !rx_overrun_latch;
+        && !rx_overrun_latch
+#if KBD_UART_FAST
+        /* Waiting for silence is receive work in progress: Poll has to keep
+         * running to end it, so the module neither idles nor sleeps on it. */
+        && !rx_resync
+#endif
+        ;
 #else
     return (rx_len == 0);
 #endif
@@ -774,7 +904,25 @@ uint8_t KeyboardUart_TakeRxActivity(void)
 
 uint8_t KeyboardUart_FifoIdle(void)
 {
+#if KBD_UART_FAST
+    /* This read of LSR clears the receive-error bits like any other, and it
+     * can get to them before the interrupt does: the ISR would then queue
+     * the damaged byte with nothing to show for it. Kept here instead. Main
+     * loop context, as Poll is, so the latch is set before Poll next looks,
+     * whichever side of this the interrupt lands. */
+    uint8_t lsr;
+
+    if (R8_UART1_TFC != 0) {
+        return 0;
+    }
+    lsr = R8_UART1_LSR;
+    if (lsr & KBD_UART_LSR_RX_ERR) {
+        rx_overrun_latch = 1;
+    }
+    return (lsr & RB_LSR_TX_ALL_EMP) != 0;
+#else
     return (R8_UART1_TFC == 0) && (R8_UART1_LSR & RB_LSR_TX_ALL_EMP);
+#endif
 }
 
 uint8_t KeyboardUart_TxIdle(void)

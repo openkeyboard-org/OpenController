@@ -447,6 +447,25 @@ CFLAGS += -DKBD_TX_OUTCOME=$(KBD_TX_OUTCOME)
 # controller, where the 0xAE bench command cannot be sent from a probe.
 KBD_CRYPT_BENCH_FORCE_KEY ?= 0
 CFLAGS += -DKBD_CRYPT_BENCH_FORCE_KEY=$(KBD_CRYPT_BENCH_FORCE_KEY)
+# UART rate to the host MCU (src/keyboard_uart.h). 115200 is what the stock
+# module and every existing host speak. 500000 needs a host built to look for
+# it, and that host must be installed FIRST: one that only speaks 115200
+# cannot reach a 500000 module at all, not even to ask it into its bootloader.
+# Exactly one value, and only through this knob: the test below would
+# otherwise pass a string that merely contains an allowed number, and a -D in
+# EXTRA_CFLAGS would be overridden here with no more than a warning.
+KBD_UART_BAUD ?= 115200
+ifneq ($(words $(KBD_UART_BAUD)),1)
+$(error KBD_UART_BAUD must be 115200 or 500000, not '$(KBD_UART_BAUD)')
+endif
+ifeq ($(filter 115200 500000,$(KBD_UART_BAUD)),)
+$(error KBD_UART_BAUD must be 115200 or 500000, not '$(KBD_UART_BAUD)')
+endif
+ifneq ($(findstring KBD_UART_BAUD,$(EXTRA_CFLAGS)),)
+$(error KBD_UART_BAUD must not go through EXTRA_CFLAGS; use `make KBD_UART_BAUD=115200|500000`)
+endif
+CFLAGS += -DKBD_UART_BAUD=$(strip $(KBD_UART_BAUD))
+
 # Negotiate the link key over the air after pairing (X25519 + AES-CMAC; the
 # dongle starts it, see rf_task.c "link-key exchange"). X25519_RAM selects
 # X25519_ARITH_IN_RAM (x25519.c): how much of the field arithmetic runs from
@@ -1003,6 +1022,10 @@ check-bundle-family: bundle
 # the port resets the target into OpenBoot's 10 s idle window; the CLI's
 # HELLO then holds it (fail-stay).
 OB_PORT ?=
+# The UART rate of the application running on the target NOW (its
+# KBD_UART_BAUD), which is what has to hear the A6 81 below; not necessarily
+# the rate of the image being installed. OpenBoot itself is always 115200.
+OB_APP_BAUD ?= 115200
 update: check-bundle-family
 	@test -n "$(strip $(OB_PORT))" || { \
 	  echo "set OB_PORT=/dev/serial/by-id/<keyboard probe CDC>" >&2; exit 1; }
@@ -1017,7 +1040,11 @@ update: check-bundle-family
 #	bit is the RX-pin GPIO wake edge and is consumed by the wake, so the
 #	real A6 81 must follow the settle gap (MR6 wake contract). On an awake
 #	module the idle parser drops the stray NULL, so this is harmless.
-	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], 115200, timeout=0.2); time.sleep(1.0); p.write(bytes([0x00])); p.flush(); time.sleep(0.005); p.write(bytes([0xA6, 0x81, 0x27])); time.sleep(6.0); p.close()' "$(OB_PORT)"
+#	The A6 81 goes three times, 50 ms apart: a 500000 build that took the
+#	wake byte as a receive error ignores everything until its line has been
+#	quiet for 1 ms, which can swallow the first. The repeats are noise to
+#	a bootloader that the first one already started.
+	@$(PYTHON) -c 'import serial, sys, time; p = serial.Serial(sys.argv[1], int(sys.argv[2]), timeout=0.2); time.sleep(1.0); p.write(bytes([0x00])); p.flush(); time.sleep(0.005); [(p.write(bytes([0xA6, 0x81, 0x27])), p.flush(), time.sleep(0.05)) for _ in range(3)]; time.sleep(6.0); p.close()' "$(OB_PORT)" "$(strip $(OB_APP_BAUD))"
 #	No separate `boot` step: the flash flow ends with BOOT itself
 #	("boot after: yes"), so the device is already running the new image
 #	when this returns - a trailing boot would HELLO an application.

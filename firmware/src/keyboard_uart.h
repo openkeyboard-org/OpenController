@@ -16,6 +16,45 @@
 #define KBD_IDLE_WFI 1
 #endif
 
+/* The UART rate to the host MCU: a build-time constant, 115200 unless the
+ * build says otherwise (`make KBD_UART_BAUD=500000`). It never changes while
+ * the module runs. The host is expected to find it: a host built for the
+ * fast rate probes at it first and drops to 115200 when nothing answers. So
+ * a fast host works with either module, but a host that only speaks 115200
+ * cannot reach a fast module at all, not even to ask it into its bootloader:
+ * the host is updated first.
+ *
+ * Why raise it: a 10-byte report takes 868 us at 115200, which with its ACK
+ * is more than the host's 1 ms loop, so the host can hand over one report
+ * every two passes. At 500000 the report and its ACK take 260 us.
+ *
+ * Which rates: this chip's UART clock is Fsys/8 = 7.5 MHz, and the STM32U0
+ * host runs its USART from 16 MHz. 500000 divides exactly on both, and it is
+ * the one fast rate the host looks for. The bootloader (OpenBoot) keeps
+ * 115200 whatever this is.
+ *
+ * A fast build needs the interrupt-driven receive path: the 8-byte FIFO
+ * alone holds 160 us at 500000, less than one seal in the main loop. It
+ * also recovers from receive errors more strictly than the 115200 build
+ * (framing errors and breaks count, and nothing is parsed again until the
+ * line has been silent; see KeyboardUart_Poll). That is error recovery, not
+ * what keeps a host at the wrong rate from being understood: a 115200 byte
+ * does not always arrive here as a framing error. What does is arithmetic.
+ * The eight data samples of one character at 500000 span 1.6 bit times at
+ * 115200, so they can hold at most two level changes, and every frame header
+ * this parser accepts (A6, A1, A9, 9C, 61, and the bench ones AE to B2) has
+ * at least three. */
+#ifndef KBD_UART_BAUD
+#define KBD_UART_BAUD 115200
+#endif
+#if KBD_UART_BAUD != 115200 && KBD_UART_BAUD != 500000
+#error "KBD_UART_BAUD must be 115200 or 500000"
+#endif
+#define KBD_UART_FAST (KBD_UART_BAUD != 115200)
+#if KBD_UART_FAST && !KBD_IDLE_WFI
+#error "a KBD_UART_BAUD above 115200 needs KBD_IDLE_WFI (interrupt-driven UART receive)"
+#endif
+
 /* Host wake (see host_wake.h): the module raises CHWAKE before every frame it
  * originates, for a host MCU that cannot receive while it sleeps. Board-owned
  * (the boards/ profiles); the Makefile validates it and passes it here. */
