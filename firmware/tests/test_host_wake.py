@@ -155,7 +155,7 @@ def test_missing_ack_is_retried_then_abandoned_then_quarantined(lib, hw):
 
 
 def test_a_late_ack_after_a_resend_cannot_retire_the_next_frame(lib, hw):
-    """Codex's scenario: A's ACK is late, A is resent, the first ACK retires A;
+    """The review's scenario: A's ACK is late, A is resent, the first ACK retires A;
     the second ACK for A must not retire B."""
     assert enqueue(lib, hw, 0x5B, 0x0A)
     assert enqueue(lib, hw, 0x5B, 0x0B)
@@ -166,7 +166,7 @@ def test_a_late_ack_after_a_resend_cannot_retire_the_next_frame(lib, hw):
     assert step(lib, hw, resend) == (1, (0x5B, 0x0A))           # copy 2
     ack(lib, hw)                                                 # ACK of copy 1
     assert step(lib, hw, resend + 1000) == (1, None)             # A retired, quarantine
-    # Codex's timing: copy 2's ACK arrives 35 ms after the resend, inside the
+    # The review's timing: copy 2's ACK arrives 35 ms after the resend, inside the
     # two-timeout bound. It must be discarded, not retire B.
     assert step(lib, hw, resend + 35000 - 1) == (1, None)
     ack(lib, hw)

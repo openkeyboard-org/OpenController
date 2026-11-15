@@ -25,9 +25,9 @@ handwired/opencontroller_bench over the controller UART. Test key = virtual key 
        no TX_FAIL). Guaranteed on-air completions >= ceil(48/6) = 8 distinct downs of 12.
 
 ## Conclusion
-Codex hypothesis D (60 ms release overwrites the press in the controller's single hid_report slot
+Hypothesis D (60 ms release overwrites the press in the controller's single hid_report slot
 before it is transmitted) is refuted for the aggregate: the down is not only SELECTED but COMPLETES
-on air. The guaranteed-on-air minimum is no longer 0 (Codex point B) -- it is >=8/12. The first-key
+on air. The guaranteed-on-air minimum is no longer 0 (review point B) -- it is >=8/12. The first-key
 loss is therefore downstream of the controller TX (RF propagation, or the dongle receive->EP1->USB
 path), EXCEPT for any residual minority of trials whose down is never selected (tx_down=0), which
 needs per-trial attribution to rule out.
@@ -37,9 +37,9 @@ needs per-trial attribution to rule out.
 - Host: real per-key delivery oracle (fix F24=111 mislabel -> F12; use F13 CGEvent or raw HID capture).
 - Per-trial attribution via the non-destructive DiagDump (single-tap trials).
 
-## End-to-end 3-hop down-frame accounting (dongle side added, Codex-reviewed)
+## End-to-end 3-hop down-frame accounting (dongle side added, reviewed)
 
-Both firmwares instrumented; counters corrected after Codex review:
+Both firmwares instrumented; counters corrected after review:
 - controller: tx_done_down completion gated on response_pending + flag cleared at each response start
   (was: a stale inflight flag could let a later keepalive/beacon TX_FINISH overcount).
 - dongle rfd_hid_rx_down: boot-keyboard-EXACT (tag 0xA1, LEN-10, non-zero body) -- the classifier also
@@ -56,7 +56,7 @@ Clean, boot-verified run (12 first-key-from-rest trials, 60 ms taps; ctrl rx_dow
    overwritten before the host read them). Controller TX, RF propagation, and RF->USB forward are all
    clean (0 loss). This is exactly the hop the Goal A plan step 2 (dongle EP1 queue) addresses.
 
-Caveats (Codex, still open):
+Caveats (still open):
 - FRAME counts include resends (~3/down). A down with 2 frames, one overwritten, still delivers if the
   other completes -> "EP1 loss = 3 frames" is NOT "3 keys lost". Per-KEY verdict needs single-tap trials.
 - ep1_comp_down attribution via a single inflight flag has a HW-completion/DMA race (can mis-attribute
@@ -66,8 +66,8 @@ Caveats (Codex, still open):
 
 ## Per-KEY delivery verdict (host oracle) -- the defect does NOT reproduce awake
 
-Codex's step (a): built a trustworthy host-delivery oracle. Raw HID capture (hidapi) is BLOCKED --
-macOS refuses to open the seized boot-keyboard interface ("open failed"). Fell back to Codex's
+Review step (a): built a trustworthy host-delivery oracle. Raw HID capture (hidapi) is BLOCKED --
+macOS refuses to open the seized boot-keyboard interface ("open failed"). Fell back to the review's
 alternative: temporarily reflashed the bench Nucleo with KC_F24->KC_F13 (F13 = HID 0x68, macOS
 keycode 105, which the CGEventTap DOES surface; F24 produces no CGEvent). Keymap SOURCE reverted to
 F24 (repo clean); the Nucleo currently runs the local F13 build for oracle testing.
@@ -81,7 +81,7 @@ CGEventTap capturing keycode 105):
    arms, so the EP1 single-slot overwrites measured earlier are of REDUNDANT RESEND frames, not the
    down-vs-up race. The earlier "1/6 delivered" was the contaminated HID idle-timer oracle.
 
-=> Consistent with Codex: the report-delivery loss requires a condition where the host is NOT draining
+=> Consistent with the review: the report-delivery loss requires a condition where the host is NOT draining
    EP1 -- most likely actual USB SUSPEND/WAKE (down arms while suspended, up overwrites the single
    slot, resume delivers only the up / a stale report). That is the failing case to reproduce next,
    and it is exactly what the Goal A plan step-2 gate ("continuous typing THROUGH a wake") targets.
@@ -107,7 +107,7 @@ With the dongle as the real path, first-key-from-rest (60 ms tap, 8 s rest), hos
 on F13 (now unambiguous):
     run 1: 8/12 delivered (4 LOST)
     run 2: 7/12 delivered (5 LOST)
-=> ~35-40% of first keys from rest are LOST. This is the failing baseline the plan/Codex required.
+=> ~35-40% of first keys from rest are LOST. This is the failing baseline the plan and its review required.
 
 ### Per-trial localization: the lost DOWN never reaches the dongle
     LOST trials      -> down-frames reaching the dongle = 0
@@ -124,7 +124,7 @@ yet, so those frames are lost. 60 ms later the key-UP overwrites the same single
 finally comes up, only the UP is transmitted. The key-down is gone.
 
 My earlier "refutation" of hypothesis D was too narrow: tx_done_down proved the down reached the AIR,
-but on-air != delivered. Codex's warning that a completed TX still does not establish dongle receipt
+but on-air != delivered. The review's warning that a completed TX still does not establish dongle receipt
 was exactly right.
 
 ### Consequence for the fix

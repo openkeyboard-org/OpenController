@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Copyright 2026 Eric Molitor (EMulator)
 # SPDX-License-Identifier: Apache-2.0
-"""KBD_REST_IDLE_TICKS hold sweep, v2 (after the Codex protocol review).
+"""KBD_REST_IDLE_TICKS hold sweep, v2 (after the protocol review).
 C: key-from-settled-rest episodes, full tail captured (reconnect, hold, rest entry, lock), bracketed floors,
    resting counterfactual -> total and excess mC.  D: continuous host capture, strict one-ordered-pair scoring,
    jittered rest depths (far ~6 s, near ~0.9 s).  W: seeded typing-cadence workload (identical across H):
@@ -80,7 +80,7 @@ def score_all(ev,tkeys,slot_ms):
     """Return (per-key (result, latency, n), stray). Sequential pairing if the stream is exactly one
     ordered down/up per key, each down after its key and before the next key; otherwise per-key
     windows. `stray` counts captured events attributed to no key -- a non-zero stray voids the
-    'exactly one ordered down/up' claim for the phase (Codex review)."""
+    'exactly one ordered down/up' claim for the phase."""
     pairs=[]; i=0
     while i<len(ev)-1:
         if ev[i][1]=="down" and ev[i+1][1]=="up": pairs.append((ev[i][0],ev[i+1][0])); i+=2

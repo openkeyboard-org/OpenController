@@ -34,7 +34,7 @@ Evidence chain, all on hardware:
   exactly (final XOR collapses the tag to zeros — the s0 block returned the
   CBC-MAC state still in the engine), at ~96% failure when one BB callback
   landed inside the computation and ~0% when none did.
-- Codex disassembly of the linked LIBCH59xBLE.a v1.4.2: `BB_IRQLibHandler`
+- Disassembly of the linked LIBCH59xBLE.a v1.4.2: `BB_IRQLibHandler`
   reads `AES_STA`, clears bits 1 then 0 (only when bit 1 is set), never
   touches CFG/KEY/DATA, never calls `phy_status_clear`. Conclusion: BLEB
   handler preemption aborts the op; the exact register-level trigger inside
@@ -71,7 +71,7 @@ now diagnostics only.
 
 **Tried and withdrawn:** masking `mstatus.MIE` across each
 `hal_aes_encrypt_block` as defense in depth. Architecturally sound per the
-Codex review (VTF/HPE interrupts are MIE-maskable on QingKe V4C; WCH's own
+review (VTF/HPE interrupts are MIE-maskable on QingKe V4C; WCH's own
 RTOS ports use `csrrci mstatus, 8`), and a no-op in host builds — but on
 silicon both ends failed at their first masked AES call (receiver: session
 announces silently never transmit; keyboard: dead at announce-verify). The
@@ -461,7 +461,7 @@ receiver's ~3 s boot window (mint + announce happen at that connect).
 - `firmware/docs/LINK-ENCRYPTION-STATUS.md` — feature status and design notes
 - `firmware/docs/CRASH-DEBUG-PLAN.md` (branch `firmware-crash-debug`) — the
   refuted HardFault investigation, retained as a record; **its premise is void**
-- Codex sessions: `019feb15-3314-7e71-a94e-bc9453eabea6` (first AES review),
+- Review sessions: `019feb15-3314-7e71-a94e-bc9453eabea6` (first AES review),
   `019febc6-c8a4-78b2-b5c0-bca2072f95fb` (adversarial review of the crash plan),
   `019fec05-2531-7ae3-9869-139bf780fd68` (disconnect chain arithmetic),
   `019fec41-5126-7603-bf11-17a7ad62f579` (AES asymmetry + the §4 experiment)

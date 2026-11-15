@@ -61,7 +61,7 @@ def test_the_wrap_is_a_small_forward_step(lib):
 
 
 def test_a_stale_read_across_the_wrap_is_not_a_huge_advance(lib):
-    """Codex's sequence: M-2 -> 1 -> M-1 -> 2 is four ticks of real time."""
+    """The review's sequence: M-2 -> 1 -> M-1 -> 2 is four ticks of real time."""
     assert run(lib, [M - 2, 1, M - 1, 2]) == [0, 3, 3, 4]
 
 

@@ -50,7 +50,7 @@ is genuinely zero-impact.
 - **CCM counter persistence across reboot.** The per-boot random start
   (`4ef00be`) makes keystream reuse unlikely but does not guarantee it. Reserved
   counter ranges in flash, or per-session keys, is the real answer.
-- One remaining Codex finding: the ISR race on `seal_*`, only reachable under
+- One remaining review finding: the ISR race on `seal_*`, only reachable under
   `STOCK_ISR_FAST_RESPONSE=1`, which is not the default.
 
   The other two from that set are **closed**, and this list used to keep

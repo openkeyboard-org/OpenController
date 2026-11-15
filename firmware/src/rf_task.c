@@ -530,7 +530,7 @@ static uint32_t hop_anchor;             /* RTC32K phase anchor (gp+0x78 equivale
 static volatile uint16_t since_rx;      /* hop slots since the last caught poll */
 static uint32_t pending_anchor;         /* anchor latched at the 2nd 15-byte (rx-13) */
 
-/* Response-slot latch (Codex): the response must TX on the channel the poll was
+/* Response-slot latch: the response must TX on the channel the poll was
  * received on, not the (possibly already-advanced) hop channel, and the hop must
  * not retune the radio while a response is pending. */
 static volatile uint8_t  response_channel;
@@ -641,7 +641,7 @@ volatile uint8_t rf_last_config_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_rx_status __attribute__((section(".diag_safe")));
 volatile uint8_t rf_last_tx_status __attribute__((section(".diag_safe")));
 volatile uint32_t tmr0_irq_count __attribute__((section(".diag_safe")));
-/* --- Step-1/hop-hypothesis breadcrumbs (Codex): survive the fault (.diag_safe,
+/* --- Step-1/hop-hypothesis breadcrumbs: survive the fault (.diag_safe,
  * NOLOAD) so a watchdog-OFF spin + SRAM snapshot reveals WHERE the fault occurred,
  * not just that it did. entered_connected/connected_tick/hop_advance == 0 at fault
  * exonerates the hand-rolled RTC hop; last_rf_op localizes the RF path in flight;
@@ -1877,7 +1877,7 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
         if (hid_tx_down_inflight && response_pending) {
             /* response_pending still set == this TX_FINISH is THIS connected response
              * (the handler clears it just below), not a keepalive/pairing-beacon
-             * finish inheriting a flag left stale by an abandoned TX (codex). */
+             * finish inheriting a flag left stale by an abandoned TX. */
             RF_DIAG_INC(ll_hid_tx_done_down);   /* a key-down frame COMPLETED on air */
         }
         hid_tx_down_inflight = 0;
@@ -1998,7 +1998,7 @@ static void rf_do_response_tx(void)
         /* Select the head atomically against the RX-ISR retire: the occupancy
          * test and the slot index must observe ONE head, or a retire landing
          * between them would make us transmit an already-acknowledged (older)
-         * state as if it were new (codex). */
+         * state as if it were new. */
         uint32_t irq = rf_irq_save();
         uint8_t  h   = hid_fifo_head;
         uint8_t  have = (uint8_t)((uint8_t)(hid_fifo_tail - h) != 0u);
@@ -2118,7 +2118,7 @@ static void rf_do_response_tx(void)
     if (tx_status == 0 && carries_report) {
         /* Only a STARTED transmission makes this head eligible for ack-retire.
          * Not cleared on failure: an earlier successful send of the same head
-         * keeps its eligibility (codex). */
+         * keeps its eligibility. */
 #if KBD_RF_CRYPT
         /* ...and not in a control phase a sealed keepalive already went out
          * in (see crypt_phase_tainted): the head still goes on air, but only a
@@ -2468,7 +2468,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
     if (events & RF_EVT_DISCONNECT) {
         if (rf_state == RF_STATE_CONNECTED) {
 #if RF_DIAG_COUNTERS
-            /* Drop snapshot (Codex): capture the keyboard's lock state at the moment
+            /* Drop snapshot: capture the keyboard's lock state at the moment
              * supervision fires. High since_rx => keyboard stopped hearing polls
              * (lost lock / dongle stopped). idx/channel = where it was when it lost
              * it. rtc lets us correlate against the dongle's last_rx_rtc. */
@@ -2488,7 +2488,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
 #endif
             rf_tmr0_stop();
             response_pending = 0;
-            hid_head_sent = 0;   /* nothing is in flight across a teardown (codex) */
+            hid_head_sent = 0;   /* nothing is in flight across a teardown */
             /* The dongle releases every key on the host when it lapses, so the
              * newest queued state no longer describes the host: the next report
              * must be queued even when it repeats it (the host driver re-asserts
@@ -2796,7 +2796,7 @@ static void rf_enter_connected(void)
      * transmitted under it yet. Keep the QUEUE (that is the whole point of the
      * fix -- a report queued while the link was down must survive), but drop
      * transmission eligibility so the first accepted poll of the new session
-     * cannot retire an entry the peer never received (codex). */
+     * cannot retire an entry the peer never received. */
     hid_head_sent = 0;
     hop_anchor = pending_anchor;   /* seeded at the 2nd 15-byte (rx-13) */
     since_rx = 0;
@@ -3457,8 +3457,8 @@ void RF_QueueHIDReport(const uint8_t report[8])
             /* Full: coalesce onto the NEWEST queued entry instead of discarding
              * this report. Dropping it outright can strand a key forever -- fill
              * the ring while a key is held, drop the all-keys-up, and nothing
-             * ever retries the release because the MCU only sends changes
-             * (codex). Overwriting the newest sacrifices one intermediate
+             * ever retries the release because the MCU only sends changes.
+             * Overwriting the newest sacrifices one intermediate
              * transition but guarantees the latest physical state is queued.
              * The newest is never the in-flight head while the ring is full. */
             uint8_t *slot = hid_fifo[(uint8_t)(hid_fifo_tail - 1u) & (HID_FIFO_SLOTS - 1u)];
