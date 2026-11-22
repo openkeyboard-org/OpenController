@@ -139,7 +139,7 @@ bench sleep (`KBD_SLEEP_BENCH_HOOK=1`) blocks for seconds, so it requires
 
 `KBD_BLE` adds a Bluetooth LE keyboard (HID over GATT, three profiles) to
 the module. A boot runs either the 2.4 GHz link or BLE, never both: a
-12-byte record in DataFlash (0x77B00, `src/transport_mode.c`) holds the
+32-byte record in DataFlash (0x77B00, `src/transport_mode.c`) holds the
 mode and profile, and `A6 31-33` (a BLE profile) or `A6 30` (back to
 2.4 GHz) writes it and resets the module, which then answers `5B 34` and
 the link state. Each profile has its own bond block (0x77C00, 0x77D00,

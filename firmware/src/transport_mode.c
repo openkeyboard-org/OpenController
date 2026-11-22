@@ -174,6 +174,7 @@ void TransportMode_StoreName(const uint8_t *name, uint8_t len)
     if (len > TRANSPORT_NAME_MAX) {
         len = TRANSPORT_NAME_MAX;
     }
+    /* tmos_memcmp() is TRUE on a match, the reverse of memcmp(). */
     if (len == current.name_len && tmos_memcmp(name, current.name, len)) {
         return;   /* the host sends it on every link: write only a change */
     }
