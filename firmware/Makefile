@@ -604,8 +604,13 @@ endif
 # the pins in it were only as good as someone remembering. Mirrors OpenDongle's
 # `make -C firmware test`. Not a release gate: shipping still needs the pinned
 # toolchains and the hardware matrix.
+#
+# Run with pytest, which the suite needs: five of its modules are written
+# against it (fixtures, parametrize) and `unittest discover` could neither
+# import them without it nor run them with it. pytest runs the unittest-style
+# modules too, so this one command is the whole suite.
 test:
-	cd tests && $(PYTHON) -m unittest discover
+	cd tests && $(PYTHON) -m pytest -q
 
 # Clearing the markers is a real build step: it runs only when the goal actually
 # executes, and `make -n` prints it instead of doing it.
