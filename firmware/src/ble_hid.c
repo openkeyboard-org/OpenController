@@ -537,6 +537,9 @@ static uint16_t task_event(uint8_t id, uint16_t events)
     if (events & EVT_PAIR_TIMEOUT) {
         if (pairing && !HidDev_Secure()) {
             pairing = 0;
+            /* adv_apply() shuts the gate only when it starts advertising,
+             * and with a host connected but not yet paired it does not. */
+            set_pairing_allowed(FALSE);
             adv_apply();
             KeyboardUart_SendStatus(ST_REJECTED);
         }
