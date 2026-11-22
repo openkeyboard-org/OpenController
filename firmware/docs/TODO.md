@@ -377,6 +377,18 @@ markers are present; explicit `KBD_RF_CRYPT=0` downgrades deliberately).
 - **CH570 build is broken on the OpenDongle bench branch** — fails its
   stack-floor assert, pre-existing and unrelated to the diagnostics added there.
 
+### Transport record is a single copy
+
+`record_write()` (`src/transport_mode.c`) erases the one copy of the record
+at 0x77B00 and then programs the new one, and does not report a failed
+program. Power lost in between leaves no valid record, and the next boot
+takes that for a first boot: it erases the three BLE bond blocks and comes
+up on 2.4 GHz with the stored name gone. The window is a few milliseconds,
+at a mode switch, a pairing, or a name change. Closing it needs a second
+copy (write the new one, then retire the old; boot from the newer valid
+one), which moves the DataFlash layout, and a status from `record_write()`
+so that a switch resets only once the selection is stored.
+
 ## 8. Bench recipes
 
 **Pairing order is load-bearing FOR THE LINK, and no longer for capability.**
