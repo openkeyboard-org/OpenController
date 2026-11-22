@@ -24,3 +24,7 @@ KBD_DEEP_SLEEP := 1
 # Host wake (CHWAKE): PB13 is this board's TXD1 under the remap, and the bench
 # host has no wake line.
 KBD_HOST_WAKE := 0
+
+# No Bluetooth LE mode yet: the stock hosts this board serves expect BLE from
+# the vendor module, and nothing here has been tested against them.
+KBD_BLE := 0

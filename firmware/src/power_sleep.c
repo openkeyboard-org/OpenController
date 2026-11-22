@@ -55,6 +55,10 @@
 #include "keyboard_uart.h"
 #include "rf_task.h"
 #include "power_sleep.h"
+#if KBD_BLE
+#include "ble_hid.h"
+#include "transport_mode.h"
+#endif
 #include "sleep_protocol.h"
 
 #ifndef KBD_UART1_REMAP
@@ -558,6 +562,33 @@ __HIGH_CODE
 uint32_t CH59x_LowPower(uint32_t time)
 {
     IDLECB_CALL();
+
+#if KBD_BLE
+    /* A BLE boot has its own rules: the 2.4 GHz ones below would deep-sleep
+     * a live BLE link. */
+    if (TransportMode_IsBle()) {
+#if KBD_BLE_SLEEP
+        /* Sleep to the next radio event TMOS hands us, the stock WCH way,
+         * waking early on the host's RX edge. Only once the host has armed
+         * auto-sleep (it then leads a frame after a pause with a wake
+         * byte), never with reports or a switch pending, and not within
+         * the rest hold-off after the last keyboard report, which is what
+         * the host assumes when it decides whether to send that byte. */
+        if (!pwr_autosleep || OpenBoot_EntryPending() || !BleHid_CanSleep()) {
+            IDLECB_GATE(1);
+            return 3;
+        }
+        if (!pwr_holdoff_expired() || !KeyboardUart_TxIdle() || !KeyboardUart_RxQuiet()) {
+            IDLECB_GATE(4);
+            return 3;
+        }
+        IDLECB_GATE(2);
+        return pwr_sleep_until(time);
+#else
+        return 3;
+#endif
+    }
+#endif
 
 #if KBD_SLEEP_BENCH_HOOK
     if (pwr_bench_request) {

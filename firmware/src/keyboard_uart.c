@@ -449,7 +449,15 @@ static uint8_t expected_for_header(uint8_t b)
     switch (b) {
     case 0xA6:
     case 0x61:
+#if KBD_BLE
+    case 0xA7:  /* battery level for the BLE Battery Service */
+    case 0xA4:  /* system control bitmap */
+#endif
         return 3;
+#if KBD_BLE
+    case 0xA3:  /* consumer usage, 16-bit little endian */
+        return 4;
+#endif
     case 0xA1:
         return 10;
 #if KBD_CRYPT_BENCH_KEY
@@ -492,6 +500,12 @@ static uint8_t frame_is_valid(void)
 
     if (cmd == 0xA6) {
         return checksum(rx_buf, 2) == rx_buf[2];
+#if KBD_BLE
+    } else if (cmd == 0xA7 || cmd == 0xA4) {
+        return checksum(rx_buf, 2) == rx_buf[2];
+    } else if (cmd == 0xA3) {
+        return checksum(rx_buf, 3) == rx_buf[3];
+#endif
     } else if (cmd == 0xA1) {
         return checksum(rx_buf, 9) == rx_buf[9];
     } else if (cmd == 0xA9) {
@@ -583,6 +597,18 @@ static void dispatch_frame(void)
         /* Same no-ack contract as 0xAF: the 0x62 reply IS the response. */
         if (frame_cb) {
             frame_cb(KBD_UART_CMD_TX_OUTCOME, 0, 0, 0);
+        }
+#endif
+#if KBD_BLE
+    } else if (cmd == 0xA7 || cmd == 0xA4) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(cmd, rx_buf[1], 0, 0);
+        }
+    } else if (cmd == 0xA3) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(0xA3, 0, &rx_buf[1], 2);
         }
 #endif
     } else {

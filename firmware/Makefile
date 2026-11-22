@@ -192,6 +192,19 @@ endif
 ifneq ($(filter -DKBD_HOST_WAKE -DKBD_HOST_WAKE=% -UKBD_HOST_WAKE KBD_HOST_WAKE KBD_HOST_WAKE=%,$(EXTRA_CFLAGS)),)
 $(error KBD_HOST_WAKE must not go through EXTRA_CFLAGS; use `make KBD_HOST_WAKE=0|1` or the board profile)
 endif
+# Bluetooth LE mode (BLUETOOTH.md in the MK65MX QMK tree): a boot-time choice
+# between the 2.4 GHz link and a BLE HID keyboard, kept in DataFlash. Board-
+# owned, since the board's host firmware must drive it; A/B goes through
+# `make KBD_BLE=0|1`.
+ifneq ($(words $(strip $(KBD_BLE))),1)
+$(error BOARD '$(BOARD)' must set KBD_BLE to 0 or 1)
+endif
+ifeq ($(filter 0 1,$(strip $(KBD_BLE))),)
+$(error BOARD '$(BOARD)' has invalid KBD_BLE='$(KBD_BLE)')
+endif
+ifneq ($(findstring KBD_BLE,$(EXTRA_CFLAGS)),)
+$(error KBD_BLE and its settings must not go through EXTRA_CFLAGS; use `make KBD_BLE=0|1` or the board profile)
+endif
 
 # ---------------------------------------------------------------------------
 # OpenBoot integration
@@ -301,6 +314,38 @@ CFLAGS += -DKBD_FACTORY_MAC=$(KBD_FACTORY_MAC)
 CFLAGS += -DKBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)
 CFLAGS += -DKBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)
 CFLAGS += -DKBD_HOST_WAKE=$(KBD_HOST_WAKE)
+CFLAGS += -DKBD_BLE=$(KBD_BLE)
+ifeq ($(strip $(KBD_BLE)),1)
+# LE Secure Connections, on by default. The library requires a buffer
+# longer than 69 bytes for it (BufMaxLen, CH59xBLE_LIB.h).
+KBD_BLE_LESC ?= 1
+ifeq ($(filter 0 1,$(strip $(KBD_BLE_LESC))),)
+$(error KBD_BLE_LESC must be 0 or 1, got '$(KBD_BLE_LESC)')
+endif
+CFLAGS += -DKBD_BLE_LESC=$(KBD_BLE_LESC)
+ifeq ($(strip $(KBD_BLE_LESC)),1)
+CFLAGS += -DBLE_BUFF_MAX_LEN=70
+endif
+# Sleep between BLE radio events (power_sleep.c), off by default until it
+# has been measured on the bench: `make KBD_BLE_SLEEP=1`. Needs the
+# deep-sleep plumbing of KBD_DEEP_SLEEP.
+KBD_BLE_SLEEP ?= 0
+ifeq ($(filter 0 1,$(strip $(KBD_BLE_SLEEP))),)
+$(error KBD_BLE_SLEEP must be 0 or 1, got '$(KBD_BLE_SLEEP)')
+endif
+ifeq ($(strip $(KBD_BLE_SLEEP))$(strip $(KBD_DEEP_SLEEP)),10)
+$(error KBD_BLE_SLEEP=1 needs KBD_DEEP_SLEEP=1)
+endif
+CFLAGS += -DKBD_BLE_SLEEP=$(KBD_BLE_SLEEP)
+# One peripheral link and no central: the CONFIG.h default reserves three
+# central links the module never uses. One SNV block per profile; the app
+# points the library at the booted profile's block (transport_mode.h).
+CFLAGS += -DPERIPHERAL_MAX_CONNECTION=1 -DCENTRAL_MAX_CONNECTION=0
+CFLAGS += -DBLE_SNV_ADDR=0x7C00 -DBLE_SNV_NUM=1
+# Device Information PnP ID: the board's USB IDs (vendor-ID source USB-IF).
+CFLAGS += -DKBD_BLE_PNP_VID=$(KBD_BLE_PNP_VID) -DKBD_BLE_PNP_PID=$(KBD_BLE_PNP_PID)
+CFLAGS += -DKBD_BLE_PNP_VER=$(KBD_BLE_PNP_VER)
+endif
 ifeq ($(strip $(KBD_DEEP_SLEEP)),1)
 # HAL_SLEEP=TRUE un-stubs the SDK sleep plumbing (MCU.c wires the TMOS
 # idleCB); the SDK's SLEEP.c is swapped for the app-owned power_sleep.c
@@ -564,6 +609,9 @@ endif
 # Linker flags. -L $(BUILD) resolves ld/ch592f.ld's `INCLUDE memory.ld`
 # against the per-slot generated MEMORY block.
 LDFLAGS := $(ARCH) -T ld/ch592f.ld -L $(BUILD)
+# The RAM layout differs with the BLE mode (ld/ble/layout.ld).
+LD_VARIANT := $(if $(filter 1,$(strip $(KBD_BLE))),ble,2g4)
+LDFLAGS += -L ld/$(LD_VARIANT)
 LDFLAGS += -nostartfiles
 LDFLAGS += -Wl,--gc-sections
 LDFLAGS += -Wl,--print-memory-usage
@@ -572,6 +620,7 @@ LDFLAGS += --specs=nano.specs --specs=nosys.specs
 
 # Include paths
 INCLUDES := -I src
+INCLUDES += -I src/ble
 INCLUDES += -I $(BLE_LIB_DIR)
 INCLUDES += -I $(SDK_BLE_DIR)/HAL/include
 INCLUDES += -I $(SDK_SRC_DIR)/StdPeriphDriver/inc
@@ -596,6 +645,15 @@ APP_SRC += src/sleep_protocol.c
 endif
 ifeq ($(strip $(KBD_HOST_WAKE)),1)
 APP_SRC += src/host_wake.c
+endif
+ifeq ($(strip $(KBD_BLE)),1)
+APP_SRC += src/transport_mode.c
+APP_SRC += src/ble_hid.c
+APP_SRC += src/ble_diag.c
+APP_SRC += src/ble/hiddev.c
+APP_SRC += src/ble/hidkbdservice.c
+APP_SRC += src/ble/battservice.c
+APP_SRC += src/ble/devinfoservice.c
 endif
 APP_SRC += $(OPENBOOT)/firmware/app/openboot_app.c
 # Link encryption (see KBD_RF_CRYPT above). Compiled only when enabled.
@@ -683,6 +741,14 @@ SCHED_SRC += src/fault_handler.S
 LIBS := $(BLE_LIB_DIR)/LIBCH59xBLE.a
 LIBS += $(SDK_SRC_DIR)/StdPeriphDriver/libISP592.a
 
+# A BLE build places WCH's sleep routines one by one (ld/ble/layout.ld):
+# with __HIGH_CODE empty they land in per-function sections, so the three
+# the firmware never calls are dropped instead of taking RAM.
+ifeq ($(strip $(KBD_BLE)),1)
+SDK_PWR_CFLAGS := -D__HIGH_CODE=
+endif
+$(BUILD)/CH59x_pwr.o: CFLAGS += $(SDK_PWR_CFLAGS)
+
 # Collect all sources
 C_SRCS := $(APP_SRC) $(HAL_SRC) $(DRV_SRC) $(CORE_SRC)
 S_SRCS := $(STARTUP_SRC) $(SCHED_SRC)
@@ -702,11 +768,12 @@ OBJS   := $(C_OBJS) $(S_OBJS)
 # prepend reaches $(shell) is version-dependent, and a bare invocation could
 # silently fingerprint a different compiler than the build uses.
 CC_FOR_VERSION := $(if $(findstring /,$(CC)),$(CC),$(MRS_TOOLCHAIN)/$(CC))
-CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "INCLUDES=$(INCLUDES)" "BOARD=$(BOARD)" "OPENBOOT_BOARD=$(OPENBOOT_BOARD)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
+CONFIG_FINGERPRINT := $(shell printf '%s\n' "CC=$(CC)" "AS=$(AS)" "CFLAGS=$(CFLAGS)" "SDK_PWR_CFLAGS=$(SDK_PWR_CFLAGS)" "INCLUDES=$(INCLUDES)" "BOARD=$(BOARD)" "OPENBOOT_BOARD=$(OPENBOOT_BOARD)" "SLOT=$(SLOT)" "OPENBOOT=$(OPENBOOT_REVISION)" "TOOLCHAIN=$(MRS_TOOLCHAIN)" "CCVER=$(shell "$(CC_FOR_VERSION)" -dumpfullversion 2>/dev/null)" | sha256sum | cut -d' ' -f1)
 CONFIG_STAMP := $(BUILD)/.config-$(CONFIG_FINGERPRINT)
 
 # VPATH for source file lookup
 VPATH := src
+VPATH += src/ble
 VPATH += $(SDK_BLE_DIR)/HAL
 VPATH += $(SDK_SRC_DIR)/StdPeriphDriver
 VPATH += $(SDK_SRC_DIR)/RVMSIS
@@ -743,6 +810,7 @@ print-board-config:
 	    'KBD_DCDC_ENABLE=$(KBD_DCDC_ENABLE)' \
 	    'KBD_DEEP_SLEEP=$(KBD_DEEP_SLEEP)' \
 	    'KBD_HOST_WAKE=$(KBD_HOST_WAKE)' \
+	    'KBD_BLE=$(KBD_BLE)' \
 	    'KBD_REST=$(KBD_REST)' \
 	    'KBD_REST_IDLE_MS=$(KBD_REST_IDLE_MS)' \
 	    'KBD_REST_IDLE_TICKS=$(KBD_REST_IDLE_TICKS)' \
@@ -781,7 +849,7 @@ $(MEMORY_LD): FORCE | $(BUILD)
 
 FORCE:
 
-$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld $(MEMORY_LD)
+$(BUILD)/$(TARGET).elf: $(OBJS) $(LIBS) ld/ch592f.ld ld/$(LD_VARIANT)/layout.ld $(MEMORY_LD)
 	$(LD) $(LDFLAGS) $(OBJS) $(LIBS) -o $@
 
 $(BUILD)/$(TARGET).hex: $(BUILD)/$(TARGET).elf

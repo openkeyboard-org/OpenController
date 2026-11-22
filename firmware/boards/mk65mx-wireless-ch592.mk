@@ -27,3 +27,12 @@ KBD_DEEP_SLEEP := 1
 # the host's A6 58 query with 5B 38. Driven from boot. Needs PB13 free, so
 # never with KBD_UART1_REMAP=1.
 KBD_HOST_WAKE := 1
+
+# Bluetooth LE mode next to the 2.4 GHz link, chosen at boot (A6 31-33 select
+# a BLE profile, A6 30 returns to 2.4 GHz; each switch resets the module).
+# The PnP ID reuses the keyboard's USB vendor and product IDs and B02's USB
+# device version.
+KBD_BLE := 1
+KBD_BLE_PNP_VID := 0x4D4B
+KBD_BLE_PNP_PID := 0x0002
+KBD_BLE_PNP_VER := 0x0020
