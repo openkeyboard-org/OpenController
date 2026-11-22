@@ -326,8 +326,9 @@ CFLAGS += -DKBD_BLE_LESC=$(KBD_BLE_LESC)
 ifeq ($(strip $(KBD_BLE_LESC)),1)
 CFLAGS += -DBLE_BUFF_MAX_LEN=70
 endif
-# Sleep between BLE radio events (power_sleep.c), off by default until it
-# has been measured on the bench: `make KBD_BLE_SLEEP=1`. Needs the
+# Sleep between BLE radio events (power_sleep.c). A board profile turns it on
+# once it has been measured there (mk65mx-wireless-ch592 does); anywhere
+# else it is off unless asked for with `make KBD_BLE_SLEEP=1`. Needs the
 # deep-sleep plumbing of KBD_DEEP_SLEEP.
 KBD_BLE_SLEEP ?= 0
 ifeq ($(filter 0 1,$(strip $(KBD_BLE_SLEEP))),)

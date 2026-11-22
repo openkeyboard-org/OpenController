@@ -33,6 +33,12 @@ KBD_HOST_WAKE := 1
 # The PnP ID reuses the keyboard's USB vendor and product IDs and B02's USB
 # device version.
 KBD_BLE := 1
+# Sleep between BLE radio events (the Makefile's default is 0). Measured on
+# this board on 2026-11-22, connected to a PC and idle, at 4.0 V with the
+# keyboard's lighting off: 16.3 mA at the battery without it, a few tenths
+# of a milliamp with it, the link staying up and keys arriving after 30 s
+# idle. `make KBD_BLE_SLEEP=0` builds without it.
+KBD_BLE_SLEEP := 1
 KBD_BLE_PNP_VID := 0x4D4B
 KBD_BLE_PNP_PID := 0x0002
 KBD_BLE_PNP_VER := 0x0020

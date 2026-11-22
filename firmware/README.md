@@ -83,6 +83,7 @@ producing a wrong image.
 | `KBD_DCDC_ENABLE` | 1 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
 | `KBD_HOST_WAKE` | 0 | 1 | 1 = raise CHWAKE (PB13) before every `5A`/`5B`/`5C` frame; needs PB13 free, so never with `KBD_UART1_REMAP=1` |
 | `KBD_BLE` | 0 | 1 | 1 = a Bluetooth LE HID mode beside the 2.4 GHz link, chosen at boot (in development, not yet bench-tested) |
+| `KBD_BLE_SLEEP` | - | 1 | 1 = on a Bluetooth boot, sleep between radio events once the host has armed auto-sleep. On the MK65MX Wireless, connected and idle: 16.3 mA at the battery without it, a few tenths of a milliamp with it (one bench session, 2026-11-22). Only exists with `KBD_BLE=1`; `make KBD_BLE_SLEEP=0` builds without it |
 
 `KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
 populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
