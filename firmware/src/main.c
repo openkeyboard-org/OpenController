@@ -195,6 +195,10 @@ static void watchdog_init(void) { }
 #define WATCHDOG_FEED()  ((void)0)
 #endif
 
+/* Sequence byte of the last mouse frame taken from the host (see 0xA8). */
+static uint8_t mouse_seq_last;
+static uint8_t mouse_seq_valid;
+
 static void handle_uart_frame(uint8_t cmd, uint8_t sub,
                               const uint8_t *payload, uint8_t len)
 {
@@ -335,19 +339,52 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
         }
         return;
     }
-    if (cmd == 0xA3 || cmd == 0xA4) {
-        /* Consumer and system reports: BLE carries them; the 2.4 GHz link
-         * to OpenDongle doesn't, so they are only ACKed there. */
+    if (cmd == 0xA4) {
+        /* System control: BLE carries it; the 2.4 GHz link has no frame for
+         * it, so there it is only ACKed. */
         if (ble_mode) {
-            if (cmd == 0xA3) {
-                BleHid_QueueConsumer((uint16_t)(payload[0] | ((uint16_t)payload[1] << 8)));
-            } else {
-                BleHid_QueueSystem(sub);
-            }
+            BleHid_QueueSystem(sub);
         }
         return;
     }
 #endif
+
+    if (cmd == 0xA3) {
+        /* Consumer usage: both links carry it. */
+        uint16_t usage = (uint16_t)(payload[0] | ((uint16_t)payload[1] << 8));
+#if KBD_BLE
+        if (ble_mode) {
+            BleHid_QueueConsumer(usage);
+            return;
+        }
+#endif
+        RF_QueueConsumer(usage);
+        return;
+    }
+
+    if (cmd == 0xA8) {
+        /* Mouse report: the 2.4 GHz link carries it. The BLE report map has
+         * no mouse, so a BLE boot only ACKs it.
+         *
+         * The host repeats a frame whose ACK it did not hear, and a repeated
+         * mouse frame is its movement twice, so each carries a sequence byte
+         * and a frame that repeats the last one taken is ACKed and dropped.
+         * The host's capability query (A6 5B) starts the comparison afresh:
+         * it asks at start-up and on every new link, so a host that reset
+         * and counts from the beginning again is not mistaken for a retry. */
+        if (mouse_seq_valid && sub == mouse_seq_last) {
+            return;
+        }
+        mouse_seq_last = sub;
+        mouse_seq_valid = 1;
+#if KBD_BLE
+        if (ble_mode) {
+            return;
+        }
+#endif
+        RF_QueueMouse(payload);
+        return;
+    }
 
     if (cmd != 0xA6) {
         return;
@@ -477,6 +514,15 @@ static void handle_uart_frame(uint8_t cmd, uint8_t sub,
 #if KBD_KEX
         KeyboardUart_SendStatus(0x3A);
 #endif
+        break;
+
+    case 0x5B: /* consumer and mouse reports over 2.4 GHz (OpenController
+                * extension): answered with 5B 3B. The host sends a mouse
+                * frame (0xA8) only after it, since an older module does not
+                * know that header, and media keys over 2.4 GHz only after it,
+                * since an older module ACKs them there and drops them. */
+        mouse_seq_valid = 0;
+        KeyboardUart_SendStatus(0x3B);
         break;
 
     case 0x59: /* BLE capability query (OpenController extension): a module

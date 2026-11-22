@@ -147,7 +147,17 @@ service code adapted from WCH's `HID_Keyboard` example (`src/ble/`, see
 `NOTICE`). The host asks for the mode with `A6 59`; a `KBD_BLE` build
 answers `5B 39`, and then the host may send the name (`A9`, kept in the
 record), the battery level (`A7`) and consumer and system reports (`A3`,
-`A4`), which a BLE boot carries beside the keyboard report. To fit RAM,
+`A4`), which a BLE boot carries beside the keyboard report. A 2.4 GHz boot
+carries consumer usages too (`A3`), and mouse reports (`A8`: a sequence
+byte, then buttons, X, Y, wheel, pan), under the radio tags the dongle
+already forwards to its consumer and mouse interfaces; it has no frame for
+system control. The host asks with `A6 5B`, any build answers `5B 3B`, and
+only then does the host send a mouse frame or expect media keys to work over
+2.4 GHz. A mouse frame whose sequence byte repeats the last one taken is a
+retry after a lost ACK: it is ACKed again and dropped. Mouse movement
+that has to wait for the link is added up, not queued report by report, and
+consumer and mouse frames go on air at least two polls apart
+(`HID_EXTRA_GAP_POLLS` in `src/rf_task.c` says why). To fit RAM,
 the 2.4 GHz-only RAM code and the BLE library's connection objects share
 one window, which `main()` fills at boot for the mode that runs
 (`ld/ble/layout.ld`), and the BLE-only variables live below the stack
