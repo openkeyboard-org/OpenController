@@ -449,7 +449,15 @@ static uint8_t expected_for_header(uint8_t b)
     switch (b) {
     case 0xA6:
     case 0x61:
+#if KBD_BLE
+    case 0xA7:  /* battery level for the BLE Battery Service */
+    case 0xA4:  /* system control bitmap */
+#endif
         return 3;
+    case 0xA3:  /* consumer usage, 16-bit little endian */
+        return 4;
+    case 0xA8:  /* mouse report: sequence, buttons, X, Y, wheel, pan (sent only after 5B 3B) */
+        return 8;
     case 0xA1:
         return 10;
 #if KBD_CRYPT_BENCH_KEY
@@ -492,6 +500,14 @@ static uint8_t frame_is_valid(void)
 
     if (cmd == 0xA6) {
         return checksum(rx_buf, 2) == rx_buf[2];
+#if KBD_BLE
+    } else if (cmd == 0xA7 || cmd == 0xA4) {
+        return checksum(rx_buf, 2) == rx_buf[2];
+#endif
+    } else if (cmd == 0xA3) {
+        return checksum(rx_buf, 3) == rx_buf[3];
+    } else if (cmd == 0xA8) {
+        return checksum(rx_buf, 7) == rx_buf[7];
     } else if (cmd == 0xA1) {
         return checksum(rx_buf, 9) == rx_buf[9];
     } else if (cmd == 0xA9) {
@@ -585,6 +601,26 @@ static void dispatch_frame(void)
             frame_cb(KBD_UART_CMD_TX_OUTCOME, 0, 0, 0);
         }
 #endif
+#if KBD_BLE
+    } else if (cmd == 0xA7 || cmd == 0xA4) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(cmd, rx_buf[1], 0, 0);
+        }
+#endif
+    } else if (cmd == 0xA3) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            frame_cb(0xA3, 0, &rx_buf[1], 2);
+        }
+    } else if (cmd == 0xA8) {
+        KeyboardUart_SendAck();
+        if (frame_cb) {
+            /* The sequence byte goes up as `sub`: movement is relative, so
+             * the handler must be able to tell a retry of a frame whose ACK
+             * was lost from a new one. */
+            frame_cb(0xA8, rx_buf[1], &rx_buf[2], 5);
+        }
     } else {
         /* Host ACK to one of our 0x5A/0x5B/0x5C frames. */
 #if KBD_HOST_WAKE

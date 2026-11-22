@@ -390,19 +390,122 @@ static uint32_t pending_session_aa;
 #error "HID_FIFO_SLOTS must be a power of two: the head/tail indices are free-running and masked"
 #endif
 static uint8_t hid_fifo[HID_FIFO_SLOTS][8];
+/* What each slot holds. The tag is the one the report carries on air, and it
+ * fixes the body length; a shorter body is zero-padded in its slot. */
+#define HID_TAG_KBD      0xA1u   /* boot keyboard, 8 bytes */
+#define HID_TAG_CONSUMER 0xA3u   /* consumer usage, 16-bit LE */
+#define HID_TAG_MOUSE    0xA8u   /* buttons, X, Y, wheel, pan */
+static uint8_t hid_fifo_tag[HID_FIFO_SLOTS];
 static volatile uint8_t hid_fifo_head;      /* ISR-owned: retire on ack */
 static volatile uint8_t hid_fifo_tail;      /* main-loop-owned: enqueue */
 static volatile uint8_t hid_head_sent;      /* head is in flight; an ack may retire it */
 static uint8_t hid_last_queued[8];          /* newest queued state (adjacent-duplicate dedup) */
 static uint8_t hid_last_queued_valid;
 
-/* True while the newest host report holds any key or modifier. */
+/* Consumer and mouse reports share the ring with the keyboard's, in order,
+ * but they are not allowed to fill it: these slots stay free for keyboard
+ * reports, whose loss strands a key. A consumer or mouse report that finds
+ * no room is not dropped either -- it waits here, outside the ring, and
+ * rf_reports_flush() queues it once the link has made room.
+ *
+ * Consumer is a state (the usage held, or none): one word says what the host
+ * must end up with. Mouse movement is relative: what cannot be queued yet is
+ * added up, so a held mouse key costs one waiting report however fast the
+ * host MCU produces them, and no movement is lost short of saturation. */
+#define HID_FIFO_KBD_RESERVE 4u
+static uint16_t consumer_want;      /* usage the host MCU last reported */
+static uint16_t consumer_queued;    /* usage of the newest consumer report queued */
+static uint8_t  consumer_again;     /* the usage still held is to be queued once more */
+static uint8_t  mouse_acc[5];       /* [0] newest buttons; [1..4] X, Y, wheel, pan not yet queued */
+static uint8_t  mouse_acc_dirty;    /* mouse_acc says something the ring does not */
+static uint8_t  mouse_btn_queued;   /* buttons of the newest mouse report queued */
+/* Polls to let pass after a consumer or mouse frame went on air before the
+ * next one may, a re-send of the same report included. Two reasons, both in
+ * the receiver. It gives each of those USB endpoints a single buffer and
+ * replaces a report the host has not collected yet, and the link polls
+ * faster (875 us) than the host does (1 ms): two frames on consecutive polls
+ * can cost the first one. And on an encrypted link it acknowledges a frame
+ * only once it has verified it, which can be a poll later than the keyboard
+ * would re-send, and it forwards every verified copy: for relative mouse
+ * movement that is the movement twice. Waiting two polls covers both; a
+ * keyboard report is not held up (it is whole state, and the receiver drops
+ * its repeats). Counted down in the response path only. */
+#define HID_EXTRA_GAP_POLLS 2u
+static uint8_t  hid_extra_gap;
+
+__HIGH_CODE
+static uint8_t hid_body_len(uint8_t tag)
+{
+    return (uint8_t)(tag == HID_TAG_CONSUMER ? 2u : (tag == HID_TAG_MOUSE ? 5u : 8u));
+}
+
+/* True while the host is holding something a silent link drop would release
+ * under the user's finger: a key or modifier in the newest keyboard report, a
+ * consumer usage, or a mouse button. */
 static inline uint8_t hid_key_held(void)
 {
-    return (uint8_t)(hid_last_queued_valid
-                     && (hid_last_queued[0]|hid_last_queued[1]|hid_last_queued[2]|hid_last_queued[3]
-                        |hid_last_queued[4]|hid_last_queued[5]|hid_last_queued[6]|hid_last_queued[7]));
+    return (uint8_t)((hid_last_queued_valid
+                      && (hid_last_queued[0]|hid_last_queued[1]|hid_last_queued[2]|hid_last_queued[3]
+                         |hid_last_queued[4]|hid_last_queued[5]|hid_last_queued[6]|hid_last_queued[7]))
+                     || consumer_want != 0u || mouse_acc[0] != 0u);
 }
+
+/* The consumer state has to be queued: it changed since the newest report
+ * queued, or the link dropped under a held usage and it is owed again. */
+static inline uint8_t consumer_waiting(void)
+{
+    return (uint8_t)(consumer_want != consumer_queued
+                     || (consumer_again && consumer_want != 0u));
+}
+
+/* A consumer or mouse report is waiting outside the ring. */
+static inline uint8_t hid_reports_waiting(void)
+{
+    return (uint8_t)(mouse_acc_dirty || consumer_waiting());
+}
+
+/* The ring itself is being emptied (start-up, or the host left 2.4 GHz and
+ * its queued reports with it): nothing is queued, so nothing is remembered
+ * as queued. Only for those; a teardown that keeps the ring keeps this. */
+static void hid_reports_forget(void)
+{
+    consumer_want = 0;
+    consumer_queued = 0;
+    consumer_again = 0;
+    for (uint8_t i = 0; i < sizeof(mouse_acc); i++) {
+        mouse_acc[i] = 0;
+    }
+    mouse_acc_dirty = 0;
+    mouse_btn_queued = 0;
+    hid_extra_gap = 0;
+}
+
+/* The link went down and the ring is kept. Queued reports stay queued, and a
+ * release that was still waiting goes out as it would have. What the user
+ * still holds is queued again, so that it is the newest thing the receiver
+ * hears once the link is back. (The receiver releases keyboard keys at the
+ * host when the link lapses; whether it also drops a consumer usage or a
+ * mouse button is its business, and saying it again is right either way.)
+ * Movement that never left is dropped: replayed after a gap it would only
+ * jerk the pointer.
+ *
+ * consumer_queued is left alone: it still says what the newest consumer
+ * report queued or sent was. Zeroing it to force the repeat would make a
+ * release that arrives while the link is down look like no change, and the
+ * usage would stay held at the host. The repeat has its own flag. */
+static void hid_reports_link_lost(void)
+{
+    consumer_again = (uint8_t)(consumer_want != 0u);
+    for (uint8_t i = 1; i < sizeof(mouse_acc); i++) {
+        mouse_acc[i] = 0;
+    }
+    if (mouse_acc[0] != 0u) {
+        mouse_btn_queued = 0;
+    }
+    mouse_acc_dirty = (uint8_t)(mouse_acc[0] != mouse_btn_queued);
+}
+
+static void rf_reports_flush(void);
 
 /* Drop every queued report. IDLE only: the radio is shut then, so the RX ISR
  * that retires the head can't run. */
@@ -414,6 +517,7 @@ static void rf_discard_hid_queue(void)
      * is gone: keeping it would suppress the same state when the host sends it
      * again (a key still held across the discard). */
     hid_last_queued_valid = 0;
+    hid_reports_forget();
 }
 #if KBD_RF_CRYPT
 /* An encrypted boot-keyboard frame is 22 bytes on air, so the response buffer
@@ -1278,6 +1382,7 @@ static void rf_crypt_arm(uint8_t ctrl_hint)
 {
     kbd_crypt_status_t st;
     uint8_t body[8];
+    uint8_t tag = HID_TAG_KBD;
     uint8_t have;
     uint8_t h;
     uint32_t irq;
@@ -1291,6 +1396,17 @@ static void rf_crypt_arm(uint8_t ctrl_hint)
     irq = rf_irq_save();
     h = hid_fifo_head;
     have = (uint8_t)((uint8_t)(hid_fifo_tail - h) != 0u);
+    if (have) {
+        tag = hid_fifo_tag[h & (HID_FIFO_SLOTS - 1u)];
+        /* A consumer or mouse head the response path will hold back
+         * (hid_extra_gap) is not what the next slot says: seal the keepalive
+         * instead. The response path compares what was sealed with what it
+         * decides, so a guess that turns out wrong only costs this seal. */
+        if (tag != HID_TAG_KBD && (hid_extra_gap != 0u || crypt_phase_tainted)) {
+            have = 0;
+            tag = HID_TAG_KBD;
+        }
+    }
     for (uint8_t i = 0; i < 8; i++) {
         body[i] = have ? hid_fifo[h & (HID_FIFO_SLOTS - 1u)][i] : hid_last_acked[i];
     }
@@ -1299,7 +1415,9 @@ static void rf_crypt_arm(uint8_t ctrl_hint)
      * frame is pending, so nothing can be consumed against stale values. */
     crypt_seal_head = h;
     crypt_seal_has_report = have;
-    st = kbd_crypt_seal_begin(ctrl_hint, KBD_CRYPT_TAG_BOOT_KBD, body, sizeof(body));
+    /* The head goes out under its own tag and length; a keepalive is always
+     * the keyboard state. */
+    st = kbd_crypt_seal_begin(ctrl_hint, tag, body, hid_body_len(tag));
 #if KBD_TX_OUTCOME
     txo_arm[(unsigned)st < 8u ? (unsigned)st : 7u]++;
 #endif
@@ -1792,9 +1910,14 @@ void RF_2G4StatusCallBack(uint8_t sta, uint8_t rsr, uint8_t *rxBuf)
                     hid_head_sent = 0;
                     if (hid_fifo_tail != hid_fifo_head) {
 #if KBD_RF_CRYPT
-                        const uint8_t *acked = hid_fifo[hid_fifo_head & (HID_FIFO_SLOTS - 1u)];
-                        for (uint8_t i = 0; i < 8; i++) {
-                            hid_last_acked[i] = acked[i];
+                        /* Only a keyboard report changes what a keepalive
+                         * must say; a consumer or mouse report leaves the
+                         * key state the receiver holds as it was. */
+                        if (hid_fifo_tag[hid_fifo_head & (HID_FIFO_SLOTS - 1u)] == HID_TAG_KBD) {
+                            const uint8_t *acked = hid_fifo[hid_fifo_head & (HID_FIFO_SLOTS - 1u)];
+                            for (uint8_t i = 0; i < 8; i++) {
+                                hid_last_acked[i] = acked[i];
+                            }
                         }
 #endif
                         hid_fifo_head++;
@@ -1957,6 +2080,7 @@ static void rf_do_response_tx(void)
     uint8_t tx_len;
     uint8_t sel_down = 0;   /* this frame carries a key-down (non-zero report) */
     uint8_t carries_report = 0;   /* this frame carries the queue head, sealed or clear */
+    uint8_t sel_tag = HID_TAG_KBD;   /* and this is the kind of report it is */
 
     if (!response_pending) {
         return;
@@ -2003,7 +2127,28 @@ static void rf_do_response_tx(void)
         uint8_t  h   = hid_fifo_head;
         uint8_t  have = (uint8_t)((uint8_t)(hid_fifo_tail - h) != 0u);
         const uint8_t *head = hid_fifo[h & (HID_FIFO_SLOTS - 1u)];
-        uint8_t  down = (uint8_t)(have && (head[0]|head[1]|head[2]|head[3]|head[4]|head[5]|head[6]|head[7]));
+        uint8_t  down;
+
+        sel_tag = hid_fifo_tag[h & (HID_FIFO_SLOTS - 1u)];
+        if (hid_extra_gap != 0u) {
+            hid_extra_gap--;
+            if (hid_extra_gap != 0u && sel_tag != HID_TAG_KBD) {
+                have = 0;   /* too soon after the last consumer or mouse frame */
+            }
+        }
+#if KBD_RF_CRYPT
+        /* A sealed keepalive is unanswered in this control phase, so this
+         * phase's ack cannot retire anything sent now (crypt_phase_tainted):
+         * the report would go out here and again in the next phase, and the
+         * receiver would forward both. A keyboard report takes that in its
+         * stride; mouse movement would be applied twice. Hold a consumer or
+         * mouse report until the keepalive's ack has opened a clean phase;
+         * if that keepalive was lost, the next one is at most 32 polls off. */
+        if (crypt_phase_tainted && sel_tag != HID_TAG_KBD) {
+            have = 0;
+        }
+#endif
+        down = (uint8_t)(have && (head[0]|head[1]|head[2]|head[3]|head[4]|head[5]|head[6]|head[7]));
 #if KBD_RF_CRYPT
         /* Gate on whether the BOND requires encryption, NOT on whether a session
          * is currently usable. Those differ, and the difference leaked
@@ -2069,11 +2214,12 @@ static void rf_do_response_tx(void)
 #endif
         {
             if (have) {
-                tx_payload[1] = 0xA1;
-                for (uint8_t i = 0; i < 8; i++) {
+                uint8_t n = hid_body_len(sel_tag);
+                tx_payload[1] = sel_tag;
+                for (uint8_t i = 0; i < n; i++) {
                     tx_payload[2 + i] = head[i];
                 }
-                tx_len = 10;
+                tx_len = (uint8_t)(2u + n);   /* 10 keyboard, 4 consumer, 7 mouse */
                 carries_report = 1;
                 sel_down = down;
             }
@@ -2126,6 +2272,9 @@ static void rf_do_response_tx(void)
         if (!crypt_phase_tainted)
 #endif
         hid_head_sent = 1;
+        if (sel_tag != HID_TAG_KBD) {
+            hid_extra_gap = HID_EXTRA_GAP_POLLS;
+        }
         if (sel_down) {
             hid_tx_down_inflight = 1;   /* TX started; TX_FINISH counts it as on-air */
         }
@@ -2279,6 +2428,11 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
         if (rf_state == RF_STATE_CONNECTED
                 || (rf_state == RF_STATE_PAIRING && pair_rx_open)) {
             rf_start_rx(rf_channel);   /* re-arm on the current channel */
+            /* Once per poll, with the receiver already re-armed: queue a
+             * consumer or mouse report that was waiting for room. */
+            if (hid_reports_waiting()) {
+                rf_reports_flush();
+            }
 #if KBD_PAIR_DUTY_CYCLE
             /* Start the close timer from the moment RX actually arms (first
              * restart of this beacon epoch only), so the full window is
@@ -2423,7 +2577,8 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * bench 2026-09-13: a 7 s hold was released at T_idle, auto-repeat
              * and all. Keep the link while the newest report holds anything;
              * the release restarts the full T_idle through rest_arm_idle. */
-            if (hid_fifo_tail == hid_fifo_head && !response_pending && !hid_key_held()) {
+            if (hid_fifo_tail == hid_fifo_head && !response_pending && !hid_key_held()
+                    && !hid_reports_waiting()) {
                 rest_enter();
             } else {
                 rf_start_task_atomic(RF_EVT_REST_IDLE, KBD_REST_IDLE_RETRY_TICKS);
@@ -2494,6 +2649,7 @@ static uint16_t RF_ProcessEvent(uint8_t task_id, uint16_t events)
              * must be queued even when it repeats it (the host driver re-asserts
              * a held key after the reconnect). */
             hid_last_queued_valid = 0;
+            hid_reports_link_lost();
             bond_save_pending = 0;
             rf_state = RF_STATE_IDLE;
             RF_Shut();
@@ -3093,6 +3249,8 @@ void RF_TaskInit(void)
     (void)rf_load_bond_from_flash();
 #endif
     tmos_memset(hid_fifo, 0, sizeof(hid_fifo));
+    tmos_memset(hid_fifo_tag, 0, sizeof(hid_fifo_tag));
+    hid_reports_forget();
     hid_fifo_head = 0; hid_fifo_tail = 0; hid_head_sent = 0;
     tmos_memset(hid_last_queued, 0, sizeof(hid_last_queued));
     hid_last_queued_valid = 0;
@@ -3339,8 +3497,12 @@ void RF_Disconnect(void)
      * host, and keeping it would let the adjacent-duplicate check swallow a
      * re-press of the same key -- the same reason the supervision teardown
      * clears it. Callers that send a release barrier first are unaffected;
-     * those that do not are the hole (CodeRabbit). */
+     * those that do not are the hole. */
     hid_last_queued_valid = 0;
+    /* The ring survives this, so what it says about consumer and mouse
+     * state must survive too: forgetting it would let a release that
+     * arrives next look redundant while the press is still queued. */
+    hid_reports_link_lost();
     rf_tmr0_stop();
     rf_stop_task_atomic(RF_EVT_PAIR_BCAST);
     rf_stop_task_atomic(RF_EVT_PAIR_TIMEOUT);
@@ -3424,6 +3586,52 @@ uint8_t RF_IdentityValid(void)
     return keyboard_mac_valid;
 }
 
+/* Publish one report at the tail. Main loop only. Returns 0 when the ring is
+ * full. */
+static uint8_t hid_fifo_push(uint8_t tag, const uint8_t *body, uint8_t len)
+{
+    uint8_t *slot;
+
+    if ((uint8_t)(hid_fifo_tail - hid_fifo_head) >= HID_FIFO_SLOTS) {
+        return 0;
+    }
+    slot = hid_fifo[hid_fifo_tail & (HID_FIFO_SLOTS - 1u)];
+    for (uint8_t i = 0; i < 8; i++) {
+        slot[i] = (uint8_t)(i < len ? body[i] : 0u);
+    }
+    hid_fifo_tag[hid_fifo_tail & (HID_FIFO_SLOTS - 1u)] = tag;
+    __sync_synchronize();       /* payload stores complete BEFORE publishing */
+    hid_fifo_tail++;
+    return 1;
+}
+
+/* A validated host report of any kind is activity for the resting policy. */
+static void rf_note_host_report(void)
+{
+#if KBD_REST
+    /* The policy defines activity as a VALIDATED host report, not as a changed
+     * payload: an unchanged repeat must still restart the inactivity timer and
+     * still wake a resting link. Only the FIFO enqueue is payload-conditional. */
+    if (rf_state == RF_STATE_RESTING) {
+        /* A key while resting: probe now (any stage) and keep the session. */
+        RF_DIAG_INC(rest_key_wakes);
+        rest_probe_wake = 1;
+        rf_stop_task_atomic(RF_EVT_REST_PROBE);
+        rf_stop_task_atomic(RF_EVT_REST_STAGE2);
+        rest_probe_start();
+    } else if (rest_probe) {
+        RF_DIAG_INC(rest_key_wakes);
+        rest_probe_wake = 1;
+        rest_quiet_pending = 0;
+        if (rf_state == RF_STATE_CONNECTED) {
+            rest_promote_to_normal();
+        }
+    } else if (rf_state == RF_STATE_CONNECTED) {
+        rest_arm_idle();
+    }
+#endif
+}
+
 void RF_QueueHIDReport(const uint8_t report[8])
 {
     RF_DIAG_INC(ll_hid_rx);
@@ -3442,65 +3650,127 @@ void RF_QueueHIDReport(const uint8_t report[8])
      * so a key-down queued while the link is down survives the reconnect gap
      * instead of being overwritten by its own key-up. */
     if (changed) {
-        if ((uint8_t)(hid_fifo_tail - hid_fifo_head) < HID_FIFO_SLOTS) {
-            uint8_t *slot = hid_fifo[hid_fifo_tail & (HID_FIFO_SLOTS - 1u)];
-            for (uint8_t i = 0; i < 8; i++) {
-                slot[i] = report[i];
+        if (!hid_fifo_push(HID_TAG_KBD, report, 8)) {
+            /* Full: coalesce onto the NEWEST queued keyboard report instead
+             * of discarding this one. Dropping it outright can strand a key
+             * forever -- fill the ring while a key is held, drop the
+             * all-keys-up, and nothing ever retries the release because the
+             * MCU only sends changes. Overwriting the newest sacrifices one
+             * intermediate transition but guarantees the latest physical
+             * state is queued. The search stops short of the head, which may
+             * be in flight or already sealed; with the reserve kept for
+             * keyboard reports a full ring always holds one behind it. */
+            uint8_t at = (uint8_t)(hid_fifo_tail - 1u);
+            while (at != hid_fifo_head
+                   && hid_fifo_tag[at & (HID_FIFO_SLOTS - 1u)] != HID_TAG_KBD) {
+                at--;
             }
-            __sync_synchronize();       /* payload stores complete BEFORE publishing */
-            hid_fifo_tail++;
-            for (uint8_t i = 0; i < 8; i++) {
-                hid_last_queued[i] = report[i];
+            if (at != hid_fifo_head) {
+                uint8_t *slot = hid_fifo[at & (HID_FIFO_SLOTS - 1u)];
+                for (uint8_t i = 0; i < 8; i++) {
+                    slot[i] = report[i];
+                }
             }
-            hid_last_queued_valid = 1;
-        } else {
-            /* Full: coalesce onto the NEWEST queued entry instead of discarding
-             * this report. Dropping it outright can strand a key forever -- fill
-             * the ring while a key is held, drop the all-keys-up, and nothing
-             * ever retries the release because the MCU only sends changes.
-             * Overwriting the newest sacrifices one intermediate
-             * transition but guarantees the latest physical state is queued.
-             * The newest is never the in-flight head while the ring is full. */
-            uint8_t *slot = hid_fifo[(uint8_t)(hid_fifo_tail - 1u) & (HID_FIFO_SLOTS - 1u)];
-            for (uint8_t i = 0; i < 8; i++) {
-                slot[i] = report[i];
-            }
-            for (uint8_t i = 0; i < 8; i++) {
-                hid_last_queued[i] = report[i];
-            }
-            /* Must be set here too, not just on the enqueue path: the teardown
-             * clears it, so a report that arrives while the ring is full would
-             * otherwise leave it false for good -- disabling the dedup AND
-             * hid_key_held(), which would let the link rest under a held key,
-             * the defect this gate exists to prevent (Copilot). */
-            hid_last_queued_valid = 1;
             RF_DIAG_INC(ll_hid_fifo_drop);   /* a transition was coalesced away */
         }
+        /* Set on the full path too, not just on the enqueue path: the
+         * teardown clears it, so a report that arrives while the ring is
+         * full would otherwise leave it false for good -- disabling the
+         * dedup AND hid_key_held(), which would let the link rest under a
+         * held key, the defect this gate exists to prevent. */
+        for (uint8_t i = 0; i < 8; i++) {
+            hid_last_queued[i] = report[i];
+        }
+        hid_last_queued_valid = 1;
     }
-#if KBD_REST
-    /* The policy defines activity as a VALIDATED host report, not as a changed
-     * payload: an unchanged repeat must still restart the inactivity timer and
-     * still wake a resting link. Only the FIFO enqueue above is payload-conditional. */
-    {
-        if (rf_state == RF_STATE_RESTING) {
-            /* A key while resting: probe now (any stage) and keep the session. */
-            RF_DIAG_INC(rest_key_wakes);
-            rest_probe_wake = 1;
-            rf_stop_task_atomic(RF_EVT_REST_PROBE);
-            rf_stop_task_atomic(RF_EVT_REST_STAGE2);
-            rest_probe_start();
-        } else if (rest_probe) {
-            RF_DIAG_INC(rest_key_wakes);
-            rest_probe_wake = 1;
-            rest_quiet_pending = 0;
-            if (rf_state == RF_STATE_CONNECTED) {
-                rest_promote_to_normal();
-            }
-        } else if (rf_state == RF_STATE_CONNECTED) {
-            rest_arm_idle();
+    rf_note_host_report();
+}
+
+/* Queue the mouse report that has been adding up, if there is room for it.
+ * Normally only when nothing but the in-flight head is queued, so movement
+ * keeps adding up rather than stacking reports behind slower ones; `closing`
+ * is for a report that a change of buttons has just ended, which must go in
+ * as it stands and may use the keyboard reserve to do so. */
+static void rf_mouse_push(uint8_t closing)
+{
+    uint8_t occupancy = (uint8_t)(hid_fifo_tail - hid_fifo_head);
+
+    if (!mouse_acc_dirty) {
+        return;
+    }
+    /* Movement waits until only the in-flight head is queued. A change of
+     * buttons does not: held back behind a run of keyboard reports it would
+     * leave the host dragging, or not yet clicked, for as long as the run
+     * lasts. It still leaves the keyboard reserve alone unless it is closing. */
+    if (!closing && occupancy > 1u
+            && (mouse_acc[0] == mouse_btn_queued
+                || occupancy >= HID_FIFO_SLOTS - HID_FIFO_KBD_RESERVE)) {
+        return;
+    }
+    /* Never the last slot: only a keyboard report may fill the ring, which
+     * is what guarantees that a full ring ends in one for the next keyboard
+     * report to coalesce onto (RF_QueueHIDReport). */
+    if (occupancy >= HID_FIFO_SLOTS - 1u) {
+        return;
+    }
+    if (hid_fifo_push(HID_TAG_MOUSE, mouse_acc, sizeof(mouse_acc))) {
+        mouse_btn_queued = mouse_acc[0];
+        for (uint8_t i = 1; i < sizeof(mouse_acc); i++) {
+            mouse_acc[i] = 0;
+        }
+        mouse_acc_dirty = 0;
+    }
+}
+
+/* Queue whatever consumer or mouse state is waiting outside the ring. Main
+ * loop only: called when such a report arrives and once per poll. */
+static void rf_reports_flush(void)
+{
+    if (consumer_waiting()
+            && (uint8_t)(hid_fifo_tail - hid_fifo_head) < (HID_FIFO_SLOTS - HID_FIFO_KBD_RESERVE)) {
+        uint8_t body[2] = { (uint8_t)consumer_want, (uint8_t)(consumer_want >> 8) };
+
+        if (hid_fifo_push(HID_TAG_CONSUMER, body, sizeof(body))) {
+            consumer_queued = consumer_want;
+            consumer_again = 0;
         }
     }
-#endif
+    rf_mouse_push(0u);
+}
+
+void RF_QueueConsumer(uint16_t usage)
+{
+    /* A press and its release both get a slot when there is room, in order.
+     * Without room only the newest state waits, which is the one that
+     * matters: a media key is never left held on the host. */
+    consumer_want = usage;
+    rf_reports_flush();
+    rf_note_host_report();
+}
+
+void RF_QueueMouse(const uint8_t report[5])
+{
+    /* A change of buttons ends the report that was adding up: a press and
+     * its release must reach the host as two reports, or the click is gone.
+     * With the ring full to its last slot the closing push fails and the
+     * click IS gone: the newest buttons replace the ones that never left.
+     * That takes a link that has been down long enough to queue fifteen
+     * reports; the final state is still right. */
+    if (mouse_acc_dirty && report[0] != mouse_acc[0]) {
+        rf_mouse_push(1u);
+    }
+    mouse_acc[0] = report[0];
+    for (uint8_t i = 1; i < sizeof(mouse_acc); i++) {
+        int16_t sum = (int16_t)(int8_t)mouse_acc[i] + (int16_t)(int8_t)report[i];
+
+        mouse_acc[i] = (uint8_t)(int8_t)(sum > 127 ? 127 : (sum < -127 ? -127 : sum));
+    }
+    if ((mouse_acc[1] | mouse_acc[2] | mouse_acc[3] | mouse_acc[4]) != 0u
+            || mouse_acc[0] != mouse_btn_queued) {
+        mouse_acc_dirty = 1;
+    }
+    rf_reports_flush();
+    rf_note_host_report();
 }
 
 #if KBD_REST

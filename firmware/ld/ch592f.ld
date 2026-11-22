@@ -59,19 +59,19 @@ SECTIONS
         PROVIDE(_highcode_lma = .);
     } >FLASH AT>FLASH
 
-    .highcode :
-    {
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_start = .);
-        *(.vector);
-        KEEP(*(SORT_NONE(.vector_handler)))
-        *(.highcode);
-        *(.highcode.*);
-        . = ALIGN(4);
-        PROVIDE(_highcode_vma_end = .);
-    } >RAM AT>FLASH
+    /* RAM-resident code, and in a BLE build the RAM laid out per mode.
+     * ld/2g4/layout.ld (a build without the BLE mode) holds the code as one
+     * section; ld/ble/layout.ld adds an overlay for the code only one mode
+     * runs and puts the BLE-only variables below the stack. Either defines
+     * _highcode_ram_end (first RAM byte after the code) and _text_start
+     * (first flash byte after its load image). Picked by -L in the
+     * Makefile. */
+    INCLUDE layout.ld
 
-    .text :
+    /* No AT>FLASH: an overlay's load images (ld/ble/layout.ld) don't
+     * advance the FLASH region, so .text is placed by address and loads
+     * where it runs. */
+    .text _text_start :
     {
         . = ALIGN(4);
         KEEP(*(SORT_NONE(.handle_reset)))
@@ -84,7 +84,7 @@ SECTIONS
         *(.glue_7t)
         *(.gnu.linkonce.t.*)
         . = ALIGN(4);
-    } >FLASH AT>FLASH
+    } >FLASH
 
     .fini :
     {
@@ -138,7 +138,7 @@ SECTIONS
 
     .dalign :
     {
-        . = ORIGIN(RAM) + SIZEOF(.highcode);
+        . = _highcode_ram_end;
     } >RAM AT>FLASH
 
     .dlalign :
@@ -172,9 +172,18 @@ SECTIONS
     {
         . = ALIGN(4);
         PROVIDE( _sbss = .);
-        *(.sbss*)
+        /* Minus the BLE-only objects of .bss_ble below. */
+        EXCLUDE_FILE(*ble_hid.o *hiddev.o *hidkbdservice.o *battservice.o *devinfoservice.o
+                     *LIBCH59xBLE.a:gapbondmgr.o *LIBCH59xBLE.a:gattservapp.o
+                     *LIBCH59xBLE.a:gap_peripheral.o *LIBCH59xBLE.a:gap.o
+                     *LIBCH59xBLE.a:gapgattserver.o *LIBCH59xBLE.a:gatt.o
+                     *LIBCH59xBLE.a:att.o) *(.sbss*)
         *(.gnu.linkonce.sb.*)
-        *(.bss*)
+        EXCLUDE_FILE(*ble_hid.o *hiddev.o *hidkbdservice.o *battservice.o *devinfoservice.o
+                     *LIBCH59xBLE.a:gapbondmgr.o *LIBCH59xBLE.a:gattservapp.o
+                     *LIBCH59xBLE.a:gap_peripheral.o *LIBCH59xBLE.a:gap.o
+                     *LIBCH59xBLE.a:gapgattserver.o *LIBCH59xBLE.a:gatt.o
+                     *LIBCH59xBLE.a:att.o) *(.bss*)
         *(.gnu.linkonce.b.*)
         *(COMMON*)
         . = ALIGN(4);
@@ -228,9 +237,50 @@ SECTIONS
            || _diag_safe_legacy_end == _diag_safe_start,
            "legacy .diag_safe counters moved - bench absolute addresses broken")
 
-    /* Uninitialised working storage in the span between the diag window and
-     * the stack, which nothing else uses (0x20005A00..0x20005FF0 in a build
-     * without the Bluetooth sections). NOLOAD and never zeroed by startup:
+    /* BLE build diagnostics (src/ble_diag.h), pinned in the free RAM between
+     * the diag window and the stack so a single SWD read finds them. Empty
+     * in a build without the BLE mode. */
+    .diag_ble 0x20005A00 (NOLOAD) :
+    {
+        KEEP(*(.diag_ble))
+    } >RAM
+
+    ASSERT(ADDR(.diag_ble) >= _diag_safe_end,
+           ".diag_ble overlaps the diag window")
+
+    /* The BLE-only zero-initialised variables: this firmware's BLE objects
+     * and the BLE library's GAP, GATT and bond-manager objects, none of
+     * which a build without the BLE mode links (there this section is
+     * empty). They sit in the free RAM between the diag block and the stack
+     * to keep room below the diag window. NOLOAD, so the startup code
+     * doesn't clear them: main() does, before anything else runs. */
+    .bss_ble 0x20005A40 (NOLOAD) :
+    {
+        . = ALIGN(4);
+        PROVIDE(_bss_ble_start = .);
+        *ble_hid.o(.bss .bss.* .sbss .sbss.*)
+        *hiddev.o(.bss .bss.* .sbss .sbss.*)
+        *hidkbdservice.o(.bss .bss.* .sbss .sbss.*)
+        *battservice.o(.bss .bss.* .sbss .sbss.*)
+        *devinfoservice.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gapbondmgr.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gattservapp.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gap_peripheral.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gap.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gapgattserver.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:gatt.o(.bss .bss.* .sbss .sbss.*)
+        *LIBCH59xBLE.a:att.o(.bss .bss.* .sbss .sbss.*)
+        . = ALIGN(4);
+        PROVIDE(_bss_ble_end = .);
+    } >RAM
+
+    ASSERT(ADDR(.diag_ble) + SIZEOF(.diag_ble) <= ADDR(.bss_ble),
+           ".diag_ble overlaps .bss_ble")
+
+    /* Uninitialised working storage after the Bluetooth sections, in what is
+     * left of the span between the diag window and the stack (all of it from
+     * 0x20005A40 in a build without the BLE mode, where those sections are
+     * empty). NOLOAD and never zeroed by startup:
      * only state that its owner initialises before every use belongs here
      * (the link-key exchange context: kex_start/kex_reset write all of it). */
     .scratch_hi (NOLOAD) :
@@ -256,6 +306,10 @@ SECTIONS
     } >RAM
 
     ASSERT(_diag_safe_end <= _susrstack, ".diag_safe overflows into the stack region")
+    ASSERT(ADDR(.diag_ble) + SIZEOF(.diag_ble) <= _susrstack,
+           ".diag_ble overflows into the stack region")
+    ASSERT(ADDR(.bss_ble) + SIZEOF(.bss_ble) <= _susrstack,
+           ".bss_ble overflows into the stack region")
     ASSERT(_eusrstack == OC_BOOTREQ_ADDR,
            "stack top must sit just below the OpenBoot boot-request word (memory.ld)")
     ASSERT(ORIGIN(FLASH) == OC_SLOT_A_BASE || ORIGIN(FLASH) == OC_SLOT_B_BASE,

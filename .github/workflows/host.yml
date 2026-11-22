@@ -35,5 +35,12 @@ jobs:
       # vendored WCH SDK is committed in-tree, and nothing here cross-compiles.
       - name: fetch OpenBoot
         run: git submodule update --init third_party/openboot
+      # The suite is run with pytest, which the runner's own Python does not
+      # ship and will not let pip install into.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: install pytest
+        run: python -m pip install pytest
       - name: host test suite
         run: make -C firmware test

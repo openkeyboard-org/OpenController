@@ -18,6 +18,7 @@ SRC = FW / "src" / "sleep_protocol.c"
 # Mirror the enum / opcodes from sleep_protocol.h.
 NONE, SEND_READY, ARM, CANCEL = 0, 1, 2, 3
 A6, A1, A9, ACK = 0xA6, 0xA1, 0xA9, 0x61
+A3, A4, A8 = 0xA3, 0xA4, 0xA8
 SUB_UNLOCK, SUB_SLEEP, SUB_AUTO = 0x56, 0x54, 0x57
 
 
@@ -97,10 +98,13 @@ def test_ota_cancels_and_wins(lib, st):
     assert st.sleep_pending == 0
 
 
-def test_hid_frame_cancels_pending(lib, st):
+@pytest.mark.parametrize("cmd", [A1, A3, A4, A8])
+def test_hid_frame_cancels_pending(lib, st, cmd):
+    # Keyboard, consumer, system and mouse reports alike: a report sent after
+    # the sleep request must not be left queued in a module that then sleeps.
     feed(lib, st, A6, SUB_UNLOCK)
     feed(lib, st, A6, SUB_SLEEP)
-    assert feed(lib, st, A1) == CANCEL
+    assert feed(lib, st, cmd) == CANCEL
     assert st.sleep_pending == 0
 
 
@@ -290,7 +294,7 @@ def test_elapsed_true_wrap(lib):
 
 @pytest.mark.parametrize("cmd,sub,expect", [
     (A6, 0x11, 1), (A6, 0x30, 1), (A6, 0x33, 1), (A6, 0x51, 1), (A6, 0x52, 1), (A6, 0x63, 1), (A6, 0x81, 1),
-    (A1, 0x00, 1), (A9, 0x05, 1),
+    (A1, 0x00, 1), (A3, 0x00, 1), (A4, 0x00, 1), (A8, 0x00, 1), (A9, 0x05, 1),
     (A6, 0x53, 0), (A6, 0x70, 0), (A6, SUB_SLEEP, 0), (A6, SUB_UNLOCK, 0), (A6, SUB_AUTO, 0), (A6, 0xFF, 0), (ACK, 0x0D, 0),
 ])
 def test_is_state_changing_matches_cancel_set(lib, cmd, sub, expect):

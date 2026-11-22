@@ -4,8 +4,12 @@ Run from the repository root (no hardware, no cross-compiler needed — these
 build for the host):
 
 ```bash
-cd firmware/tests && python3 -m unittest discover
+python3 -m pip install pytest      # once
+make -C firmware test              # or: cd firmware/tests && python3 -m pytest -q
 ```
+
+The suite needs pytest: some modules use its fixtures and parametrisation,
+and it runs the unittest-style ones as well.
 
 ## What is tested
 

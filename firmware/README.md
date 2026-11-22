@@ -82,6 +82,8 @@ producing a wrong image.
 | `KBD_FACTORY_MAC` | 0 | 1 | 1 = 2.4 GHz identity from the CH592 factory ROM |
 | `KBD_DCDC_ENABLE` | 1 | 1 | 1 = run the core from the DC-DC converter, 0 = LDO |
 | `KBD_HOST_WAKE` | 0 | 1 | 1 = raise CHWAKE (PB13) before every `5A`/`5B`/`5C` frame; needs PB13 free, so never with `KBD_UART1_REMAP=1` |
+| `KBD_BLE` | 0 | 1 | 1 = a Bluetooth LE HID mode beside the 2.4 GHz link, chosen at boot (in development, not yet bench-tested) |
+| `KBD_BLE_SLEEP` | - | 1 | 1 = on a Bluetooth boot, sleep between radio events once the host has armed auto-sleep. On the MK65MX Wireless, connected and idle: 16.3 mA at the battery without it, a few tenths of a milliamp with it (one bench session, 2026-11-22). Only exists with `KBD_BLE=1`; `make KBD_BLE_SLEEP=0` builds without it |
 
 `KBD_DCDC_ENABLE` is a **hardware** claim, not a preference: the board must
 populate the CH592 DC-DC inductor. `PWR_DCDCCfg` declines only on silicon
@@ -134,6 +136,36 @@ The three timing macros can be tuned through `EXTRA_CFLAGS`; the knob itself
 is board-owned like the others (A/B with `make KBD_HOST_WAKE=0|1`). The MR5
 bench sleep (`KBD_SLEEP_BENCH_HOOK=1`) blocks for seconds, so it requires
 `KBD_HOST_WAKE=0`.
+
+`KBD_BLE` adds a Bluetooth LE keyboard (HID over GATT, three profiles) to
+the module. A boot runs either the 2.4 GHz link or BLE, never both: a
+32-byte record in DataFlash (0x77B00, `src/transport_mode.c`) holds the
+mode and profile, and `A6 31-33` (a BLE profile) or `A6 30` (back to
+2.4 GHz) writes it and resets the module, which then answers `5B 34` and
+the link state. Each profile has its own bond block (0x77C00, 0x77D00,
+0x77E00), static address and IRK. The BLE glue is `src/ble_hid.c`, on
+service code adapted from WCH's `HID_Keyboard` example (`src/ble/`, see
+`NOTICE`). The host asks for the mode with `A6 59`; a `KBD_BLE` build
+answers `5B 39`, and then the host may send the name (`A9`, kept in the
+record), the battery level (`A7`) and consumer and system reports (`A3`,
+`A4`), which a BLE boot carries beside the keyboard report. A 2.4 GHz boot
+carries consumer usages too (`A3`), and mouse reports (`A8`: a sequence
+byte, then buttons, X, Y, wheel, pan), under the radio tags the dongle
+already forwards to its consumer and mouse interfaces; it has no frame for
+system control. The host asks with `A6 5B`, any build answers `5B 3B`, and
+only then does the host send a mouse frame or expect media keys to work over
+2.4 GHz. A mouse frame whose sequence byte repeats the last one taken is a
+retry after a lost ACK: it is ACKed again and dropped. Mouse movement
+that has to wait for the link is added up, not queued report by report, and
+consumer and mouse frames go on air at least two polls apart
+(`HID_EXTRA_GAP_POLLS` in `src/rf_task.c` says why). To fit RAM,
+the 2.4 GHz-only RAM code and the BLE library's connection objects share
+one window, which `main()` fills at boot for the mode that runs
+(`ld/ble/layout.ld`), and the BLE-only variables live below the stack
+(`.bss_ble`, cleared by `main()`). With `RF_DIAG_COUNTERS` a 40-byte
+diagnostics block sits at 0x20005A00 (`src/ble_diag.h`). A `KBD_BLE=0`
+build is byte-identical to one without the feature. The design, its status and
+the bench test plan are in `BLUETOOTH.md` in the MK65MX QMK tree.
 
 On every board profile, the application's bounded waits run on RTC32K
 through `src/rtc_clock.c`, not on SysTick. These are host wake, the UART TX
@@ -230,6 +262,7 @@ only for A/B experiments):
 |---|---|---|
 | `RF_DIAG_COUNTERS` | 1 | SWD-readable `.diag_safe` diagnostic counters |
 | `WATCHDOG_ENABLE` | 1 | independent WWDG last-resort recovery |
+| `KBD_FAULT_ACTION` | `park` | after a hard fault or NMI is recorded: `park` stays in the handler for a probe (development; the module is dead until reset or power loss), `reset` restarts the module through the watchdog and keeps the record. **Build anything that ships with `KBD_FAULT_ACTION=reset`** |
 | `LINK_LOCK_SERVO_FIX` | 1 | bipolar ±1 connected-mode hop servo |
 | `RF_TURNAROUND_COUNT` | 6000 | post-poll TX turnaround (~100 µs @ 60 MHz) |
 | `STOCK_RESP_NO_SETCH` | 1 | skip redundant pre-response `RF_SetChannel` |

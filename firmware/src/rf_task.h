@@ -29,6 +29,11 @@ uint8_t RF_CanDeepSleep(void);
 uint8_t RF_IdentityValid(void);
 
 void RF_QueueHIDReport(const uint8_t report[8]);
+/* Consumer usage, 0 for none held (on air: tag 0xA3, 16-bit usage LE). */
+void RF_QueueConsumer(uint16_t usage);
+/* Mouse report: buttons, X, Y, wheel, pan (on air: tag 0xA8). Movement is
+ * relative and is added up while it waits for the link. */
+void RF_QueueMouse(const uint8_t report[5]);
 
 /* Poll from the main loop: advances the connected-mode listen channel on the
  * time-based hop (no-op unless connected). */

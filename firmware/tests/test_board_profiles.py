@@ -23,11 +23,11 @@ def board_config(board: str) -> dict[str, str]:
     return dict(line.split("=", 1) for line in result.stdout.splitlines())
 
 
-@pytest.mark.parametrize("board,remap,factory_mac,dcdc,deep_sleep,host_wake,openboot_board", [
-    ("opencontroller-ch592", "1", "0", "1", "1", "0", "opencontroller-ch592"),
-    ("mk65mx-wireless-ch592", "0", "1", "1", "1", "1", "mk65mx-wireless-ch592"),
+@pytest.mark.parametrize("board,remap,factory_mac,dcdc,deep_sleep,host_wake,ble,openboot_board", [
+    ("opencontroller-ch592", "1", "0", "1", "1", "0", "0", "opencontroller-ch592"),
+    ("mk65mx-wireless-ch592", "0", "1", "1", "1", "1", "1", "mk65mx-wireless-ch592"),
 ])
-def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, host_wake, openboot_board):
+def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, host_wake, ble, openboot_board):
     cfg = board_config(board)
     assert cfg["BOARD"] == board
     assert cfg["OPENBOOT_BOARD"] == openboot_board
@@ -36,6 +36,7 @@ def test_board_profile(board, remap, factory_mac, dcdc, deep_sleep, host_wake, o
     assert cfg["KBD_DCDC_ENABLE"] == dcdc
     assert cfg["KBD_DEEP_SLEEP"] == deep_sleep
     assert cfg["KBD_HOST_WAKE"] == host_wake
+    assert cfg["KBD_BLE"] == ble
     assert board in cfg["BUILD"]
     assert board in cfg["BUNDLE_BIN"]
     assert board in cfg["FACTORY_BIN"]
