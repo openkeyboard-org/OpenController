@@ -415,6 +415,7 @@ static uint8_t hid_last_queued_valid;
 #define HID_FIFO_KBD_RESERVE 4u
 static uint16_t consumer_want;      /* usage the host MCU last reported */
 static uint16_t consumer_queued;    /* usage of the newest consumer report queued */
+static uint8_t  consumer_again;     /* the usage still held is to be queued once more */
 static uint8_t  mouse_acc[5];       /* [0] newest buttons; [1..4] X, Y, wheel, pan not yet queued */
 static uint8_t  mouse_acc_dirty;    /* mouse_acc says something the ring does not */
 static uint8_t  mouse_btn_queued;   /* buttons of the newest mouse report queued */
@@ -449,10 +450,18 @@ static inline uint8_t hid_key_held(void)
                      || consumer_want != 0u || mouse_acc[0] != 0u);
 }
 
+/* The consumer state has to be queued: it changed since the newest report
+ * queued, or the link dropped under a held usage and it is owed again. */
+static inline uint8_t consumer_waiting(void)
+{
+    return (uint8_t)(consumer_want != consumer_queued
+                     || (consumer_again && consumer_want != 0u));
+}
+
 /* A consumer or mouse report is waiting outside the ring. */
 static inline uint8_t hid_reports_waiting(void)
 {
-    return (uint8_t)(mouse_acc_dirty || consumer_want != consumer_queued);
+    return (uint8_t)(mouse_acc_dirty || consumer_waiting());
 }
 
 /* The ring itself is being emptied (start-up, or the host left 2.4 GHz and
@@ -462,6 +471,7 @@ static void hid_reports_forget(void)
 {
     consumer_want = 0;
     consumer_queued = 0;
+    consumer_again = 0;
     for (uint8_t i = 0; i < sizeof(mouse_acc); i++) {
         mouse_acc[i] = 0;
     }
@@ -477,12 +487,15 @@ static void hid_reports_forget(void)
  * host when the link lapses; whether it also drops a consumer usage or a
  * mouse button is its business, and saying it again is right either way.)
  * Movement that never left is dropped: replayed after a gap it would only
- * jerk the pointer. */
+ * jerk the pointer.
+ *
+ * consumer_queued is left alone: it still says what the newest consumer
+ * report queued or sent was. Zeroing it to force the repeat would make a
+ * release that arrives while the link is down look like no change, and the
+ * usage would stay held at the host. The repeat has its own flag. */
 static void hid_reports_link_lost(void)
 {
-    if (consumer_want != 0u) {
-        consumer_queued = 0;
-    }
+    consumer_again = (uint8_t)(consumer_want != 0u);
     for (uint8_t i = 1; i < sizeof(mouse_acc); i++) {
         mouse_acc[i] = 0;
     }
@@ -3484,7 +3497,7 @@ void RF_Disconnect(void)
      * host, and keeping it would let the adjacent-duplicate check swallow a
      * re-press of the same key -- the same reason the supervision teardown
      * clears it. Callers that send a release barrier first are unaffected;
-     * those that do not are the hole (CodeRabbit). */
+     * those that do not are the hole. */
     hid_last_queued_valid = 0;
     /* The ring survives this, so what it says about consumer and mouse
      * state must survive too: forgetting it would let a release that
@@ -3713,12 +3726,13 @@ static void rf_mouse_push(uint8_t closing)
  * loop only: called when such a report arrives and once per poll. */
 static void rf_reports_flush(void)
 {
-    if (consumer_want != consumer_queued
+    if (consumer_waiting()
             && (uint8_t)(hid_fifo_tail - hid_fifo_head) < (HID_FIFO_SLOTS - HID_FIFO_KBD_RESERVE)) {
         uint8_t body[2] = { (uint8_t)consumer_want, (uint8_t)(consumer_want >> 8) };
 
         if (hid_fifo_push(HID_TAG_CONSUMER, body, sizeof(body))) {
             consumer_queued = consumer_want;
+            consumer_again = 0;
         }
     }
     rf_mouse_push(0u);
