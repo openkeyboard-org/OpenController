@@ -67,7 +67,8 @@ sleep_proto_action_t SleepProtocol_OnFrame(sleep_proto_t *st, uint8_t cmd,
 
 uint8_t SleepProtocol_IsStateChanging(uint8_t cmd, uint8_t sub)
 {
-    return (cmd == 0xA1u || cmd == 0xA9u)
+    return (cmd == 0xA1u || cmd == 0xA3u || cmd == 0xA4u || cmd == 0xA8u  /* HID reports */
+            || cmd == 0xA9u)                                              /* name */
         || (cmd == 0xA6u && (sub == 0x11u                    /* select USB */
                              || sub == 0x30u || sub == 0x31u /* select 2.4G/BT1 */
                              || sub == 0x32u || sub == 0x33u /* select BT2/BT3 */
