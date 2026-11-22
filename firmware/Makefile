@@ -417,6 +417,21 @@ CFLAGS += -DKBD_UART_DIAG_DUMP=$(KBD_UART_DIAG_DUMP)
 # on by default. `make WATCHDOG_ENABLE=0` builds without it.
 WATCHDOG_ENABLE ?= 1
 CFLAGS += -DWATCHDOG_ENABLE=$(WATCHDOG_ENABLE)
+# What a hard fault or NMI does once its record is stored (src/fault_handler.S):
+#   park   (default) switches the watchdog off and stays in the handler, so a
+#          probe finds the chip as it faulted. Development only: the module
+#          stays dead, on battery too, until it is reset or loses power.
+#   reset  restarts the module through the watchdog. The record survives the
+#          restart and start-up reports a watchdog reset. Build anything that
+#          ships with `make KBD_FAULT_ACTION=reset`.
+KBD_FAULT_ACTION ?= park
+ifeq ($(KBD_FAULT_ACTION),park)
+CFLAGS += -DKBD_FAULT_RESET=0
+else ifeq ($(KBD_FAULT_ACTION),reset)
+CFLAGS += -DKBD_FAULT_RESET=1
+else
+$(error KBD_FAULT_ACTION must be park or reset, not "$(KBD_FAULT_ACTION)")
+endif
 # Bipolar-servo R8 fix (connected-mode link-lock), on by default.
 # `make LINK_LOCK_SERVO_FIX=0` builds the original +1-only servo for the A/B crossover.
 LINK_LOCK_SERVO_FIX ?= 1

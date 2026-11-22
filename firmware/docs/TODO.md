@@ -374,9 +374,6 @@ markers are present; explicit `KBD_RF_CRYPT=0` downgrades deliberately).
 - **Phase 2 (ECDH key establishment) not started.** The link key is still a
   bench scaffold behind `KBD_CRYPT_BENCH_KEY`, which must never ship enabled.
   X25519 design is in the approved plan.
-- **`fault_handler.S` comment is wrong** — it claims trap entry clears
-  `mstatus.MIE`, but QingKe V4 does not (nesting is supported by design). It
-  should not claim atomicity it lacks.
 - **CH570 build is broken on the OpenDongle bench branch** — fails its
   stack-floor assert, pre-existing and unrelated to the diagnostics added there.
 

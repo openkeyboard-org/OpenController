@@ -251,6 +251,7 @@ only for A/B experiments):
 |---|---|---|
 | `RF_DIAG_COUNTERS` | 1 | SWD-readable `.diag_safe` diagnostic counters |
 | `WATCHDOG_ENABLE` | 1 | independent WWDG last-resort recovery |
+| `KBD_FAULT_ACTION` | `park` | after a hard fault or NMI is recorded: `park` stays in the handler for a probe (development; the module is dead until reset or power loss), `reset` restarts the module through the watchdog and keeps the record. **Build anything that ships with `KBD_FAULT_ACTION=reset`** |
 | `LINK_LOCK_SERVO_FIX` | 1 | bipolar ±1 connected-mode hop servo |
 | `RF_TURNAROUND_COUNT` | 6000 | post-poll TX turnaround (~100 µs @ 60 MHz) |
 | `STOCK_RESP_NO_SETCH` | 1 | skip redundant pre-response `RF_SetChannel` |

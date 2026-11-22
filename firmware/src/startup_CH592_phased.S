@@ -28,6 +28,10 @@
  * SRC/Startup/startup_CH592.S (no logic changes — only marker stores added).
  */
 
+#ifndef KBD_FAULT_RESET
+#define KBD_FAULT_RESET 0
+#endif
+
 	.section	.init,"ax",@progbits
 	.global	_start
 	.align	1
@@ -140,6 +144,19 @@ WDOG_BAT_IRQHandler:
 	.weak	handle_reset
 	.align	1
 handle_reset:
+#if KBD_FAULT_RESET
+	/* Until mtvec is set to the vector table near the end of this file,
+	 * it still holds whatever ran before us: OpenBoot leaves its own trap
+	 * loop there, so a fault while copying .highcode and .data or clearing
+	 * .bss would hang for ever with nothing recorded. Route those to the
+	 * recording handler now (src/fault_handler.S). Mode bits 00: every
+	 * trap enters at this one address. PC-relative, no gp needed. */
+.option push
+.option	norelax
+	la t0, fault_early_entry
+.option	pop
+	csrw mtvec, t0
+#endif
 	/* PHASE 0xC0 — first instruction. No gp/sp yet, so use direct
 	 * SRAM address (0x20005800). Manual LUI+SB sequence; no temporary
 	 * gp-relative addressing.
