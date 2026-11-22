@@ -17,8 +17,19 @@
  * empty, so each routine gets its own section, the unused ones are
  * collected as garbage, and LowPower_Sleep is pulled in here by name.
  *
- * The BLE-only variables go below the stack; see .bss_ble in
- * ld/ch592f.ld. */
+ * The BLE image is the shorter of the two, so the tail of the window is
+ * free on a BLE boot. The initialised data of this firmware's own BLE
+ * objects (the HID, battery and device-information services and
+ * ble_hid.c) sits there, behind the BLE code: main() copies it in with
+ * the image, and on a 2.4 GHz boot the same RAM holds rf_task.c's code.
+ * That is only sound while nothing in those objects runs on a 2.4 GHz
+ * boot. Every call into them from main.c and power_sleep.c is behind the
+ * boot-mode check, and no other object refers to their data; keep it so.
+ * The BLE library's own initialised data is NOT moved: what of it a
+ * 2.4 GHz boot touches has not been audited.
+ *
+ * The BLE-only zero-initialised variables go below the stack; see
+ * .bss_ble in ld/ch592f.ld. */
 
     .highcode :
     {
@@ -51,6 +62,14 @@
             *LIBCH59xBLE.a:ll_resolvinglist.o(.highcode .highcode.*)
             *LIBCH59xBLE.a:ll_whitelist.o(.highcode .highcode.*)
             . = ALIGN(4);
+            PROVIDE(_data_ble_start = .);
+            *ble_hid.o(.data .data.* .sdata .sdata.* .srodata .srodata.*)
+            *hiddev.o(.data .data.* .sdata .sdata.* .srodata .srodata.*)
+            *hidkbdservice.o(.data .data.* .sdata .sdata.* .srodata .srodata.*)
+            *battservice.o(.data .data.* .sdata .sdata.* .srodata .srodata.*)
+            *devinfoservice.o(.data .data.* .sdata .sdata.* .srodata .srodata.*)
+            . = ALIGN(4);
+            PROVIDE(_data_ble_end = .);
         }
     } >RAM
 

@@ -142,8 +142,12 @@ static sleep_proto_t sleep_proto;
 
 #if KBD_BLE
 /* RAM code only one mode runs shares a window (ld/ble/layout.ld); this
- * copies the booted mode's image into it. Must run before either stack
- * starts, and nothing in the window may run before it. */
+ * copies the booted mode's image into it. The BLE image also carries the
+ * initialised data of this firmware's BLE objects (ble_hid.c and the three
+ * GATT services), so on a BLE boot this is what initialises them, and on a
+ * 2.4 GHz boot they do not exist: nothing in those objects may be called
+ * then. Must run before either stack starts, and nothing in the window may
+ * run or be read before it. */
 extern uint32_t __load_start_highcode_2g4[], __load_stop_highcode_2g4[];
 extern uint32_t __load_start_highcode_ble[], __load_stop_highcode_ble[];
 extern uint32_t _highcode_overlay_vma[];
