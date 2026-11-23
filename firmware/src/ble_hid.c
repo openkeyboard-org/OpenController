@@ -759,10 +759,10 @@ void BleHid_QueueConsumer(uint16_t usage)
 
 void BleHid_QueueSystem(uint8_t bits)
 {
-    /* The vendor frame's bitmap (Power Down, Sleep, Wake Up) as the one
-     * usage the report carries. */
-    uint16_t usage = (bits & 0x01u) ? 0x81u : (bits & 0x02u) ? 0x82u : (bits & 0x04u) ? 0x83u : 0u;
-    uint8_t  data[2] = {LO_UINT16(usage), HI_UINT16(usage)};
+    /* The vendor frame's bitmap (Power Down, Sleep, Wake Up) is the
+     * report: the report map gives each of the three its own bit, in the
+     * same order. */
+    uint8_t data[1] = {(uint8_t)(bits & 0x07u)};
 
     queue_push(HID_RPT_ID_SYSTEM_IN, data, sizeof(data));
 }

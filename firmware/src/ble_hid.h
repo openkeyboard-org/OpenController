@@ -40,8 +40,8 @@ void BleHid_Unpair(void);
 void BleHid_QueueReport(const uint8_t report[8]);
 
 /* A3: a consumer (media) usage, 0 for none; A4: the vendor system bitmap
- * (bit 0 Power Down, 1 Sleep, 2 Wake Up). Queued in order with the
- * keyboard reports. */
+ * (bit 0 Power Down, 1 Sleep, 2 Wake Up), which goes to the host as it
+ * is. Queued in order with the keyboard reports. */
 void BleHid_QueueConsumer(uint16_t usage);
 void BleHid_QueueSystem(uint8_t bits);
 
