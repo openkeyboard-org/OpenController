@@ -213,7 +213,7 @@ OPENBOOT := $(abspath ../third_party/openboot)
 # The OpenBoot revision this build is pinned to. Declared rather than read from
 # the submodule so it is a deterministic parse-time value, and asserted against
 # the actual checkout by check-deps and again by the factory rule (manifest).
-OPENBOOT_REVISION := d89d4d67b5e80b212ec0466a57042a55f19687b7
+OPENBOOT_REVISION := fbaaa24881a0b7da91d00dd527b253e249c0a5dd
 # The BOOTLOADER stays on GCC12 — a deliberate two-toolchain split now that
 # the app defaults to GCC15. GCC12 is the bootloader compiler OpenBoot
 # documents as validated on silicon (see check-openboot-toolchain for the
