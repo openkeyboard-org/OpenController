@@ -155,7 +155,10 @@ record), the battery level (`A7`) and consumer and system reports (`A3`,
 `A4`), which a BLE boot carries beside the keyboard report. The system
 report is one bit each for Power Down, Sleep and Wake Up, not QMK's
 one-usage array, which a host that reads an array's value as a position in
-the usage list ignores (seen on Windows). A 2.4 GHz boot
+the usage list ignores (seen on Windows). A host that paired with a
+profile before this form keeps the report map it read then, and its
+system keys do nothing: remove the keyboard at the host and pair that
+profile again. Reconnecting is not enough. A 2.4 GHz boot
 carries consumer usages too (`A3`), and mouse reports (`A8`: a sequence
 byte, then buttons, X, Y, wheel, pan), under the radio tags the dongle
 already forwards to its consumer and mouse interfaces; it has no frame for
