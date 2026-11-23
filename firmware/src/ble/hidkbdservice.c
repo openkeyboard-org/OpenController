@@ -16,7 +16,8 @@
  * and the international keys); the example's feature report, which the
  * report map never declared, is gone; and consumer (media) and system
  * control input reports join the keyboard, with report IDs as in QMK's
- * own USB descriptor. */
+ * own USB descriptor. The system control report is a bit per usage, not
+ * QMK's one-usage array: see the report map. */
 
 /*********************************************************************
  * INCLUDES
@@ -154,18 +155,26 @@ static const uint8_t hidReportMap[] = {
     0x81, 0x00,       // Input: (Data, Array, Absolute)
     0xC0,             // End Collection
 
-    // System control: Power Down, Sleep, Wake Up (the A4 frame's bits)
+    // System control: Power Down, Sleep, Wake Up, one bit each, in the
+    // order of the A4 frame's bits. A bit per usage and not an array of
+    // one usage (QMK's USB form, bounds 0x81-0x83 and the usage itself as
+    // the value): hosts disagree on what an array's value means when its
+    // logical minimum is not 0 or 1, and one that reads it as a position
+    // in the usage list takes 0x82 for nothing at all. Seen on Windows.
     0x05, 0x01,       // Usage Pg (Generic Desktop)
     0x09, 0x80,       // Usage (System Control)
     0xA1, 0x01,       // Collection: (Application)
     0x85, HID_RPT_ID_SYSTEM_IN, // Report ID
-    0x19, 0x81,       // Usage Min (0x81)
-    0x29, 0x83,       // Usage Max (0x83)
-    0x16, 0x81, 0x00, // Log Min (0x81); two bytes, one would read as -127
-    0x26, 0x83, 0x00, // Log Max (0x83)
+    0x19, 0x81,       // Usage Min (System Power Down)
+    0x29, 0x83,       // Usage Max (System Wake Up)
+    0x15, 0x00,       // Log Min (0)
+    0x25, 0x01,       // Log Max (1)
+    0x75, 0x01,       // Report Size (1)
+    0x95, 0x03,       // Report Count (3)
+    0x81, 0x02,       // Input: (Data, Variable, Absolute)
+    0x75, 0x05,       // Report Size (5)
     0x95, 0x01,       // Report Count (1)
-    0x75, 0x10,       // Report Size (16)
-    0x81, 0x00,       // Input: (Data, Array, Absolute)
+    0x81, 0x01,       // Input: (Constant), padding to a byte
     0xC0              // End Collection
 };
 
