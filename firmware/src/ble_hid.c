@@ -97,6 +97,7 @@ static uint8_t quiescing;
 static uint8_t reported_secure;   /* 5B 32 sent for this link */
 static uint8_t link_up;           /* between link established and its end */
 static uint8_t boot_reported;
+static uint8_t pair_at_start;     /* this boot opens the profile to pairing */
 
 static adv_kind_t adv_running = ADV_NONE;  /* what the controller is doing */
 static adv_kind_t adv_slow;                /* reconnect has dropped to slow */
@@ -665,10 +666,38 @@ void BleHid_Idle(void)
     }
 }
 
+uint8_t BleHid_PairNeedsRestart(void)
+{
+    /* Pairing in place works only from where a first pairing starts: no
+     * bond, no link, and a bond block nothing has been written to. From
+     * anywhere else the host lists the keyboard and then reports an error
+     * (seen with Windows on profiles paired once before). So anywhere else
+     * the caller arranges a boot onto a blank block, which then pairs as
+     * a first pairing does. Not while a window is already open: that boot
+     * has happened. */
+    if (pairing && !HidDev_Connected()) {
+        return 0;
+    }
+    return (uint8_t)(bonded() || HidDev_Connected() || !TransportMode_BondBlockBlank());
+}
+
+void BleHid_PairAtStart(void)
+{
+    pair_at_start = 1;
+}
+
 void BleHid_Pair(void)
 {
     selected = 1;
     queue_clear();
+    if (pairing && !HidDev_Connected()) {
+        /* Asked again while the window is open: keep the address the host
+         * may already be looking at, and give the window its full time. */
+        tmos_stop_task(task_id, EVT_PAIR_TIMEOUT);
+        tmos_start_task(task_id, EVT_PAIR_TIMEOUT, MS1_TO_SYSTEM_TIME(PAIR_WINDOW_MS));
+        KeyboardUart_SendStatus(ST_PAIRING);
+        return;
+    }
     if (HidDev_Connected()) {
         pending_pair = 1;
         GAPRole_TerminateLink(HidDev_ConnHandle());
@@ -769,6 +798,13 @@ void BleHid_QueueSystem(uint8_t bits)
 
 void BleHid_Service(void)
 {
+    /* The boot a pair request arranged: pair now, from the main loop and
+     * with the stack started, which is where a first pairing's A6 51
+     * arrives. */
+    if (pair_at_start && gap_started) {
+        pair_at_start = 0;
+        BleHid_Pair();
+    }
 #if RF_DIAG_COUNTERS
     ble_diag.adv_running = (uint8_t)adv_running;
     ble_diag.flags = (uint8_t)((link_up ? BLE_DIAG_FLAG_LINKED : 0u)

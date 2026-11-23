@@ -30,8 +30,15 @@ void BleHid_Select(void);
 void BleHid_Idle(void);
 
 /* A6 51: erase this profile's bond and open it to pairing, under a new
- * address. */
+ * address. Only from where a first pairing starts (no bond, no link, a
+ * blank bond block); otherwise the caller restarts the module first
+ * (BleHid_PairNeedsRestart) and the new boot pairs once its stack has
+ * started (BleHid_PairAtStart).
+ * Asked again while the pairing window is open, it only restarts the
+ * window. */
 void BleHid_Pair(void);
+uint8_t BleHid_PairNeedsRestart(void);
+void BleHid_PairAtStart(void);
 
 /* A6 52: erase this profile's bond. */
 void BleHid_Unpair(void);

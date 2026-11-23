@@ -14,6 +14,9 @@
 /* Set by a switch, cleared by the boot it caused: that boot owes the host
  * the select's answer (5B 34 and the link state). */
 #define TRANSPORT_FLAG_ANNOUNCE   0x01u
+/* Set by a pair request that had a bond to clear, cleared by the boot it
+ * caused: that boot opens its profile to pairing (TransportMode_PairAfresh). */
+#define TRANSPORT_FLAG_PAIR       0x02u
 
 typedef struct {
     uint32_t magic;
@@ -36,6 +39,7 @@ static transport_record_t current __attribute__((aligned(4)));
 static uint8_t booted_mode;
 static uint8_t booted_profile;
 static uint8_t booted_announce;
+static uint8_t booted_pair;
 
 static uint8_t record_check(const transport_record_t *rec)
 {
@@ -73,9 +77,10 @@ void TransportMode_Load(void)
             && record_valid(&current)) {
         booted_mode = current.mode;
         booted_profile = current.profile;
-        if (current.flags & TRANSPORT_FLAG_ANNOUNCE) {
-            booted_announce = 1;
-            current.flags &= (uint8_t)~TRANSPORT_FLAG_ANNOUNCE;
+        if (current.flags & (TRANSPORT_FLAG_ANNOUNCE | TRANSPORT_FLAG_PAIR)) {
+            booted_announce = (uint8_t)((current.flags & TRANSPORT_FLAG_ANNOUNCE) != 0u);
+            booted_pair = (uint8_t)((current.flags & TRANSPORT_FLAG_PAIR) != 0u);
+            current.flags &= (uint8_t)~(TRANSPORT_FLAG_ANNOUNCE | TRANSPORT_FLAG_PAIR);
             record_write();
         }
         return;
@@ -139,6 +144,40 @@ void TransportMode_Store(uint8_t mode, uint8_t profile)
 uint8_t TransportMode_BootAnnounces(void)
 {
     return booted_announce;
+}
+
+void TransportMode_PairAfresh(void)
+{
+    if (booted_mode != TRANSPORT_MODE_BLE) {
+        return;
+    }
+    /* The profile's bonds go here and not through the BLE library: the
+     * reset that follows is what makes the library forget them too. */
+    (void)EEPROM_ERASE(TRANSPORT_SNV_OFF(booted_profile), TRANSPORT_ERASE_LEN);
+    current.flags |= TRANSPORT_FLAG_PAIR;
+    record_write();
+}
+
+uint8_t TransportMode_BootPairs(void)
+{
+    return booted_pair;
+}
+
+uint8_t TransportMode_BondBlockBlank(void)
+{
+    uint8_t buf[32];
+
+    for (uint16_t off = 0; off < TRANSPORT_ERASE_LEN; off = (uint16_t)(off + sizeof(buf))) {
+        if (EEPROM_READ(TRANSPORT_SNV_OFF(booted_profile) + off, buf, sizeof(buf)) != 0) {
+            return 0;
+        }
+        for (uint8_t i = 0; i < sizeof(buf); i++) {
+            if (buf[i] != 0xFFu) {
+                return 0;
+            }
+        }
+    }
+    return 1;
 }
 
 void TransportMode_BumpGeneration(uint8_t profile)

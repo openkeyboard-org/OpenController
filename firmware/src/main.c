@@ -63,6 +63,7 @@ static uint8_t ble_mode;
 static uint8_t mode_switch_pending;
 static uint8_t mode_switch_mode;
 static uint8_t mode_switch_profile;
+static uint8_t pair_afresh_pending;   /* the restart being arranged is to pair this profile afresh */
 
 static void request_mode_switch(uint8_t mode, uint8_t profile)
 {
@@ -95,7 +96,14 @@ static uint8_t handle_ble_command(uint8_t sub)
         return 1;
     }
     case 0x51:
-        BleHid_Pair();
+        if (BleHid_PairNeedsRestart()) {
+            /* The same profile again, by way of a restart that begins
+             * with its bond block blank and pairs from there. */
+            pair_afresh_pending = 1;
+            request_mode_switch(TRANSPORT_MODE_BLE, TransportMode_Profile());
+        } else {
+            BleHid_Pair();
+        }
         return 1;
     case 0x52:
         BleHid_Unpair();
@@ -651,6 +659,9 @@ static void Mode_Service(void)
                        < RTC_CLOCK_TICKS_US(BLE_QUIESCE_MAX_US)) {
             return;
         }
+        if (pair_afresh_pending) {
+            TransportMode_PairAfresh();
+        }
         TransportMode_Store(mode_switch_mode, mode_switch_profile);
         __asm volatile ("csrrc zero, 0x800, %0" :: "r"(0x88) : "memory");
         TransportMode_Reset();   /* noreturn */
@@ -1052,6 +1063,9 @@ int main(void)
     if (ble_mode) {
         BleHid_Init(TransportMode_Profile(),
                     TransportMode_Generation(TransportMode_Profile()));
+        if (TransportMode_BootPairs()) {
+            BleHid_PairAtStart();
+        }
     } else
 #endif
     {

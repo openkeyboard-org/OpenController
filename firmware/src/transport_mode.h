@@ -59,6 +59,20 @@ uint8_t TransportMode_NeedsReset(uint8_t mode, uint8_t profile);
  * select that caused it. Main-loop context only (DataFlash). */
 void TransportMode_Store(uint8_t mode, uint8_t profile);
 
+/* Pairing this boot's BLE profile afresh when it holds a bond: erase the
+ * profile's bond block and mark the record so the next boot opens the
+ * profile to pairing. The caller resets straight afterwards. A profile
+ * paired again in place, with the library still holding the old bond,
+ * fails at the host; one that boots onto a blank block pairs, as a first
+ * pairing does. Main-loop context only (DataFlash). */
+void TransportMode_PairAfresh(void);
+
+/* Nonzero on the boot TransportMode_PairAfresh() arranged. */
+uint8_t TransportMode_BootPairs(void);
+
+/* Nonzero when nothing has been written to this boot's BLE bond block. */
+uint8_t TransportMode_BondBlockBlank(void);
+
 /* Nonzero on the boot that follows a switch: it must report 5B 34 and the
  * link state even where an ordinary boot stays silent. */
 uint8_t TransportMode_BootAnnounces(void);
