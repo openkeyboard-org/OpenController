@@ -143,7 +143,11 @@ the module. A boot runs either the 2.4 GHz link or BLE, never both: a
 mode and profile, and `A6 31-33` (a BLE profile) or `A6 30` (back to
 2.4 GHz) writes it and resets the module, which then answers `5B 34` and
 the link state. Each profile has its own bond block (0x77C00, 0x77D00,
-0x77E00), static address and IRK. The BLE glue is `src/ble_hid.c`, on
+0x77E00), static address and IRK. Pairing a profile afresh (`A6 51`) from
+anywhere but a first pairing's starting point (it holds a bond, a link is
+up, or its block has been written to) erases that block and restarts the
+module the same way; the new boot then pairs. Pairing in place over an
+old bond failed at the host. The BLE glue is `src/ble_hid.c`, on
 service code adapted from WCH's `HID_Keyboard` example (`src/ble/`, see
 `NOTICE`). The host asks for the mode with `A6 59`; a `KBD_BLE` build
 answers `5B 39`, and then the host may send the name (`A9`, kept in the
