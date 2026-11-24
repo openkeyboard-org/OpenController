@@ -407,7 +407,9 @@ profile (`TransportMode_PairAfresh()`, `BleHid_PairNeedsRestart()`,
 - **The erase and the record write are not checked.** A failed erase still
   restarts the module, which then opens pairing on a bond block that may
   not be blank (`BleHid_Service()` calls `BleHid_Pair()` without looking),
-  and the host reports an error. To recover: Fn+R again.
+  and the host reports an error. To recover: let the pairing window time
+  out or select another mode, then Fn+R. While that window is open Fn+R
+  does not retry the erase (next item).
 - **Fn+R while a pairing window is open only restarts the window.**
   `BleHid_PairNeedsRestart()` returns 0 for `pairing && !HidDev_Connected()`
   without checking the bond block, so an attempt that failed after storage
