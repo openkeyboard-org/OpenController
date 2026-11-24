@@ -423,12 +423,15 @@ profile (`TransportMode_PairAfresh()`, `BleHid_PairNeedsRestart()`,
   2.4 GHz and then the profile again, then Fn+R. Selecting another
   Bluetooth profile closes the window too, but Fn+R then pairs that
   profile, not the one that failed.
-- **A mode key pressed straight after Fn+R can be lost.** While the restart
-  is being arranged `main.c` acknowledges and drops further commands
-  (`mode_switch_pending`), and `pair_at_start` is not cleared by
+- **A key pressed straight after a mode key or Fn+R can be lost.** Every
+  change of mode or profile, and a re-pair, restarts the module. While
+  that restart is being arranged `main.c` acknowledges and drops further
+  commands (`mode_switch_pending`), and `pair_at_start` is not cleared by
   `BleHid_Idle()` or `BleHid_Unpair()`. Fn+R followed at once by Fn+W can
   leave the module advertising for pairing while the keyboard is in USB
-  mode. To recover: press the mode key again.
+  mode. To recover: press the key again. The recoveries above are
+  sequences of such keys: press one, let the module restart, then press
+  the next.
 
 If these are fixed: record the request before erasing, and do the erase on
 the arranged boot before the BLE stack starts; check both results and report
