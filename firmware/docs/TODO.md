@@ -408,14 +408,21 @@ profile (`TransportMode_PairAfresh()`, `BleHid_PairNeedsRestart()`,
   restarts the module, which then opens pairing on a bond block that may
   not be blank (`BleHid_Service()` calls `BleHid_Pair()` without looking),
   and the host reports an error. To recover: let the pairing window time
-  out or select another mode, then Fn+R. While that window is open Fn+R
-  does not retry the erase (next item).
+  out, or select USB or 2.4 GHz and then the profile again, then Fn+R.
+  While that window is open Fn+R does not retry the erase (next item).
+  A failed record write ends differently: `record_write()` erases the
+  one record and does not check the write that follows, so a failed
+  write leaves no valid record and the next boot erases all three bond
+  blocks, as in the item above. Recover as there: pair each profile
+  again, after removing the keyboard at any host that still lists it.
 - **Fn+R while a pairing window is open only restarts the window.**
   `BleHid_PairNeedsRestart()` returns 0 for `pairing && !HidDev_Connected()`
   without checking the bond block, so an attempt that failed after storage
   began is not cleaned up, and the next attempt in the same window can fail
-  the same way. To recover: let the window time out or select another mode,
-  then Fn+R.
+  the same way. To recover: let the window time out, or select USB or
+  2.4 GHz and then the profile again, then Fn+R. Selecting another
+  Bluetooth profile closes the window too, but Fn+R then pairs that
+  profile, not the one that failed.
 - **A mode key pressed straight after Fn+R can be lost.** While the restart
   is being arranged `main.c` acknowledges and drops further commands
   (`mode_switch_pending`), and `pair_at_start` is not cleared by
