@@ -389,6 +389,45 @@ copy (write the new one, then retire the old; boot from the newer valid
 one), which moves the DataFlash layout, and a status from `record_write()`
 so that a switch resets only once the selection is stored.
 
+### Known issues: pairing a Bluetooth profile again (module firmware `2960423`)
+
+Found by code review after the MK65MX Wireless factory image was built from
+`2960423`. None has been seen on hardware. Each is cured by pairing again, so
+they ship as known issues in that firmware and were not judged worth a new
+release validation. All four are on the path Fn+R takes on a Bluetooth
+profile (`TransportMode_PairAfresh()`, `BleHid_PairNeedsRestart()`,
+`BleHid_Pair()`). Pairing with the 2.4 GHz receiver does not use it.
+
+- **Power lost during a re-pair can wipe all three profiles.**
+  `TransportMode_PairAfresh()` erases the profile's bond block first and
+  records the request second, with `record_write()`, the single-copy write
+  described above. Power lost in that write leaves no valid record, and the
+  next boot erases all three bond blocks. To recover: pair each profile
+  again, after removing the keyboard at any host that still lists it.
+- **The erase and the record write are not checked.** A failed erase still
+  restarts the module, which then opens pairing on a bond block that may
+  not be blank (`BleHid_Service()` calls `BleHid_Pair()` without looking),
+  and the host reports an error. To recover: Fn+R again.
+- **Fn+R while a pairing window is open only restarts the window.**
+  `BleHid_PairNeedsRestart()` returns 0 for `pairing && !HidDev_Connected()`
+  without checking the bond block, so an attempt that failed after storage
+  began is not cleaned up, and the next attempt in the same window can fail
+  the same way. To recover: let the window time out or select another mode,
+  then Fn+R.
+- **A mode key pressed straight after Fn+R can be lost.** While the restart
+  is being arranged `main.c` acknowledges and drops further commands
+  (`mode_switch_pending`), and `pair_at_start` is not cleared by
+  `BleHid_Idle()` or `BleHid_Unpair()`. Fn+R followed at once by Fn+W can
+  leave the module advertising for pairing while the keyboard is in USB
+  mode. To recover: press the mode key again.
+
+If these are fixed: record the request before erasing, and do the erase on
+the arranged boot before the BLE stack starts; check both results and report
+a failure instead of restarting; restart when the open window's bond block
+is not blank; keep the latest mode selection across the restart, and clear
+`pair_at_start` in `BleHid_Idle()` and `BleHid_Unpair()`. The first item
+also needs the second record copy described above.
+
 ## 8. Bench recipes
 
 **Pairing order is load-bearing FOR THE LINK, and no longer for capability.**
